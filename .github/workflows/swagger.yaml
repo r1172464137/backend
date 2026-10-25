@@ -58,8 +58,16 @@ jobs:
       - name: Verify Swagger workflow contract
         run: python3 script/check-swagger-workflow-contract.py
 
+      # Keep verified documents available in forks without cross-repository credentials.
+      - name: Retain generated Swagger documents
+        uses: actions/upload-artifact@v4
+        with:
+          name: swagger-${{ github.sha }}
+          path: build/swagger/*.json
+          if-no-files-found: error
+
       - name: Checkout frontend repository
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        if: github.repository == 'perfect-panel/backend' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: perfect-panel/frontend
@@ -68,7 +76,7 @@ jobs:
           path: frontend
 
       - name: Copy Swagger documents
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        if: github.repository == 'perfect-panel/backend' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         run: |
           mkdir -p frontend/docs/public/swagger
           manifest="frontend/docs/public/swagger/.backend-generated"
@@ -83,7 +91,7 @@ jobs:
           done < "${manifest}"
 
       - name: Commit frontend Swagger changes
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        if: github.repository == 'perfect-panel/backend' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         working-directory: frontend
         run: |
           git add --all -- docs/public/swagger

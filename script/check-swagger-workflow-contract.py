@@ -25,12 +25,54 @@ def require(pattern: str, message: str, *, flags: int = 0) -> re.Match[str]:
     return cast(re.Match[str], match)
 
 
-# PRs and all long-lived branches should generate/verify, but only master syncs cross-repo.
+# PRs and all long-lived branches generate/verify, including forks.
 require(r"pull_request:[\s\S]*branches:\s*\[master, dev, main\]", "pull_request must run verification for master, dev, and main")
 require(r"push:[\s\S]*branches:\s*\[master, dev, main\]", "push must run verification for master, dev, and main")
 
-# The backend workflow must sync only from non-PR master runs.
-require(r"if:\s*github\.event_name\s*!=\s*'pull_request'\s*&&\s*github\.ref\s*==\s*'refs/heads/master'", "sync steps must be gated to non-PR master runs")
+# Check every relevant step, not just the first matching guard anywhere in YAML.
+# Keep this checker dependency-free, as it runs before any frontend checkout.
+steps = dict(re.findall(r"^      - name: ([^\n]+)\n([\s\S]*?)(?=^      - |\Z)", TEXT, re.MULTILINE))
+
+
+def step(name: str) -> str:
+    if name not in steps:
+        fail(f"missing workflow step: {name}")
+    return steps[name]
+
+
+def unconditional(name: str) -> str:
+    body = step(name)
+    if re.search(r"^        (?:if|continue-on-error):", body, re.MULTILINE):
+        fail(f"{name} must run unconditionally and fail on errors")
+    return body
+
+
+for name, command in {
+    "Generate Swagger documents": "./script/generate-swagger.sh",
+    "Verify generated document is committed": "git diff --exit-code -- ppanel.json",
+    "Verify Swagger covers Hertz routes": "go test ./internal/transport/http/routes -run '^TestSwagger' -count=1",
+    "Verify Swagger workflow contract": "python3 script/check-swagger-workflow-contract.py",
+}.items():
+    if f"run: {command}" not in unconditional(name):
+        fail(f"{name} must retain its verification command")
+
+artifact = unconditional("Retain generated Swagger documents")
+for pattern in (
+    r"uses:\s*actions/upload-artifact@",
+    r"path:\s*build/swagger/\*\.json\s*$",
+    r"if-no-files-found:\s*error\s*$",
+):
+    if not re.search(pattern, artifact, re.MULTILINE):
+        fail("verified Swagger JSONs must be retained as an artifact, including on forks")
+
+# Only the actual upstream repository's non-PR master context may sync upstream.
+# Every cross-repository step needs the complete guard: a guarded checkout alone
+# would still leave copy/commit/push commands running in a fork.
+sync_guard = "github.repository == 'perfect-panel/backend' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'"
+for name in ("Checkout frontend repository", "Copy Swagger documents", "Commit frontend Swagger changes"):
+    guard = re.search(r"^        if:\s*([^\n]+)$", step(name), re.MULTILINE)
+    if not guard or guard.group(1).strip() != sync_guard:
+        fail(f"{name} must be gated to actual upstream non-PR master runs")
 
 # The target repository is frontend main checked out under ./frontend.
 require(r"repository:\s*perfect-panel/frontend\b", "workflow must checkout perfect-panel/frontend")
