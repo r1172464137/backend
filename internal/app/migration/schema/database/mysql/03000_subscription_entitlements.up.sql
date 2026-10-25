@@ -15,7 +15,7 @@ CREATE TABLE subscription_entitlement (
     auto_renew BOOLEAN NOT NULL DEFAULT FALSE,
     grace_until DATETIME(3) NULL,
     revoked_at DATETIME(3) NULL,
-    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
 );
 CREATE TABLE subscription_period (
     id CHAR(64) PRIMARY KEY,
@@ -29,8 +29,8 @@ CREATE TABLE subscription_period (
     start_at DATETIME(3) NOT NULL,
     end_at DATETIME(3) NOT NULL,
     traffic_reset BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
 );
 CREATE INDEX idx_subscription_period_entitlement_id ON subscription_period (entitlement_id);
 CREATE INDEX idx_subscription_period_user_subscribe_id ON subscription_period (user_subscribe_id);
@@ -38,6 +38,6 @@ CREATE TABLE subscription_entitlement_revision (
     id VARCHAR(96) PRIMARY KEY,
     entitlement_id CHAR(64) NOT NULL,
     payload TEXT NOT NULL,
-    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
 );
 CREATE INDEX idx_entitlement_revision_entitlement_id ON subscription_entitlement_revision (entitlement_id);

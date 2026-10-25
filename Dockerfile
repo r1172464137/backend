@@ -1,5 +1,5 @@
 # Use a smaller base image for the build stage
-FROM golang:1.27.1-alpine AS builder
+FROM golang:1.27.3-alpine AS builder
 
 LABEL stage=gobuilder
 
@@ -8,7 +8,7 @@ ARG VERSION=unknown
 ARG CHANNEL=dev
 # UTC RFC 3339 (YYYY-MM-DDTHH:MM:SSZ); empty means the time of the build.
 ARG BUILD_TIME=
-ENV CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH}
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOTOOLCHAIN=local
 
 # Combine apk commands into one to reduce layer size
 RUN apk update --no-cache && apk add --no-cache tzdata ca-certificates

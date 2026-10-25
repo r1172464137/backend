@@ -225,7 +225,11 @@ func TestMultipartImage(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
-		defer r.MultipartForm.RemoveAll()
+		defer func() {
+			if err := r.MultipartForm.RemoveAll(); err != nil {
+				t.Errorf("remove multipart fixture files: %v", err)
+			}
+		}()
 		params := make(Params)
 		for key, values := range r.MultipartForm.Value {
 			params[key] = values[0]

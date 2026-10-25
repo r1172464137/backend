@@ -2,6 +2,7 @@ package devicesocket
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,6 +38,30 @@ func dialDevice(t *testing.T, srv *httptest.Server) *websocket.Conn {
 	}
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	// Upgrade writes HTTP 101 before AddDevice registers the socket. A
+	// second dial immediately after the handshake can therefore register
+	// first and then be replaced by the delayed first registration. Wait
+	// for the real read loop's reply, not a sleep or the online counter:
+	// reconnecting keeps that counter at one even before registration.
+	if err := conn.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("device readiness heartbeat: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, reply, err := conn.ReadMessage(); err != nil || string(reply) != heartbeatReply {
+		t.Fatalf("device readiness reply = %q, %v", reply, err)
+	}
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
 	}
 	return conn
 }
@@ -181,7 +206,12 @@ func TestReconnectReplacesPreviousSocket(t *testing.T) {
 		t.Fatalf("set read deadline: %v", err)
 	}
 	if _, _, err := oldConn.ReadMessage(); err == nil {
-		t.Error("previous socket should be closed after reconnect")
+		t.Fatal("previous socket should be closed after reconnect")
+	} else {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatalf("previous socket stayed open until the read deadline: %v", err)
+		}
 	}
 
 	if err := dm.SendToDevice(userID, testDeviceID, "hello"); err != nil {

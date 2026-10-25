@@ -15,51 +15,59 @@ import (
 	"github.com/perfect-panel/server/pkg/requestmeta"
 )
 
+// Both protocol peers assert the same durable checkout fence and server-owned
+// inputs, while replying with their distinct wire formats.
+func newEPayAPICheckoutFixture(t *testing.T, version string) (*portalFixture, context.Context, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	var f *portalFixture
+	var peer *billingtest.EPayV2
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		if got := f.h.ReloadOrder("api-order"); got.PaymentSession != order.PaymentSessionStarting || got.PaymentCurrency != "CNY" || got.PaymentAmount != 1000 {
+			t.Error("API called before the payment expectation and create fence were persisted")
+		}
+		if r.PostForm.Get("out_trade_no") != "api-order" || r.PostForm.Get("money") != "10.00" || r.PostForm.Get("clientip") != "127.0.0.10" {
+			t.Error("API request lost the server-owned order, amount or resolved client IP")
+		}
+		if version == "v1" {
+			if r.URL.Path != "/mapi.php" || r.PostForm.Get("device") != "jump" {
+				t.Error("unexpected V1 create")
+			}
+			_, _ = fmt.Fprint(w, `{"code":1,"trade_no":"trade-1","payurl":"https://pay.example/checkout"}`)
+		} else {
+			if r.URL.Path != "/api/pay/create" || r.PostForm.Get("method") != "jump" {
+				t.Error("unexpected V2 create")
+			}
+			peer.Reply(w, map[string]any{"code": 0, "trade_no": "trade-1", "pay_type": "qrcode", "pay_info": "weixin://payment"})
+		}
+	}
+	var config string
+	var client *http.Client
+	if version == "v1" {
+		server := httptest.NewTLSServer(http.HandlerFunc(handler))
+		t.Cleanup(server.Close)
+		client = server.Client()
+		config = fmt.Sprintf(`{"pid":"1001","url":%q,"key":"secret","type":"alipay","checkout_mode":"api"}`, server.URL)
+	} else {
+		peer = billingtest.NewEPayV2(t, handler)
+		client, config = peer.Server.Client(), peer.Config("api", "alipay")
+	}
+	f = newPortalFixture(t, func(d *Deps) { d.Gateways = gateway.NewRegistry(gateway.WithHTTPClient(client)) })
+	buyer, ctx := f.buyer(0, 0)
+	method := f.h.Payment("EPay", config)
+	f.pendingOrder("api-order", buyer.Id, 1000, method)
+	return f, ctx, &calls
+}
+
 func TestEPayAPICheckoutPersistsAndReplaysBothProtocols(t *testing.T) {
 	for _, version := range []string{"v1", "v2"} {
 		t.Run(version, func(t *testing.T) {
-			var calls atomic.Int32
-			var f *portalFixture
-			var peer *billingtest.EPayV2
-			handler := func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				if err := r.ParseForm(); err != nil {
-					t.Error(err)
-				}
-				if got := f.h.ReloadOrder("api-order"); got.PaymentSession != order.PaymentSessionStarting || got.PaymentCurrency != "CNY" || got.PaymentAmount != 1000 {
-					t.Error("API called before the payment expectation and create fence were persisted")
-				}
-				if r.PostForm.Get("out_trade_no") != "api-order" || r.PostForm.Get("money") != "10.00" || r.PostForm.Get("clientip") != "127.0.0.10" {
-					t.Error("API request lost the server-owned order, amount or resolved client IP")
-				}
-				if version == "v1" {
-					if r.URL.Path != "/mapi.php" || r.PostForm.Get("device") != "jump" {
-						t.Error("unexpected V1 create")
-					}
-					_, _ = fmt.Fprint(w, `{"code":1,"trade_no":"trade-1","payurl":"https://pay.example/checkout"}`)
-				} else {
-					if r.URL.Path != "/api/pay/create" || r.PostForm.Get("method") != "jump" {
-						t.Error("unexpected V2 create")
-					}
-					peer.Reply(w, map[string]any{"code": 0, "trade_no": "trade-1", "pay_type": "qrcode", "pay_info": "weixin://payment"})
-				}
-			}
-			var config string
-			var client *http.Client
-			if version == "v1" {
-				server := httptest.NewTLSServer(http.HandlerFunc(handler))
-				t.Cleanup(server.Close)
-				client = server.Client()
-				config = fmt.Sprintf(`{"pid":"1001","url":%q,"key":"secret","type":"alipay","checkout_mode":"api"}`, server.URL)
-			} else {
-				peer = billingtest.NewEPayV2(t, handler)
-				client, config = peer.Server.Client(), peer.Config("api", "alipay")
-			}
-			f = newPortalFixture(t, func(d *Deps) { d.Gateways = gateway.NewRegistry(gateway.WithHTTPClient(client)) })
-			buyer, ctx := f.buyer(0, 0)
+			f, ctx, calls := newEPayAPICheckoutFixture(t, version)
 			ctx = requestmeta.With(ctx, requestmeta.New("127.0.0.10", "test"))
-			method := f.h.Payment("EPay", config)
-			f.pendingOrder("api-order", buyer.Id, 1000, method)
 			first, err := f.checkout(ctx, "api-order", "")
 			if err != nil {
 				t.Fatal(err)

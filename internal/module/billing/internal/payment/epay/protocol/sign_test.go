@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -301,8 +302,8 @@ func TestResponseVerification(t *testing.T) {
 			data = testEnvelope(t, map[string]any{"code": 42, "msg": "declined"})
 		}
 		_, err := c.parseResponse(data)
-		apiErr, ok := err.(*APIError)
-		if !ok || apiErr.Verified != signed || apiErr.Code != 42 {
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Verified != signed || apiErr.Code != 42 {
 			t.Fatalf("unexpected API error: %v", err)
 		}
 	}

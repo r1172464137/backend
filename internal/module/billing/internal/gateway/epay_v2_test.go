@@ -119,19 +119,64 @@ func epayV2Query(status int) map[string]any {
 	return map[string]any{"code": 0, "trade_no": "trade-1", "out_trade_no": "order-1", "type": "alipay", "money": "10.00", "status": status}
 }
 
+type epayCancellationCase struct {
+	name          string
+	status        int
+	closeFails    bool
+	paidAfterRace bool
+	queryFails    bool
+	mismatch      bool
+	partialRefund bool
+	wantPaid      bool
+	wantError     bool
+	wantClose     int32
+}
+
+// The peer simulates remote trade state independently of local reconciliation.
+func newEPayCancellationPeer(t *testing.T, tc epayCancellationCase) (*billingtest.EPayV2, *atomic.Int32) {
+	t.Helper()
+	var queries, closes atomic.Int32
+	var peer *billingtest.EPayV2
+	peer = billingtest.NewEPayV2(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pay/query":
+			count := queries.Add(1)
+			if tc.queryFails {
+				http.NotFound(w, r)
+				return
+			}
+			status := tc.status
+			if count > 1 && tc.paidAfterRace {
+				status = 1
+			}
+			response := epayV2Query(status)
+			if tc.mismatch {
+				response["money"] = "9.00"
+			}
+			if tc.partialRefund {
+				response["refundmoney"] = "1.00"
+			}
+			peer.Reply(w, response)
+		case "/api/pay/close":
+			closes.Add(1)
+			if r.PostForm.Get("trade_no") != "trade-1" {
+				t.Error("close did not use the verified platform trade")
+			}
+			if tc.closeFails {
+				peer.Reply(w, map[string]any{"code": -1, "msg": "cannot close"})
+			} else {
+				peer.Reply(w, map[string]any{"code": 0})
+			}
+		default:
+			t.Error("V2 fell back to another protocol")
+			http.NotFound(w, r)
+		}
+	})
+	return peer, &closes
+}
+
 func TestEPayV2CancellationReconcilesBeforeClosing(t *testing.T) {
-	for _, tt := range []struct {
-		name          string
-		status        int
-		closeFails    bool
-		paidAfterRace bool
-		queryFails    bool
-		mismatch      bool
-		partialRefund bool
-		wantPaid      bool
-		wantError     bool
-		wantClose     int32
-	}{
+	for _, tt := range []epayCancellationCase{
 		{name: "paid", status: 1, wantPaid: true},
 		{name: "unpaid closes remotely", status: 0, wantClose: 1},
 		{name: "payment wins close race", status: 0, closeFails: true, paidAfterRace: true, wantPaid: true, wantClose: 1},
@@ -143,43 +188,7 @@ func TestEPayV2CancellationReconcilesBeforeClosing(t *testing.T) {
 		{name: "wrong amount never closes", status: 0, mismatch: true, wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			var queries, closes atomic.Int32
-			var peer *billingtest.EPayV2
-			peer = billingtest.NewEPayV2(t, func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/api/pay/query":
-					count := queries.Add(1)
-					if tt.queryFails {
-						http.NotFound(w, r)
-						return
-					}
-					status := tt.status
-					if count > 1 && tt.paidAfterRace {
-						status = 1
-					}
-					response := epayV2Query(status)
-					if tt.mismatch {
-						response["money"] = "9.00"
-					}
-					if tt.partialRefund {
-						response["refundmoney"] = "1.00"
-					}
-					peer.Reply(w, response)
-				case "/api/pay/close":
-					closes.Add(1)
-					if r.PostForm.Get("trade_no") != "trade-1" {
-						t.Error("close did not use the verified platform trade")
-					}
-					if tt.closeFails {
-						peer.Reply(w, map[string]any{"code": -1, "msg": "cannot close"})
-					} else {
-						peer.Reply(w, map[string]any{"code": 0})
-					}
-				default:
-					t.Error("V2 fell back to another protocol")
-					http.NotFound(w, r)
-				}
-			})
+			peer, closes := newEPayCancellationPeer(t, tt)
 			gw, err := NewRegistry(WithHTTPClient(peer.Server.Client())).Open(&payment.Payment{Platform: "EPay", Config: peer.Config("page", "")})
 			if err != nil {
 				t.Fatal(err)

@@ -94,7 +94,7 @@ func TestMigrateCopiesRowsIntoPostgres(t *testing.T) {
 		exec(mysqlDB, "INSERT INTO "+quoteMySQLIdent(table)+" (id, note, flag, amount, at) VALUES (?, ?, ?, ?, ?)", i+1, note, i%2, fmt.Sprintf("%d.%02d", i+10, i), stamp)
 	}
 
-	if err := Migrate(ctx, Config{MySQLDSN: mysqlDSN, PostgresDSN: postgresDSN, Schema: "public", Tables: table, BatchSize: 2}); err != nil {
+	if err := Migrate(ctx, Config{MySQLDSN: mysqlDSN, PostgresDSN: postgresDSN, Schema: "public", Tables: table, BatchSize: 2, Location: "Etc/UTC"}); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
