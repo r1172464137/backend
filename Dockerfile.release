@@ -1,0 +1,16 @@
+# Release CI compiles once with Go 1.27.3; this image copies those exact binaries.
+# Build context contains ONLY bin/ and a pristine etc/ppanel.yaml, never host data.
+FROM --platform=$BUILDPLATFORM alpine:3.23 AS runtime-files
+RUN apk add --no-cache ca-certificates tzdata
+
+FROM scratch
+ARG TARGETARCH
+COPY --from=runtime-files /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=runtime-files /usr/share/zoneinfo/Asia/Shanghai /usr/share/zoneinfo/Asia/Shanghai
+COPY bin/ppanel-server-linux-${TARGETARCH} /app/ppanel
+COPY etc/ppanel.yaml /app/etc/ppanel.yaml
+ENV TZ=Asia/Shanghai
+WORKDIR /app
+EXPOSE 8080
+ENTRYPOINT ["/app/ppanel"]
+CMD ["run", "--config", "etc/ppanel.yaml"]

@@ -6,14 +6,18 @@
 #### 二进制安装
 1.确定系统架构，并下载对应的二进制文件
 
-下载地址：`https://github.com/perfect-panel/server/releases`
+下载地址：`https://github.com/r1172464137/backend/releases`
+
+请先校验 SHA256SUMS；详见 [发布说明](../releases.md)。`v1.20.4` 是基于 v1.20.3 的回移版本。
 
 示例说明：系统：Linux amd64，用户：root，当前目录：/root
 
 - 下载二进制文件
 
 ```shell
-$ wget https://github.com/perfect-panel/server/releases/download/v1.0.0/ppanel-server-linux-amd64.tar.gz
+$ curl -fSLO https://github.com/r1172464137/backend/releases/download/v1.20.4/ppanel-server-linux-amd64.tar.gz
+$ curl -fSLO https://github.com/r1172464137/backend/releases/download/v1.20.4/SHA256SUMS
+$ sha256sum --check --ignore-missing SHA256SUMS
 ```
 
 - 解压二进制文件
@@ -43,7 +47,7 @@ Description=PPANEL Server
 After=network.target
 
 [Service]
-ExecStart=/root/ppanel-server-linux-amd64/ppanel-server
+ExecStart=/root/ppanel-server-linux-amd64/ppanel-server run --config etc/ppanel.yaml
 Restart=always
 User=root
 WorkingDirectory=/root/ppanel-server-linux-amd64

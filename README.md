@@ -45,6 +45,13 @@ proxy services. Built with Go, it emphasizes performance, security, and scalabil
 - **Node Management**: Monitor and control server nodes.
 - **API Framework**: Comprehensive RESTful APIs for frontend integration.
 
+## Fork releases
+
+Use [r1172464137/backend Releases](https://github.com/r1172464137/backend/releases)
+and `ghcr.io/r1172464137/ppanel-server:1.20.4` to retain this fork's REALITY xver
+feature. Release `v1.20.4` is the stable **v1.20.3-based backport**, not master;
+it introduces no database migrations. See [distribution and checksum instructions](docs/releases.md).
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -106,10 +113,10 @@ proxy services. Built with Go, it emphasizes performance, security, and scalabil
    docker-compose up -d
    ```
 
-4. **Pull from Docker Hub** (after CI/CD publishes):
+4. **Pull this fork's version-pinned GHCR image** (after CI/CD publishes):
    ```bash
-   docker pull ppanel/ppanel-server:latest
-   docker run --rm -p 8080:8080 ppanel/ppanel-server:latest
+   docker pull ghcr.io/r1172464137/ppanel-server:1.20.4
+   docker run --rm -p 8080:8080 ghcr.io/r1172464137/ppanel-server:1.20.4
    ```
 
 ## 📖 API Documentation

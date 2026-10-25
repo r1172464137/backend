@@ -1,167 +1,182 @@
 name: Release
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing vX.Y.Z tag to publish/rebuild
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+env:
+  GOTOOLCHAIN: local
 
 jobs:
-  # Runs after release-notes so the images are only published once the GitHub
-  # release exists, and in parallel with releases-matrix, which does not depend
-  # on the images.
-  build-docker:
+  prepare:
     runs-on: ubuntu-latest
-    needs: release-notes
-    env:
-      IMAGE_NAME: ppanel-server
-
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      channel: ${{ steps.meta.outputs.channel }}
+      build_time: ${{ steps.meta.outputs.build_time }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Extract version from git tag
-        id: version
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          # 1.16.0 -> 1.16, so operators can follow a minor series. Only the
-          # stable step uses it: on a prerelease tag this would yield a value
-          # like 1.16.0-beta, which is why the beta step leaves it out.
-          echo "MAJOR_MINOR=${VERSION%.*}" >> $GITHUB_ENV
-
-      - name: Get short SHA
-        id: sha
-        run: echo "GIT_SHA=${GITHUB_SHA::8}" >> $GITHUB_ENV
-
-      - name: Set BUILD_TIME env
-        run: echo BUILD_TIME=$(date --iso-8601=seconds) >> ${GITHUB_ENV}
-
-      # A tag fires this workflow no matter which line it sits on, so the floating
-      # tag has to be routed: :latest must keep pointing at the feature line even
-      # while the frozen LTS line publishes patches of its own. A commit reachable
-      # from master belongs to LTS; anything else is the feature line. Treating an
-      # ambiguous commit as LTS is the safe direction, since it leaves :latest be.
-      - name: Resolve release line
-        run: |
-          git fetch --quiet origin master
-          if git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
-            echo "FLOATING_TAG=lts" >> $GITHUB_ENV
-          else
-            echo "FLOATING_TAG=latest" >> $GITHUB_ENV
-          fi
-
-      - name: Build and push Docker image for main release
-        if: "!contains(github.ref_name, 'beta')"
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            CHANNEL=stable
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.FLOATING_TAG }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.MAJOR_MINOR }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ env.GIT_SHA }}
-
-      - name: Build and push Docker image for beta release
-        if: contains(github.ref_name, 'beta')
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            CHANNEL=beta
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:beta
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ env.GIT_SHA }}
-
-  # Creates the GitHub release the other two jobs publish into.
-  release-notes:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install GoReleaser
-        run: |
-          go install github.com/goreleaser/goreleaser/v2@latest
-
-      - name: Run GoReleaser
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          goreleaser check
-          goreleaser release --clean
-
-  releases-matrix:
-    name: Release ppanel-server binary
-    runs-on: ubuntu-latest
-    needs: release-notes  # wait for release-notes job to finish
-    strategy:
-      matrix:
-        # build and publish in parallel: linux/386, linux/amd64, linux/arm64,
-        # windows/386, windows/amd64, windows/arm64, darwin/amd64, darwin/arm64
-        goos: [ linux, windows, darwin ]
-        goarch: [ '386', amd64, arm64 ]
-        exclude:
-          - goarch: '386'
-            goos: darwin
-
-
-    steps:
-      - uses: actions/checkout@v2
-      - name: Extract version from git tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-
-      - name: Set BUILD_TIME env
-        run: echo BUILD_TIME=$(date --iso-8601=seconds) >> ${GITHUB_ENV}
-
-      - name: Resolve release channel
-        run: |
-          if [[ "${{ github.ref_name }}" == *beta* ]]; then
-            echo "CHANNEL=beta" >> $GITHUB_ENV
-          else
-            echo "CHANNEL=stable" >> $GITHUB_ENV
-          fi
-
       - uses: actions/checkout@v4
-      - uses: wangyoucao577/go-release-action@v1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          goos: ${{ matrix.goos }}
-          goarch: ${{ matrix.goarch }}
-          asset_name: "ppanel-server-${{ matrix.goos }}-${{ matrix.goarch }}"
-          goversion: "https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz"
-          project_path: "."
-          binary_name: "ppanel-server"
-          extra_files: LICENSE etc
-          ldflags: -s -w -buildid= -X "github.com/perfect-panel/server/internal/app/buildinfo.Version=${{env.VERSION}}" -X "github.com/perfect-panel/server/internal/app/buildinfo.BuildTime=${{env.BUILD_TIME}}" -X "github.com/perfect-panel/server/internal/app/buildinfo.Channel=${{env.CHANNEL}}"
+          ref: ${{ inputs.release_tag || github.ref_name }}
+      - id: meta
+        env:
+          TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          sha=$(git rev-parse HEAD)
+          test "$(git rev-list -n 1 "$TAG")" = "$sha"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          channel=stable
+          [[ $TAG != *-* ]] || channel=beta
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+      - name: Focused contract and installer checks
+        run: |
+          bash script/test-release.sh
+          go test -race -timeout 5m ./internal/module/network/entity/node ./internal/module/network/internal/adminserver ./internal/module/network/internal/serverapi ./internal/module/network/transport/http/server -run 'TestRealityXver|TestNormalizeProtocol|TestSanitizeProtocols|TestMergeMissingProtocol|TestCompatible' -count=1
+
+  binaries:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: ['386', amd64, arm64]
+        exclude:
+          - goos: darwin
+            goarch: '386'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+      - name: Build and package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+          BUILD_TIME: ${{ needs.prepare.outputs.build_time }}
+        run: bash script/release-build.sh '${{ matrix.goos }}' '${{ matrix.goarch }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error
+          path: |
+            build/release/*.tar.gz
+            build/release/*.zip
+            build/release/bin/*
+
+  publish:
+    needs: [prepare, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: build/release
+      - name: Publish archives, installer and SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: |
+          set -euo pipefail
+          cp script/install.sh build/release/install.sh
+          cd build/release
+          sha256sum -- *.tar.gz *.zip install.sh > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" ./*.tar.gz ./*.zip install.sh SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          prerelease=false
+          [[ $CHANNEL != beta ]] || prerelease=true
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease="$prerelease"
+
+  ghcr:
+    needs: [prepare, binaries, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-linux-*
+          merge-multiple: true
+          path: build/release
+      - name: Assemble minimal image context
+        run: |
+          mkdir -p build/release/context/bin build/release/context/etc
+          cp build/release/bin/ppanel-server-linux-{amd64,arm64} build/release/context/bin/
+          chmod 755 build/release/context/bin/*
+          touch build/release/context/etc/ppanel.yaml
+      - uses: docker/setup-buildx-action@v3
+      - name: Export both image filesystems for inspection (no service execution)
+        uses: docker/build-push-action@v6
+        with:
+          context: build/release/context
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          outputs: type=local,dest=build/release/rootfs
+      - name: Verify exact release binaries and CA certificates in each image
+        run: bash script/verify-release-rootfs.sh build/release/rootfs build/release/context/bin
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ppanel-server
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
+            type=raw,value=${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+      - name: Push verified multiarch image
+        uses: docker/build-push-action@v6
+        with:
+          context: build/release/context
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -44,6 +44,13 @@ PPanel 服务端是 PPanel 项目的后端组件，为代理服务提供强大�
 - **节点管理**：监控和控制服务器节点。
 - **API 框架**：提供全面的 RESTful API，供前端集成。
 
+## Fork 发布
+
+请使用 [r1172464137/backend Releases](https://github.com/r1172464137/backend/releases)
+及 `ghcr.io/r1172464137/ppanel-server:1.20.4` 保留本 fork 的 REALITY xver 功能。
+`v1.20.4` 是基于稳定 **v1.20.3** 的回移版本，不包含 master 的数据库迁移。
+校验与发布说明见 [docs/releases.md](docs/releases.md)。
+
 ## 🚀 快速开始
 
 ### 前提条件
@@ -105,10 +112,10 @@ PPanel 服务端是 PPanel 项目的后端组件，为代理服务提供强大�
    docker-compose up -d
    ```
 
-4. **从 Docker Hub 拉取**（CI/CD 发布后）：
+4. **从本 fork 的 GHCR 拉取固定版本**（CI/CD 发布后）：
    ```bash
-   docker pull ppanel/ppanel-server:latest
-   docker run --rm -p 8080:8080 ppanel/ppanel-server:latest
+   docker pull ghcr.io/r1172464137/ppanel-server:1.20.4
+   docker run --rm -p 8080:8080 ghcr.io/r1172464137/ppanel-server:1.20.4
    ```
 
 ## 📖 API 文档

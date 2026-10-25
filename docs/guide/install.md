@@ -8,14 +8,19 @@
 
 1. Determine your system architecture and download the corresponding binary file.
 
-Download URL: `https://github.com/perfect-panel/server/releases`
+Download URL: `https://github.com/r1172464137/backend/releases`
+
+Use the fork release and verify SHA256SUMS before installing. See
+[release instructions](../releases.md); `v1.20.4` is the v1.20.3-based backport.
 
 Example setup: OS: Linux amd64, User: root, Current directory: `/root`
 
 - Download the binary file:
 
 ```shell
-$ wget https://github.com/perfect-panel/server/releases/download/v1.0.0/ppanel-server-linux-amd64.tar.gz
+$ curl -fSLO https://github.com/r1172464137/backend/releases/download/v1.20.4/ppanel-server-linux-amd64.tar.gz
+$ curl -fSLO https://github.com/r1172464137/backend/releases/download/v1.20.4/SHA256SUMS
+$ sha256sum --check --ignore-missing SHA256SUMS
 ```
 
 - Extract the binary file:
@@ -33,7 +38,7 @@ $ cd ppanel-server-linux-amd64
 - Grant execution permissions to the binary:
 
 ```shell
-$ chmod +x ppanel
+$ chmod +x ppanel-server
 ```
 
 - Create a systemd service file:
@@ -45,7 +50,7 @@ Description=PPANEL Server
 After=network.target
 
 [Service]
-ExecStart=/root/ppanel-server-linux-amd64/ppanel
+ExecStart=/root/ppanel-server-linux-amd64/ppanel-server run --config etc/ppanel.yaml
 Restart=always
 User=root
 WorkingDirectory=/root/ppanel-server-linux-amd64

@@ -1,96 +1,85 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Fork release installer/updater. Existing etc/ and runtime data are never replaced.
+# PPANEL_RELEASE_REPO=owner/repo (default r1172464137/backend)
+# PPANEL_VERSION=vX.Y.Z (default latest). --download-only DIR verifies without installing.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then set -euo pipefail; fi
 
-# 检查是否以 root 用户运行
-if [ "$(id -u)" -ne 0 ]; then
-    echo "请以 root 用户运行此脚本"
-    exit 1
-fi
-
-# 系统检测，确定使用的包管理工具
-if [ -f /etc/debian_version ]; then
-    # Ubuntu / Debian 系统
-    PKG_MANAGER="apt-get"
-elif [ -f /etc/redhat-release ]; then
-    # CentOS 系统
-    PKG_MANAGER="yum"
-else
-    echo "不支持的系统"
-    exit 1
-fi
-
-# 检查 jq 是否已安装，若未安装则自动安装
-if ! command -v jq &> /dev/null; then
-    echo "jq 未安装，正在安装 jq ..."
-    if [ "$PKG_MANAGER" == "apt-get" ]; then
-        apt-get update && apt-get install -y jq
-    elif [ "$PKG_MANAGER" == "yum" ]; then
-        yum install -y jq
-    else
-        echo "无法安装 jq，未知的包管理器"
-        exit 1
+release_init() {
+    RELEASE_REPO=$1; RELEASE_TAG=${2:-}
+    [[ $RELEASE_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'invalid release repository' >&2; return 1; }
+    if [[ -z $RELEASE_TAG ]]; then
+        local effective
+        effective=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/$RELEASE_REPO/releases/latest") || return 1
+        [[ $effective == "https://github.com/$RELEASE_REPO/releases/tag/"* ]] || { echo 'latest release not found' >&2; return 1; }
+        RELEASE_TAG=${effective##*/}
     fi
-fi
+    [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'invalid release tag (expected vX.Y.Z)' >&2; return 1; }
+    RELEASE_BASE="https://github.com/$RELEASE_REPO/releases/download/$RELEASE_TAG"
+}
 
-# 获取最新的版本号
-VERSION=$(curl -s https://api.github.com/repos/perfect-panel/ppanel/releases/latest | jq -r .tag_name)
+release_fetch() {
+    local asset=$1 dir=$2
+    [[ $asset =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    mkdir -p "$dir" || return 1
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$dir/SHA256SUMS" "$RELEASE_BASE/SHA256SUMS" || return 1
+    # Exactly one entry, exactly this basename, and a SHA-256 digest. Never
+    # feed untrusted manifest paths to sha256sum, or accept an empty selection.
+    awk -v asset="$asset" '$2 == asset { n++; if (length($1) != 64 || $1 !~ /^[a-fA-F0-9]+$/ || NF != 2) bad=1; print $1 "  " asset } END { if (n != 1 || bad) exit 1 }' "$dir/SHA256SUMS" > "$dir/$asset.sha256" || { echo "invalid/missing checksum for $asset" >&2; return 1; }
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$dir/$asset" "$RELEASE_BASE/$asset" || return 1
+    (cd "$dir" && sha256sum -c "$asset.sha256") || { rm -f "$dir/$asset"; return 1; }
+}
 
-if [ "$VERSION" == "null" ]; then
-    echo "无法获取最新版本号，请检查网络或 GitHub API 状态"
-    exit 1
-fi
+# Sourcing exposes the actual production download helpers for nonprivileged tests.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 0; fi
 
-# 安装路径
-INSTALL_DIR="/opt/ppanel-server"
-SERVICE_NAME="ppanel"
-
-# 下载并解压二进制文件
-echo "开始下载 ppanel 二进制文件，版本：$VERSION ..."
-wget https://github.com/perfect-panel/ppanel/releases/download/$VERSION/ppanel-server-linux-amd64.tar.gz -O /tmp/ppanel-server-linux-amd64.tar.gz
-
-# 创建安装目录
-if [ ! -d "$INSTALL_DIR" ]; then
-    mkdir -p "$INSTALL_DIR"
-fi
-
-# 解压文件到安装目录
-echo "解压文件到 $INSTALL_DIR ..."
-tar -zxvf /tmp/ppanel-server-linux-amd64.tar.gz -C "$INSTALL_DIR" --strip-components=1
-
-# 给二进制文件赋予执行权限
-chmod +x "$INSTALL_DIR/ppanel-server"
-
-# 创建 systemd 服务文件
-echo "创建 systemd 服务文件 ..."
-cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+version=${PPANEL_VERSION:-}; download_dir=''
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --download-only) download_dir=${2:?directory required}; shift 2 ;;
+        --help|-h) echo 'PPANEL_RELEASE_REPO=owner/repo PPANEL_VERSION=vX.Y.Z bash install.sh [--download-only DIR]'; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+case $(uname -m) in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) echo 'unsupported architecture' >&2; exit 1 ;;
+esac
+release_init "${PPANEL_RELEASE_REPO:-r1172464137/backend}" "$version"
+asset="ppanel-server-linux-$arch.tar.gz"
+if [[ -n $download_dir ]]; then release_fetch "$asset" "$download_dir"; exit; fi
+[[ $EUID == 0 && $(uname -s) == Linux ]] || { echo 'Linux root installation required; use --download-only for verification' >&2; exit 1; }
+for cmd in curl tar sha256sum install systemctl; do command -v "$cmd" >/dev/null; done
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+release_fetch "$asset" "$tmp"
+# Archives have one predictable top-level directory, not a layout guessed by find|head.
+root=${asset%.tar.gz}
+tar -tzf "$tmp/$asset" > "$tmp/entries"
+awk -v root="$root" 'index($0, root "/") != 1 || $0 ~ /(^|\/)\.\.(\/|$)/ { bad=1 } END { exit bad }' "$tmp/entries"
+mkdir "$tmp/extract"
+tar -xzf "$tmp/$asset" --no-same-owner -C "$tmp/extract"
+[[ -f $tmp/extract/$root/ppanel-server ]]
+install_dir=/opt/ppanel-server
+mkdir -p "$install_dir/etc"
+if [[ -f $install_dir/ppanel-server ]]; then cp -p "$install_dir/ppanel-server" "$install_dir/ppanel-server.previous"; fi
+# Stop only after the replacement has been downloaded and verified.
+if systemctl is-active --quiet ppanel; then systemctl stop ppanel; fi
+install -m 0755 "$tmp/extract/$root/ppanel-server" "$install_dir/ppanel-server"
+if [[ ! -e $install_dir/etc/ppanel.yaml ]]; then install -m 0600 /dev/null "$install_dir/etc/ppanel.yaml"; fi
+cat > /etc/systemd/system/ppanel.service <<EOF
 [Unit]
-Description=PPANEL Server
-After=network.target
-
+Description=PPanel Server
+After=network-online.target
+Wants=network-online.target
 [Service]
-ExecStart=$INSTALL_DIR/ppanel-server
-Restart=always
-User=root
-WorkingDirectory=$INSTALL_DIR
-
+WorkingDirectory=$install_dir
+ExecStart=$install_dir/ppanel-server run --config etc/ppanel.yaml
+Restart=on-failure
+RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-
-# 重新加载 systemd 服务
-echo "重新加载 systemd 配置 ..."
 systemctl daemon-reload
-
-# 启动服务
-echo "启动 ppanel 服务 ..."
-systemctl start $SERVICE_NAME
-
-# 设置开机自启
-echo "设置服务开机自启 ..."
-systemctl enable $SERVICE_NAME
-
-# 输出服务状态
-echo "服务已启动，状态如下："
-systemctl status $SERVICE_NAME
-
-# 提示配置文件
-echo "请通过 http://服务器地址:8080/init 初始化系统配置"
+systemctl enable ppanel
+systemctl start ppanel
+printf 'Installed %s from %s. Configuration preserved in %s/etc/ppanel.yaml\n' "$RELEASE_TAG" "$RELEASE_REPO" "$install_dir"
