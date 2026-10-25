@@ -127,6 +127,8 @@ type Protocol struct {
 	RealityServerAddr string `json:"reality_server_addr,omitempty"`
 	// VLESS/VMess REALITY 专属字段：REALITY 握手转发目标端口。
 	RealityServerPort int `json:"reality_server_port,omitempty"`
+	// REALITY target-side PROXY protocol version: 0 (default), 1 or 2; independent of reception.
+	RealityXver int `json:"reality_xver,omitempty"`
 	// VLESS/VMess REALITY 服务端专属字段：服务端 X25519 私钥。
 	RealityPrivateKey string `json:"reality_private_key,omitempty"`
 	// VLESS/VMess REALITY 客户端信息字段：由私钥对应的公钥，主要用于订阅输出。

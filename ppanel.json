@@ -15178,6 +15178,10 @@
                     "description": "VLESS/VMess REALITY 专属字段：允许客户端使用的 short ID。",
                     "type": "string"
                 },
+                "reality_xver": {
+                    "description": "REALITY target-side PROXY protocol version: 0 (default), 1 or 2; independent of reception.",
+                    "type": "integer"
+                },
                 "reduce_rtt": {
                     "description": "TUIC 专属字段：启用 QUIC 0-RTT，以减少首次握手往返。",
                     "type": "boolean"

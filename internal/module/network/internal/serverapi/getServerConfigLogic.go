@@ -257,5 +257,10 @@ func (l *GetServerConfigLogic) compatible(config node.Protocol) map[string]inter
 	var resp map[string]interface{}
 	s, _ := json.Marshal(result)
 	_ = json.Unmarshal(s, &resp)
+	if config.Security == "reality" && config.RealityXver != 0 {
+		if security, ok := resp["security_config"].(map[string]interface{}); ok {
+			security["reality_xver"] = config.RealityXver
+		}
+	}
 	return resp
 }

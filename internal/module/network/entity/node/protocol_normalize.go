@@ -22,6 +22,9 @@ func NormalizeProtocolForStorage(protocol Protocol) (Protocol, error) {
 		}
 	}
 	normalizeProtocolNoopFields(&protocol)
+	if protocol.RealityXver < 0 || protocol.RealityXver > 2 {
+		return Protocol{}, fmt.Errorf("reality_xver must be 0, 1 or 2")
+	}
 	normalizeProtocolPluginName(&protocol)
 	if protocol.Enable {
 		if err := validateRuntimeProtocol(&protocol); err != nil {
@@ -452,7 +455,7 @@ func normalizeNowhereNetwork(raw string) (string, error) {
 func validateNowhereUnsupportedOptions(protocol Protocol) error {
 	if protocol.Mode != "" || protocol.AllowInsecure || protocol.Fingerprint != "" ||
 		protocol.RealityServerAddr != "" || protocol.RealityServerPort != 0 || protocol.RealityPrivateKey != "" ||
-		protocol.RealityPublicKey != "" || protocol.RealityShortId != "" || protocol.Transport != "" ||
+		protocol.RealityPublicKey != "" || protocol.RealityShortId != "" || protocol.RealityXver != 0 || protocol.Transport != "" ||
 		protocol.Host != "" || protocol.Path != "" || protocol.ServiceName != "" || protocol.Cipher != "" ||
 		protocol.ServerKey != "" || protocol.Plugin != "" || protocol.PluginOptions != nil || protocol.Flow != "" ||
 		protocol.UoT || protocol.UoTVersion != 0 || protocol.AcceptProxyProtocol || protocol.HopPorts != "" ||
@@ -993,6 +996,7 @@ func clearCertificate(protocol *Protocol) {
 func clearReality(protocol *Protocol) {
 	protocol.RealityServerAddr = ""
 	protocol.RealityServerPort = 0
+	protocol.RealityXver = 0
 	protocol.RealityPrivateKey = ""
 	protocol.RealityPublicKey = ""
 	protocol.RealityShortId = ""

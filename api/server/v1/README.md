@@ -26,6 +26,26 @@ Nowhere 节点使用 `GET /v2/server/{server_id}` 获取扁平协议配置，并
 `tcp` 或 `udp`，ALPN 默认且只能包含一个 `now/1`。用户列表中的 UUID 直接作为
 Nowhere shared key。旧版 `GET /v1/server/config` 不定义 Nowhere 配置结构。
 
+## REALITY target PROXY protocol
+
+Each server protocol can set numeric `reality_xver` to `0` (default, no target-side
+PROXY header), `1` (PROXY v1), or `2` (PROXY v2). It is independent of
+`accept_proxy_protocol`, which controls reception at the inbound listener.
+For example, keep reception enabled on port 20100 behind nginx and explicitly set
+`reality_xver: 2` for a REALITY target at `127.0.0.1:8443` that expects PROXY v2.
+Ordinary remote targets should keep `reality_xver: 0`.
+
+The value lives in the existing `protocols` JSON; no database migration is needed.
+Omitted values on new protocols default to zero. The existing field-preserving
+admin update contract preserves an omitted value on existing protocols; send
+explicit `0` to reset it. Zero may be omitted in JSON responses/storage and on the
+protobuf wire. Consumers must default an absent value to zero. Old consumers can
+ignore this additive field. Protobuf `ServerProtocol` uses `uint32 reality_xver = 66`.
+The legacy config endpoint exposes nonzero values in `security_config` for REALITY.
+Non-REALITY cleanup clears this field like the other REALITY settings (Nowhere
+retains its strict unsupported-option rejection). Invalid REALITY values are
+rejected, including on disabled configurations; JSON values must be integers.
+
 修改 schema 后，使用以下命令重新生成 Go 绑定：
 
 ```sh
