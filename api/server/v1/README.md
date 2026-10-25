@@ -26,6 +26,19 @@ Nowhere 节点使用 `GET /v2/server/{server_id}` 获取扁平协议配置，并
 `tcp` 或 `udp`，ALPN 默认且只能包含一个 `now/1`。用户列表中的 UUID 直接作为
 Nowhere shared key。旧版 `GET /v1/server/config` 不定义 Nowhere 配置结构。
 
+## REALITY target PROXY protocol
+
+Per-protocol numeric `reality_xver` selects 0 (default, disabled), 1 (PROXY v1),
+or 2 (PROXY v2) sent to the REALITY handshake target. It is independent of inbound
+`accept_proxy_protocol`. Existing remote targets remain at zero. Protobuf uses
+`uint32 reality_xver = 66`; JSON uses `protocols[].reality_xver` and may omit zero.
+The existing protocols JSON stores the value without a migration. New omissions
+default to zero; existing admin update omissions preserve the stored value,
+while explicit zero resets it. Non-REALITY cleanup clears it (Nowhere retains
+strict unsupported-option rejection). Invalid REALITY values are rejected even
+when disabled. JSON values must be integers. Legacy config exposes nonzero values
+in `config.security_config.reality_xver`.
+
 修改 schema 后，在仓库根目录运行 `make proto` 重新生成 Go 绑定。它要求
 protoc 版本与 CI 一致（`make -s print-PROTOC_VERSION`，即 libprotoc 3.21.12），
 并按 go.mod 中锁定的版本构建 protoc-gen-go，保证生成文件头与提交内容一致。

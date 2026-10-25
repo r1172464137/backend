@@ -15638,6 +15638,10 @@
                     "description": "VLESS/VMess REALITY only: the short ID clients may use.",
                     "type": "string"
                 },
+                "reality_xver": {
+                    "description": "REALITY target-side PROXY protocol version: 0 (default), 1 or 2; independent of reception.",
+                    "type": "integer"
+                },
                 "reduce_rtt": {
                     "description": "TUIC only: enables QUIC 0-RTT to save round trips on the first handshake.",
                     "type": "boolean"

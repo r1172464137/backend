@@ -1,239 +1,182 @@
 name: Release
 on:
   push:
-    tags:
-      - 'v*'
-
-# Read-only by default. The jobs that create the release and upload its assets
-# ask for contents: write themselves; the image job pushes to Docker Hub with
-# its own credentials and needs nothing more.
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing vX.Y.Z tag to publish/rebuild
+        required: true
+        type: string
 permissions:
   contents: read
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+env:
+  GOTOOLCHAIN: local
 
 jobs:
-  # Nothing is released unless the tagged commit passes the same checks as CI.
-  verify:
-    uses: ./.github/workflows/checks.yml
-
-  # Creates the GitHub release the other jobs publish into, and resolves the
-  # metadata every artifact of this release carries.
-  release-notes:
+  prepare:
     runs-on: ubuntu-latest
-    needs: verify
-    permissions:
-      contents: write
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
       channel: ${{ steps.meta.outputs.channel }}
       build_time: ${{ steps.meta.outputs.build_time }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-
-      # BUILD_TIME is resolved once so the binaries and the images agree; the
-      # format is the one script/ldflags.sh accepts.
-      - name: Resolve release metadata
-        id: meta
+          ref: ${{ inputs.release_tag || github.ref_name }}
+      - id: meta
+        env:
+          TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          if [[ "$GITHUB_REF_NAME" == *beta* ]]; then
-            echo "channel=beta" >> "$GITHUB_OUTPUT"
-          else
-            echo "channel=stable" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          sha=$(git rev-parse HEAD)
+          test "$(git rev-list -n 1 "$TAG")" = "$sha"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
           echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      # GoReleaser only writes the changelog and creates the release
-      # (.goreleaser.yaml skips builds); releases-matrix uploads the binaries.
-      - name: Install GoReleaser
-        run: go install "github.com/goreleaser/goreleaser/v2@$(make -s print-GORELEASER_VERSION)"
-
-      - name: Run GoReleaser
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          channel=stable
+          [[ $TAG != *-* ]] || channel=beta
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+      - name: Focused contract and installer checks
         run: |
-          goreleaser check
-          goreleaser release --clean
+          bash script/test-release.sh
+          go test -race -timeout 5m ./internal/module/network/entity/node ./internal/module/network/internal/adminserver ./internal/module/network/internal/serverapi ./internal/module/network/transport/http/server -run 'TestRealityXver|TestNormalizeProtocol|TestSanitizeProtocols|TestMergeMissingProtocol|TestCompatible' -count=1
 
-  # Runs after release-notes so the images are only published once the GitHub
-  # release exists, and in parallel with releases-matrix, which does not depend
-  # on the images.
-  build-docker:
+  binaries:
+    needs: prepare
     runs-on: ubuntu-latest
-    needs: release-notes
-    env:
-      IMAGE_NAME: ppanel-server
-      VERSION: ${{ needs.release-notes.outputs.version }}
-      BUILD_TIME: ${{ needs.release-notes.outputs.build_time }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      # 1.16.0 -> 1.16, so operators can follow a minor series. Only the
-      # stable step uses it: on a prerelease tag this would yield a value
-      # like 1.16.0-beta, which is why the beta step leaves it out.
-      - name: Resolve image tags
-        run: |
-          echo "MAJOR_MINOR=${VERSION%.*}" >> $GITHUB_ENV
-          echo "GIT_SHA=${GITHUB_SHA::8}" >> $GITHUB_ENV
-
-      # A tag fires this workflow no matter which line it sits on, so the floating
-      # tag has to be routed: :latest must keep pointing at the feature line even
-      # while the frozen LTS line publishes patches of its own. A commit reachable
-      # from master belongs to LTS; anything else is the feature line. Treating an
-      # ambiguous commit as LTS is the safe direction, since it leaves :latest be.
-      - name: Resolve release line
-        run: |
-          git fetch --quiet origin master
-          if git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
-            echo "FLOATING_TAG=lts" >> $GITHUB_ENV
-          else
-            echo "FLOATING_TAG=latest" >> $GITHUB_ENV
-          fi
-
-      - name: Build and push Docker image for main release
-        if: "!contains(github.ref_name, 'beta')"
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            CHANNEL=stable
-            BUILD_TIME=${{ env.BUILD_TIME }}
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.FLOATING_TAG }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.MAJOR_MINOR }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ env.GIT_SHA }}
-
-      - name: Build and push Docker image for beta release
-        if: contains(github.ref_name, 'beta')
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            CHANNEL=beta
-            BUILD_TIME=${{ env.BUILD_TIME }}
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:beta
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ env.GIT_SHA }}
-
-  # Builds every binary with the Makefile, so the release, the nightly and the
-  # image share one set of flags (CGO_ENABLED=0, -trimpath, script/ldflags.sh):
-  # a linux binary published here is static and starts on Alpine, scratch and
-  # old glibc alike. The asset names and the archive layout (a directory named
-  # after the asset holding ppanel-server, LICENSE and etc/) are the ones the
-  # releases always had; each archive is published with its .sha256, and the
-  # checksums job joins them into SHA256SUMS.
-  releases-matrix:
-    name: Release ppanel-server binary
-    runs-on: ubuntu-latest
-    needs: release-notes
-    permissions:
-      contents: write
     strategy:
+      fail-fast: false
       matrix:
-        # build and publish in parallel: linux/386, linux/amd64, linux/arm64,
-        # windows/386, windows/amd64, windows/arm64, darwin/amd64, darwin/arm64
-        goos: [ linux, windows, darwin ]
-        goarch: [ '386', amd64, arm64 ]
+        goos: [linux, windows, darwin]
+        goarch: ['386', amd64, arm64]
         exclude:
-          - goarch: '386'
-            goos: darwin
-    env:
-      VERSION: ${{ needs.release-notes.outputs.version }}
-      CHANNEL: ${{ needs.release-notes.outputs.channel }}
-      BUILD_TIME: ${{ needs.release-notes.outputs.build_time }}
-      ASSET: ppanel-server-${{ matrix.goos }}-${{ matrix.goarch }}
-
+          - goos: darwin
+            goarch: '386'
     steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/checkout@v4
         with:
-          go-version-file: go.mod
-          cache: true
-
-      # The Makefile target is named after the platform and writes
-      # bin/ppanel-server-<goos>-<goarch>[.exe]; the metadata comes from
-      # release-notes so every artifact of the release agrees.
-      - name: Build
-        run: make "${{ matrix.goos }}-${{ matrix.goarch }}" VERSION="$VERSION" CHANNEL="$CHANNEL" BUILD_TIME="$BUILD_TIME"
-
-      - name: Package
-        run: |
-          set -euo pipefail
-          mkdir -p "dist/$ASSET"
-          cp LICENSE "dist/$ASSET/"
-          cp -R etc "dist/$ASSET/etc"
-          if [ "${{ matrix.goos }}" = windows ]; then
-            cp "bin/$ASSET.exe" "dist/$ASSET/ppanel-server.exe"
-            archive="$ASSET.zip"
-            (cd dist && zip -qr "$archive" "$ASSET")
-          else
-            install -m 0755 "bin/$ASSET" "dist/$ASSET/ppanel-server"
-            archive="$ASSET.tar.gz"
-            (cd dist && tar -czf "$archive" "$ASSET")
-          fi
-          (cd dist && sha256sum "$archive" > "$archive.sha256" && cat "$archive.sha256")
-          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
-
-      - name: Upload release assets
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+      - name: Build and package
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$GITHUB_REF_NAME" "dist/$ARCHIVE" "dist/$ARCHIVE.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+          BUILD_TIME: ${{ needs.prepare.outputs.build_time }}
+        run: bash script/release-build.sh '${{ matrix.goos }}' '${{ matrix.goarch }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error
+          path: |
+            build/release/*.tar.gz
+            build/release/*.zip
+            build/release/bin/*
 
-  # One SHA256SUMS over every archive, for `sha256sum -c SHA256SUMS`. Each
-  # matrix job publishes its own .sha256 (already in sha256sum's format), and
-  # this job joins them once all of them have uploaded.
-  checksums:
-    name: Publish SHA256SUMS
+  publish:
+    needs: [prepare, binaries]
     runs-on: ubuntu-latest
-    needs: releases-matrix
     permissions:
       contents: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Collect the per-asset checksums
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: build/release
+      - name: Publish archives, installer and SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
         run: |
           set -euo pipefail
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.sha256' --dir sums
-          cat sums/*.sha256 | LC_ALL=C sort -k2 > SHA256SUMS
-          test -s SHA256SUMS
-          cat SHA256SUMS
+          cp script/install.sh build/release/install.sh
+          cd build/release
+          sha256sum -- *.tar.gz *.zip install.sh > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" ./*.tar.gz ./*.zip install.sh SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          prerelease=false
+          [[ $CHANNEL != beta ]] || prerelease=true
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease="$prerelease"
 
-      - name: Upload SHA256SUMS
-        run: gh release upload "$GITHUB_REF_NAME" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+  ghcr:
+    needs: [prepare, binaries, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-linux-*
+          merge-multiple: true
+          path: build/release
+      - name: Assemble minimal image context
+        run: |
+          mkdir -p build/release/context/bin build/release/context/etc
+          cp build/release/bin/ppanel-server-linux-{amd64,arm64} build/release/context/bin/
+          chmod 755 build/release/context/bin/*
+          touch build/release/context/etc/ppanel.yaml
+      - uses: docker/setup-buildx-action@v3
+      - name: Export both image filesystems for inspection (no service execution)
+        uses: docker/build-push-action@v6
+        with:
+          context: build/release/context
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          outputs: type=local,dest=build/release/rootfs
+      - name: Verify exact release binaries and CA certificates in each image
+        run: bash script/verify-release-rootfs.sh build/release/rootfs build/release/context/bin
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ppanel-server
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
+            type=raw,value=${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+      - name: Push verified multiarch image
+        uses: docker/build-push-action@v6
+        with:
+          context: build/release/context
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -38,7 +38,7 @@ func TestProtocolFormsShareTheirJSONNames(t *testing.T) {
 func TestMappingKeepsEverySharedField(t *testing.T) {
 	stored := node.Protocol{
 		Type: "vless", Port: 443, Enable: true, Security: "reality", SNI: "example.com", ALPN: []string{"h2"},
-		RealityPrivateKey: "private", RealityShortId: "abcd", Transport: "grpc", ServiceName: "svc", Flow: "xtls-rprx-vision",
+		RealityPrivateKey: "private", RealityShortId: "abcd", RealityXver: 2, Transport: "grpc", ServiceName: "svc", Flow: "xtls-rprx-vision",
 		PluginOptions: map[string]any{"mode": "tls"}, Ratio: 1.5, CertMode: "dns", CertDNSEnv: "TOKEN=x", CertPinSHA256: "pin",
 		EncryptionTicket: "ticket", UoTVersion: 2,
 	}

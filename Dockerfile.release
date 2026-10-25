@@ -1,0 +1,23 @@
+# Runner-built Go 1.27.3 release binaries, preserving master's rootless runtime.
+# The context contains only bin/ and an empty etc/ppanel.yaml, never credentials.
+FROM --platform=$BUILDPLATFORM alpine:3.23 AS runtime-files
+RUN apk add --no-cache ca-certificates tzdata \
+    && mkdir -p /out/etc /out/logs /out/cache \
+    && touch /out/etc/ppanel.yaml
+
+FROM scratch
+ARG TARGETARCH
+COPY --from=runtime-files /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=runtime-files /usr/share/zoneinfo/Asia/Shanghai /usr/share/zoneinfo/Asia/Shanghai
+COPY bin/ppanel-server-linux-${TARGETARCH} /app/ppanel
+COPY --from=runtime-files --chown=65532:65532 /out/etc /app/etc
+COPY --from=runtime-files --chown=65532:65532 /out/logs /app/logs
+COPY --from=runtime-files --chown=65532:65532 /out/cache /app/cache
+ENV TZ=Asia/Shanghai
+WORKDIR /app
+USER 65532:65532
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/app/ppanel", "healthcheck"]
+ENTRYPOINT ["/app/ppanel"]
+CMD ["run", "--config", "etc/ppanel.yaml"]

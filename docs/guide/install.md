@@ -17,7 +17,7 @@ arm64), verifies it against the release's `SHA256SUMS`, installs it to `/opt/ppa
 system user and a systemd unit, and starts the service:
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/perfect-panel/backend/master/script/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/r1172464137/backend/master/script/install.sh -o install.sh
 less install.sh    # read what you are about to run as root
 sudo bash install.sh
 ```
@@ -31,8 +31,11 @@ unit loads.
 
 ### 1. Download and verify
 
-Releases are published at <https://github.com/perfect-panel/backend/releases>. Each release carries one archive
-per platform, a `.sha256` file next to each archive and one `SHA256SUMS` over all of them:
+Fork releases are published at <https://github.com/r1172464137/backend/releases>.
+Use `PPANEL_RELEASE_REPO=owner/repo` only for an explicit repository override.
+See [release-line and GHCR instructions](../releases.md): the v1.20.4 production
+backport is NOT this master source line. Each release carries one archive per
+platform and one `SHA256SUMS` over all archives and the installer:
 
 | Platform | Assets |
 |---|---|
@@ -45,7 +48,7 @@ Alpine included. Example for Linux amd64 and release `v1.2.3`:
 
 ```shell
 VERSION=v1.2.3
-BASE="https://github.com/perfect-panel/backend/releases/download/$VERSION"
+BASE="https://github.com/r1172464137/backend/releases/download/$VERSION"
 curl -fsSLO "$BASE/ppanel-server-linux-amd64.tar.gz"
 curl -fsSLO "$BASE/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS

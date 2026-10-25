@@ -132,6 +132,8 @@ type Protocol struct {
 	RealityServerAddr string `json:"reality_server_addr,omitempty"`
 	// VLESS/VMess REALITY only: the port the REALITY handshake is forwarded to.
 	RealityServerPort int `json:"reality_server_port,omitempty"`
+	// REALITY target-side PROXY protocol version: 0 (default), 1 or 2; independent of reception.
+	RealityXver int `json:"reality_xver,omitempty"`
 	// VLESS/VMess REALITY, server side only: the server's X25519 private key.
 	RealityPrivateKey string `json:"reality_private_key,omitempty"`
 	// VLESS/VMess REALITY client information: the public key of the private key, mainly for the subscription output.

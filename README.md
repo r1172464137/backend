@@ -45,6 +45,13 @@ proxy services. Built with Go, it emphasizes performance, security, and scalabil
 - **Node Management**: Monitor and control server nodes.
 - **API Framework**: Comprehensive RESTful APIs for frontend integration.
 
+## Fork distribution / release lines
+
+This master worktree forward-ports REALITY `reality_xver` (protobuf tag 66).
+Production `v1.20.4` instead comes from the stable v1.20.3 backport, with no new
+migrations; do not substitute master for that deployment. Fork assets and images
+are documented in [docs/releases.md](docs/releases.md).
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -152,10 +159,11 @@ one of two ways:
    `stop_grace_period` gives the graceful shutdown (HTTP first, then the scheduler, the task worker and the trace
    exporter, up to about 18 s) the time it needs; with plain `docker run`, stop with `docker stop --time 20`.
 
-4. **Pull a published image**: `ppanel/ppanel-server:lts` follows the LTS line (`master`), `:latest` the feature
-   line, `:beta` the prereleases, and `ghcr.io/perfect-panel/ppanel-server:nightly` is the nightly build of `dev`:
+4. **Pull a version-pinned fork image**, choosing a release matching this source line.
+   Do not use an upstream image to retain the fork feature. `v1.20.4` is the stable
+   legacy-runtime backport, not the master/rootless runtime described above:
    ```bash
-   docker pull ppanel/ppanel-server:lts
+   docker pull "ghcr.io/r1172464137/ppanel-server:${VERSION:?set the matching release version}"
    ```
 
 The server answers `GET /healthz` (liveness) and `GET /readyz` (readiness: database and Redis reachable) for

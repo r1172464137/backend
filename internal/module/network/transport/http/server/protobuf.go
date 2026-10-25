@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	serverv1 "github.com/perfect-panel/server/api/server/v1"
@@ -201,6 +202,9 @@ func outboundToProtobuf(outbound dto.NodeOutbound) (*serverv1.Outbound, error) {
 }
 
 func serverProtocolToProtobuf(protocol dto.Protocol) (*serverv1.ServerProtocol, error) {
+	if protocol.RealityXver < 0 || protocol.RealityXver > 2 {
+		return nil, fmt.Errorf("reality_xver must be 0, 1 or 2")
+	}
 	pluginOptions, err := valueToProtobufValue(protocol.PluginOptions)
 	if err != nil {
 		return nil, err
@@ -219,6 +223,7 @@ func serverProtocolToProtobuf(protocol dto.Protocol) (*serverv1.ServerProtocol, 
 		Fingerprint:             protocol.Fingerprint,
 		RealityServerAddr:       protocol.RealityServerAddr,
 		RealityServerPort:       int64(protocol.RealityServerPort),
+		RealityXver:             uint32(protocol.RealityXver),
 		RealityPrivateKey:       protocol.RealityPrivateKey,
 		RealityPublicKey:        protocol.RealityPublicKey,
 		RealityShortId:          protocol.RealityShortId,

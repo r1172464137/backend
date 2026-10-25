@@ -15,7 +15,7 @@
 `SHA256SUMS` 校验，安装到 `/opt/ppanel-server`，创建系统用户 `ppanel` 和 systemd 服务，并启动服务：
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/perfect-panel/backend/master/script/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/r1172464137/backend/master/script/install.sh -o install.sh
 less install.sh    # 以 root 运行之前先阅读脚本内容
 sudo bash install.sh
 ```
@@ -27,8 +27,9 @@ sudo bash install.sh
 
 ### 1. 下载并校验
 
-发布地址：<https://github.com/perfect-panel/backend/releases>。每个发布包含每种平台一个压缩包、每个压缩包旁的 `.sha256`
-文件，以及覆盖全部压缩包的 `SHA256SUMS`：
+Fork 发布地址：<https://github.com/r1172464137/backend/releases>。
+仓库可通过 `PPANEL_RELEASE_REPO=owner/repo` 显式覆盖。请参阅 [发布分支与 GHCR 说明](../releases.md)：
+v1.20.4 生产回移版本不使用本 master 源码。每个发布包含每种平台一个压缩包，以及覆盖压缩包和安装脚本的 `SHA256SUMS`：
 
 | 平台 | 文件 |
 |---|---|
@@ -40,7 +41,7 @@ sudo bash install.sh
 
 ```shell
 VERSION=v1.2.3
-BASE="https://github.com/perfect-panel/backend/releases/download/$VERSION"
+BASE="https://github.com/r1172464137/backend/releases/download/$VERSION"
 curl -fsSLO "$BASE/ppanel-server-linux-amd64.tar.gz"
 curl -fsSLO "$BASE/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS

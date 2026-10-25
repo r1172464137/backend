@@ -158,6 +158,11 @@ func compatible(config node.Protocol) map[string]any {
 	var resp map[string]any
 	s, _ := json.Marshal(result)
 	_ = json.Unmarshal(s, &resp)
+	if config.Security == "reality" && config.RealityXver != 0 {
+		if security, ok := resp["security_config"].(map[string]any); ok {
+			security["reality_xver"] = config.RealityXver
+		}
+	}
 	return resp
 }
 

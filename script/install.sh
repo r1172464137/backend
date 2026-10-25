@@ -5,19 +5,45 @@
 #   sudo bash install.sh
 #
 # Downloads the latest release archive for this machine (linux amd64 or
-# arm64) from github.com/perfect-panel/backend, verifies it against the
+# arm64) from github.com/r1172464137/backend, verifies it against the
 # release's SHA256SUMS, installs it to /opt/ppanel-server owned by the system
 # user "ppanel", writes the systemd unit "ppanel.service" and starts it.
 # Running it again upgrades the binary and keeps etc/.
 #
 # Environment / 环境变量:
+#   PPANEL_RELEASE_REPO owner/repo (default: r1172464137/backend)
 #   PPANEL_VERSION   release tag to install, e.g. v1.2.3 (default: latest)
 #   PPANEL_DB        with PPANEL_REDIS: written to etc/ppanel.env so the first
 #   PPANEL_REDIS     start completes the configuration without the wizard
 #                    (formats: docs/guide/config.md, section 4)
-set -euo pipefail
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then set -euo pipefail; fi
 
-REPO="perfect-panel/backend"
+release_init() {
+    RELEASE_REPO=$1; RELEASE_TAG=${2:-}
+    [[ $RELEASE_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'invalid release repository' >&2; return 1; }
+    if [[ -z $RELEASE_TAG ]]; then
+        local effective
+        effective=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/$RELEASE_REPO/releases/latest") || return 1
+        [[ $effective == "https://github.com/$RELEASE_REPO/releases/tag/"* ]] || { echo 'latest release not found' >&2; return 1; }
+        RELEASE_TAG=${effective##*/}
+    fi
+    [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'invalid release tag (expected vX.Y.Z)' >&2; return 1; }
+    RELEASE_BASE="https://github.com/$RELEASE_REPO/releases/download/$RELEASE_TAG"
+}
+
+release_fetch() {
+    local asset=$1 dir=$2
+    [[ $asset =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    mkdir -p "$dir" || return 1
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$dir/SHA256SUMS" "$RELEASE_BASE/SHA256SUMS" || return 1
+    awk -v asset="$asset" '$2 == asset { n++; if (length($1) != 64 || $1 !~ /^[a-fA-F0-9]+$/ || NF != 2) bad=1; print $1 "  " asset } END { if (n != 1 || bad) exit 1 }' "$dir/SHA256SUMS" > "$dir/$asset.sha256" || { echo "invalid/missing checksum for $asset" >&2; return 1; }
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$dir/$asset" "$RELEASE_BASE/$asset" || return 1
+    (cd "$dir" && sha256sum -c "$asset.sha256") || { rm -f "$dir/$asset"; return 1; }
+}
+
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 0; fi
+
+REPO="${PPANEL_RELEASE_REPO:-r1172464137/backend}"
 INSTALL_DIR="/opt/ppanel-server"
 SERVICE_NAME="ppanel"
 SERVICE_USER="ppanel"
@@ -44,32 +70,25 @@ esac
 
 # --- resolve the release / 解析版本 -----------------------------------------
 
-if [ -z "$VERSION" ]; then
-	# The "latest" page redirects to /releases/tag/<tag>; no API token or jq needed.
-	VERSION="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" | sed -n 's#.*/releases/tag/##p')"
-	[ -n "$VERSION" ] || die "could not determine the latest release; set PPANEL_VERSION=vX.Y.Z / 无法获取最新版本号，请检查网络或设置 PPANEL_VERSION"
-fi
+release_init "$REPO" "$VERSION"
+VERSION=$RELEASE_TAG
 
 ASSET="ppanel-server-linux-${ARCH}.tar.gz"
-BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # --- download and verify / 下载并校验 ---------------------------------------
 
 msg "Downloading ${ASSET} ${VERSION} / 正在下载 ${ASSET} ${VERSION} ..."
-curl -fsSL --retry 3 -o "${TMP}/${ASSET}" "${BASE_URL}/${ASSET}" || die "download failed: ${BASE_URL}/${ASSET} / 下载失败"
-
-msg "Verifying the checksum / 校验文件完整性 ..."
-curl -fsSL --retry 3 -o "${TMP}/SHA256SUMS" "${BASE_URL}/SHA256SUMS" || die "this release has no SHA256SUMS; refusing to install an unverified binary. Verify it by hand or pick a newer release / 该版本没有 SHA256SUMS，拒绝安装未校验的二进制"
-awk -v asset="$ASSET" '$2 == asset' "${TMP}/SHA256SUMS" > "${TMP}/${ASSET}.sha256"
-[ -s "${TMP}/${ASSET}.sha256" ] || die "SHA256SUMS has no entry for ${ASSET} / SHA256SUMS 中没有 ${ASSET}"
-(cd "$TMP" && sha256sum -c "${ASSET}.sha256") || die "checksum mismatch: the download is corrupt or tampered with / 校验失败，下载的文件已损坏或被篡改"
+release_fetch "$ASSET" "$TMP"
 
 mkdir -p "${TMP}/extract"
-tar -xzf "${TMP}/${ASSET}" -C "${TMP}/extract"
-BINARY="$(find "${TMP}/extract" -type f -name ppanel-server | head -n 1)"
-[ -n "$BINARY" ] || die "ppanel-server not found in ${ASSET} / 压缩包中没有 ppanel-server"
+ROOT=${ASSET%.tar.gz}
+tar -tzf "${TMP}/${ASSET}" > "${TMP}/entries"
+awk -v root="$ROOT" 'index($0, root "/") != 1 || $0 ~ /(^|\/)\.\.(\/|$)/ { bad=1 } END { exit bad }' "${TMP}/entries"
+tar -xzf "${TMP}/${ASSET}" --no-same-owner -C "${TMP}/extract"
+BINARY="${TMP}/extract/${ROOT}/ppanel-server"
+[ -f "$BINARY" ] && [ ! -L "$BINARY" ] || die "ppanel-server not found in ${ASSET} / 压缩包中没有 ppanel-server"
 
 # --- system user and files / 系统用户与文件 ---------------------------------
 
@@ -87,8 +106,8 @@ fi
 msg "Installing to ${INSTALL_DIR} / 安装到 ${INSTALL_DIR} ..."
 mkdir -p "${INSTALL_DIR}/etc"
 install -m 0755 -o root -g root "$BINARY" "${INSTALL_DIR}/ppanel-server"
-LICENSE_FILE="$(find "${TMP}/extract" -type f -name LICENSE | head -n 1)"
-[ -z "$LICENSE_FILE" ] || install -m 0644 -o root -g root "$LICENSE_FILE" "${INSTALL_DIR}/LICENSE"
+LICENSE_FILE="${TMP}/extract/${ROOT}/LICENSE"
+[ ! -f "$LICENSE_FILE" ] || install -m 0644 -o root -g root "$LICENSE_FILE" "${INSTALL_DIR}/LICENSE"
 # The configuration holds the JWT secret and the database credentials once
 # it is completed: owner-only, and never overwritten by an upgrade.
 if [ ! -e "${INSTALL_DIR}/etc/ppanel.yaml" ]; then
