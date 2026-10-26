@@ -1,6 +1,8 @@
 package devicesocket
 
 import (
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,9 +28,37 @@ func deviceTestServer(t *testing.T, dm *DeviceManager, userID int64, maxDevices 
 func dialDevice(t *testing.T, srv *httptest.Server, deviceID string) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "?device=" + deviceID
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	// Upgrade writes HTTP 101 before AddDevice registers the socket. A
+	// second dial immediately after the handshake can therefore register
+	// first and then be replaced by the delayed first registration. Wait
+	// for the real read loop's reply, not a sleep or the online counter:
+	// stable also settles the replacement's counter after closing the old
+	// socket, but before starting the new socket's read loop.
+	if err := conn.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("device readiness heartbeat: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, reply, err := conn.ReadMessage(); err != nil || string(reply) != "ping" {
+		t.Fatalf("device readiness reply = %q, %v", reply, err)
+	}
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
 	}
 	return conn
 }
@@ -164,7 +194,12 @@ func TestReconnectReplacesPreviousSocket(t *testing.T) {
 		t.Fatalf("set read deadline: %v", err)
 	}
 	if _, _, err := oldConn.ReadMessage(); err == nil {
-		t.Error("previous socket should be closed after reconnect")
+		t.Fatal("previous socket should be closed after reconnect")
+	} else {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatalf("previous socket stayed open until the read deadline: %v", err)
+		}
 	}
 
 	if err := dm.SendToDevice(userID, "dev1", "hello"); err != nil {
