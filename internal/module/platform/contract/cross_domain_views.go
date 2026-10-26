@@ -1,5 +1,7 @@
 package dto
 
+import "encoding/json"
+
 // Cross-domain view types are module-owned snapshots. They deliberately
 // duplicate JSON shapes instead of coupling one module's API to another.
 type AuthConfig struct {
@@ -87,14 +89,57 @@ type MobileAuthenticateConfig struct {
 }
 
 type NodeConfig struct {
-	NodeSecret             string                         `json:"node_secret"`
-	NodePullInterval       int64                          `json:"node_pull_interval"`
-	NodePushInterval       int64                          `json:"node_push_interval"`
-	TrafficReportThreshold int64                          `json:"traffic_report_threshold"`
-	IPStrategy             string                         `json:"ip_strategy"`
-	DNS                    []PlatformNodeDNSSnapshot      `json:"dns"`
-	Block                  []string                       `json:"block"`
-	Outbound               []PlatformNodeOutboundSnapshot `json:"outbound"`
+	NodeSecret             string                    `json:"node_secret"`
+	NodePullInterval       int64                     `json:"node_pull_interval"`
+	NodePushInterval       int64                     `json:"node_push_interval"`
+	TrafficReportThreshold int64                     `json:"traffic_report_threshold"`
+	IPStrategy             string                    `json:"ip_strategy"`
+	DNS                    []PlatformNodeDNSSnapshot `json:"dns"`
+	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	Block []string `json:"block"`
+	// IP rules: strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	BlockIPs []string `json:"block_ips"`
+	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	BlockProtocols []string `json:"block_protocols"`
+	// Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.
+	Outbound          []PlatformNodeOutboundSnapshot `json:"outbound"`
+	RequestFields     map[string]struct{}            `json:"-" swaggerignore:"true"`
+	OutboundFieldSets []map[string]struct{}          `json:"-" swaggerignore:"true"`
+}
+
+// UnmarshalJSON records field presence so an old admin client that does not
+// know the additive route-rule fields cannot erase them during a PUT.
+func (n *NodeConfig) UnmarshalJSON(data []byte) error {
+	type alias NodeConfig
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*n = NodeConfig(decoded)
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	n.RequestFields = make(map[string]struct{}, len(fields))
+	for field := range fields {
+		n.RequestFields[field] = struct{}{}
+	}
+	if raw, ok := fields["outbound"]; ok && string(raw) != "null" {
+		var outbound []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &outbound); err != nil {
+			return err
+		}
+		n.OutboundFieldSets = make([]map[string]struct{}, len(outbound))
+		for index, item := range outbound {
+			set := make(map[string]struct{}, len(item))
+			for field := range item {
+				set[field] = struct{}{}
+			}
+			n.OutboundFieldSets[index] = set
+		}
+	}
+	return nil
 }
 
 type PlatformNodeDNSSnapshot struct {
@@ -145,7 +190,12 @@ type PlatformNodeOutboundSnapshot struct {
 	SpiderX              string   `json:"spider_x,omitempty"`
 	Settings             string   `json:"settings,omitempty"`
 	StreamSettings       string   `json:"stream_settings,omitempty"`
-	Rules                []string `json:"rules"`
+	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	Rules []string `json:"rules"`
+	// Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	IPRules []string `json:"ip_rules"`
+	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	ProtocolRules []string `json:"protocol_rules"`
 } // @name dto.NodeOutbound
 
 type OrdersStatistics struct {

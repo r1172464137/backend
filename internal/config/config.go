@@ -160,7 +160,9 @@ type NodeConfig struct {
 	TrafficReportThreshold int64          `yaml:"TrafficReportThreshold" default:"0"`
 	IPStrategy             string         `yaml:"IPStrategy" default:""`
 	DNS                    []NodeDNS      `yaml:"DNS"`
-	Block                  []string       `yaml:"Block" `
+	Block                  []string       `yaml:"Block"`
+	BlockIPs               []string       `yaml:"block_ips" json:"block_ips"`
+	BlockProtocols         []string       `yaml:"block_protocols" json:"block_protocols"`
 	Outbound               []NodeOutbound `yaml:"Outbound"`
 }
 
@@ -250,7 +252,9 @@ type NodeOutbound struct {
 	SpiderX              string   `json:"spider_x,omitempty"`
 	Settings             string   `json:"settings,omitempty"`
 	StreamSettings       string   `json:"stream_settings,omitempty"`
-	Rules                []string `json:"rules"`
+	Rules                []string `json:"rules" yaml:"rules"`
+	IPRules              []string `json:"ip_rules" yaml:"ip_rules"`
+	ProtocolRules        []string `json:"protocol_rules" yaml:"protocol_rules"`
 }
 
 func (n *NodeOutbound) Marshal() ([]byte, error) {
@@ -356,6 +360,8 @@ type NodeDBConfig struct {
 	IPStrategy             string
 	DNS                    string
 	Block                  string
+	BlockIPs               string
+	BlockProtocols         string
 	Outbound               string
 }
 

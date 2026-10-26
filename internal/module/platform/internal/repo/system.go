@@ -198,6 +198,18 @@ func (m *systemRepo) GetNodeConfig(ctx context.Context) ([]*system.System, error
 	return configs, err
 }
 
+// GetNodeConfigForUpdate returns one uncached, locked snapshot. Callers must
+// invoke it inside InPlatformTx; the stable server-category rows serialize
+// read/merge/write updates even when an additive key is being inserted.
+func (m *systemRepo) GetNodeConfigForUpdate(ctx context.Context) ([]*system.System, error) {
+	var configs []*system.System
+	err := m.QueryNoCacheCtx(ctx, &configs, func(conn *gorm.DB, v interface{}) error {
+		return conn.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("category = ?", "server").Order("id ASC").Find(v).Error
+	})
+	return configs, err
+}
+
 // GetInviteConfig returns the invite config.
 func (m *systemRepo) GetInviteConfig(ctx context.Context) ([]*system.System, error) {
 	var configs []*system.System
@@ -236,17 +248,14 @@ func (m *systemRepo) GetCurrencyConfig(ctx context.Context) ([]*system.System, e
 
 func (m *systemRepo) UpdateValueByCategoryKey(ctx context.Context, category, key, value string, valueType ...string) error {
 	err := m.ExecNoCacheCtx(ctx, func(conn *gorm.DB) error {
-		result := conn.Model(&system.System{}).
-			Scopes(systemWhereCategoryKey(category, key)).
-			Update("value", value)
-		if result.Error != nil || result.RowsAffected > 0 {
-			return result.Error
-		}
 		fieldType := "string"
 		if len(valueType) > 0 && valueType[0] != "" {
 			fieldType = valueType[0]
 		}
-		return conn.Create(&system.System{
+		return conn.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
+		}).Create(&system.System{
 			Category: category,
 			Key:      key,
 			Value:    value,

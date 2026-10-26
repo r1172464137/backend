@@ -30,25 +30,27 @@ func Node(ctx *Dependencies) {
 	}
 	if nodeConfig.DNS != "" {
 		var dns []config.NodeDNS
-		err = json.Unmarshal([]byte(nodeConfig.DNS), &dns)
-		if err != nil {
-			logger.Errorf("[Node] Unmarshal DNS config error: %s", err.Error())
-			panic(err)
-		}
+		mustUnmarshalNodeConfigJSON("DNS", nodeConfig.DNS, &dns)
 		c.DNS = dns
 	}
 	if nodeConfig.Block != "" {
 		var block []string
-		_ = json.Unmarshal([]byte(nodeConfig.Block), &block)
+		mustUnmarshalNodeConfigJSON("domain block", nodeConfig.Block, &block)
 		c.Block = slicesx.RemoveDuplicateElements(block...)
+	}
+	if nodeConfig.BlockIPs != "" {
+		var blockIPs []string
+		mustUnmarshalNodeConfigJSON("IP block", nodeConfig.BlockIPs, &blockIPs)
+		c.BlockIPs = slicesx.RemoveDuplicateElements(blockIPs...)
+	}
+	if nodeConfig.BlockProtocols != "" {
+		var blockProtocols []string
+		mustUnmarshalNodeConfigJSON("protocol block", nodeConfig.BlockProtocols, &blockProtocols)
+		c.BlockProtocols = slicesx.RemoveDuplicateElements(blockProtocols...)
 	}
 	if nodeConfig.Outbound != "" {
 		var outbound []config.NodeOutbound
-		err = json.Unmarshal([]byte(nodeConfig.Outbound), &outbound)
-		if err != nil {
-			logger.Errorf("[Node] Unmarshal Outbound config error: %s", err.Error())
-			panic(err)
-		}
+		mustUnmarshalNodeConfigJSON("outbound", nodeConfig.Outbound, &outbound)
 		c.Outbound = outbound
 	}
 
@@ -80,6 +82,13 @@ func Node(ctx *Dependencies) {
 	}
 	if ctx.SetNodeMultiplierManager != nil {
 		ctx.SetNodeMultiplierManager(network.NewMultiplierManager(periods))
+	}
+}
+
+func mustUnmarshalNodeConfigJSON(field, value string, target any) {
+	if err := json.Unmarshal([]byte(value), target); err != nil {
+		logger.Errorf("[Node] Unmarshal %s config error: %s", field, err.Error())
+		panic(err)
 	}
 }
 

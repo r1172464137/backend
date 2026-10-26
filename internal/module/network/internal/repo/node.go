@@ -107,6 +107,13 @@ func (m *nodeRepo) FindOneServer(ctx context.Context, id int64) (*node.Server, e
 	return &server, err
 }
 
+func (m *nodeRepo) FindOneServerForUpdate(ctx context.Context, id int64) (*node.Server, error) {
+	var server node.Server
+	err := m.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).
+		Model(&node.Server{}).Where("id = ?", id).First(&server).Error
+	return &server, err
+}
+
 func (m *nodeRepo) UpdateServer(ctx context.Context, data *node.Server, tx ...*gorm.DB) error {
 	_, err := m.FindOneServer(ctx, data.Id)
 	if err != nil {

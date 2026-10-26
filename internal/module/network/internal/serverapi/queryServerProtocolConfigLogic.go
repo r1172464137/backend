@@ -73,7 +73,8 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 		protocols = filtered
 	}
 
-	nodeValues := nodeconfig.GlobalValues(l.deps.Config().Node)
+	nodeSnapshot := l.deps.Config().Node
+	nodeValues := nodeconfig.GlobalValues(nodeSnapshot)
 	override, err := l.deps.Store.Node().FindServerConfigOverride(l.ctx, req.ServerID)
 	if err != nil {
 		l.Errorf("[GetServerProtocols] FindServerConfigOverride Error: %s", err.Error())
@@ -87,12 +88,14 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 	}
 
 	return &dto.QueryServerConfigResponse{
-		TrafficReportThreshold: l.deps.Config().Node.TrafficReportThreshold,
-		PushInterval:           l.deps.Config().Node.NodePushInterval,
-		PullInterval:           l.deps.Config().Node.NodePullInterval,
+		TrafficReportThreshold: nodeSnapshot.TrafficReportThreshold,
+		PushInterval:           nodeSnapshot.NodePushInterval,
+		PullInterval:           nodeSnapshot.NodePullInterval,
 		IPStrategy:             nodeValues.IPStrategy,
 		DNS:                    nodeValues.DNS,
 		Block:                  nodeValues.Block,
+		BlockIPs:               nodeValues.BlockIPs,
+		BlockProtocols:         nodeValues.BlockProtocols,
 		Outbound:               nodeValues.Outbound,
 		Protocols:              protocols,
 		Total:                  int64(len(protocols)),

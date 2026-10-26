@@ -26,6 +26,7 @@ type SystemRepo interface {
 	GetRegisterConfig(ctx context.Context) ([]*system.System, error)
 	GetVerifyConfig(ctx context.Context) ([]*system.System, error)
 	GetNodeConfig(ctx context.Context) ([]*system.System, error)
+	GetNodeConfigForUpdate(ctx context.Context) ([]*system.System, error)
 	GetInviteConfig(ctx context.Context) ([]*system.System, error)
 	GetTelegramConfig(ctx context.Context) ([]*system.System, error)
 	GetTosConfig(ctx context.Context) ([]*system.System, error)

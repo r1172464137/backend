@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/perfect-panel/server/pkg/orm"
+	"gorm.io/gorm"
 )
 
 func TestMigrateMySQL(t *testing.T) {
@@ -48,11 +49,46 @@ func runMigration(t *testing.T, driver, dsn string) {
 	if err == nil {
 		defer sqlDB.Close()
 	}
+	assertStructuredRouteRuleSchema(t, db)
 	if err := CreateAdminUser(fmt.Sprintf("admin-%s@example.com", driver), "password", db); err != nil {
 		t.Fatalf("%s create admin failed: %v", driver, err)
 	}
 	if err := CreateAdminUser("", "password", db); err != nil {
 		t.Fatalf("%s existing admin must skip email validation: %v", driver, err)
+	}
+}
+
+func assertStructuredRouteRuleSchema(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	columns, err := db.Migrator().ColumnTypes("server_config_overrides")
+	if err != nil {
+		t.Fatalf("inspect server_config_overrides columns: %v", err)
+	}
+	byName := make(map[string]gorm.ColumnType, len(columns))
+	for _, column := range columns {
+		byName[strings.ToLower(column.Name())] = column
+	}
+	for _, name := range []string{"block_ips", "block_protocols"} {
+		column, ok := byName[name]
+		if !ok {
+			t.Fatalf("server_config_overrides.%s is missing after migration", name)
+		}
+		if got := strings.ToUpper(column.DatabaseTypeName()); got != "TEXT" {
+			t.Errorf("server_config_overrides.%s type = %s, want TEXT", name, got)
+		}
+		if nullable, known := column.Nullable(); !known || !nullable {
+			t.Errorf("server_config_overrides.%s nullable = %v (known=%v), want true", name, nullable, known)
+		}
+	}
+	var count int64
+	if err := db.Table("system").Where(map[string]any{
+		"category": "server",
+		"key":      []string{"BlockIPs", "BlockProtocols"},
+	}).Count(&count).Error; err != nil {
+		t.Fatalf("query structured route global config keys: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("structured route global config key count = %d, want 2", count)
 	}
 }
 
@@ -275,6 +311,38 @@ func TestMySQLHotIndexMigrationsUseOnlineDDL(t *testing.T) {
 		}
 		if got := strings.Count(sql, ";"); got != 1 {
 			t.Errorf("%s contains %d statements; each table optimization must be atomic", name, got)
+		}
+	}
+}
+
+func TestStructuredRouteRuleMigrationIsAdditiveForBothDialects(t *testing.T) {
+	for _, dialect := range []string{"mysql", "postgres"} {
+		upName := filepath.Join("database", dialect, "02179_structured_route_rules.up.sql")
+		upData, err := sqlFiles.ReadFile(upName)
+		if err != nil {
+			t.Fatalf("read %s: %v", upName, err)
+		}
+		up := strings.ToLower(string(upData))
+		for _, fragment := range []string{"alter table", "server_config_overrides", "block_ips", "block_protocols", "text", "blockips", "blockprotocols"} {
+			if !strings.Contains(up, fragment) {
+				t.Errorf("%s does not contain %q", upName, fragment)
+			}
+		}
+		if strings.Contains(up, "not null") {
+			t.Errorf("%s must add nullable override columns", upName)
+		}
+
+		downName := filepath.Join("database", dialect, "02179_structured_route_rules.down.sql")
+		downData, err := sqlFiles.ReadFile(downName)
+		if err != nil {
+			t.Fatalf("read %s: %v", downName, err)
+		}
+		down := strings.ToLower(string(downData))
+		if !strings.Contains(down, "drop column") || !strings.Contains(down, "block_ips") || !strings.Contains(down, "block_protocols") {
+			t.Errorf("%s must remove both additive columns", downName)
+		}
+		if !strings.Contains(down, "destructive manual down") || !strings.Contains(down, "never invokes this rollback automatically") {
+			t.Errorf("%s must document its destructive operator-only prerequisite", downName)
 		}
 	}
 }

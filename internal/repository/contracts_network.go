@@ -14,6 +14,7 @@ type NodeRepo interface {
 	// server
 	InsertServer(ctx context.Context, data *node.Server, tx ...*gorm.DB) error
 	FindOneServer(ctx context.Context, id int64) (*node.Server, error)
+	FindOneServerForUpdate(ctx context.Context, id int64) (*node.Server, error)
 	UpdateServer(ctx context.Context, data *node.Server, tx ...*gorm.DB) error
 	UpdateServerProtocolsIfCurrent(ctx context.Context, id int64, current, updated string, tx ...*gorm.DB) (bool, error)
 	BatchUpdateServerLastReportedAt(ctx context.Context, reports map[int64]time.Time, tx ...*gorm.DB) error

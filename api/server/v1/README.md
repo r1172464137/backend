@@ -46,6 +46,40 @@ Non-REALITY cleanup clears this field like the other REALITY settings (Nowhere
 retains its strict unsupported-option rejection). Invalid REALITY values are
 rejected, including on disabled configurations; JSON values must be integers.
 
+## Structured route rules
+
+`GET /v2/server/{server_id}` keeps the existing domain arrays `block` and
+`outbound[].rules`, and adds independent IP and protocol arrays. Top-level
+`block_ips` and `block_protocols` use protobuf tags 10 and 11;
+`Outbound.ip_rules` and `Outbound.protocol_rules` use tags 42 and 43. Domain,
+IP and protocol categories are intentionally separate because nodes emit one
+Xray route per category to preserve OR semantics. The first protocol allowlist
+contains only lowercase `bittorrent`. Old protobuf consumers ignore these
+additive fields and continue reading all previous tag numbers unchanged.
+
+Backend and node use the same canonical grammar:
+
+- bare and `full:` hostnames become `full:`; one terminal DNS root dot is removed, while internal or repeated trailing dots, whitespace and malformed labels are rejected;
+- `keyword:` remains `keyword:` (the node performs the Xray keyword conversion), and its payload must be nonempty with no whitespace or control characters;
+- `suffix:` and canonical `domain:` hostnames become `domain:` with the same root-dot and hostname validation;
+- `regex:` and `regexp:` become `regexp:` and must compile as Go RE2;
+- GeoSite labels match `^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$`;
+- GeoIP labels match `^[A-Za-z0-9][A-Za-z0-9_-]*$`;
+- IP addresses and prefixes use strict `net/netip` parsing;
+- the protocol allowlist is exactly lowercase `bittorrent`.
+
+Limits are applied to canonical unique values: each category accepts at most
+1,024 rules and each canonical rule at most 4,096 bytes. There are at most 128
+structured outbounds, 4,096 aggregate canonical outbound route rules and 48 KiB
+of aggregate canonical route text; DNS resolver rules do not count toward that
+structured-route aggregate. Every final JSON value stored in a MySQL/Postgres
+TEXT field must remain below 60 KiB after JSON escaping.
+
+Migration `02179` is additive on upgrade. Its required `.down.sql` files are a
+destructive, operator-invoked rollback only: export or clear structured rules
+before running down. Normal production startup only migrates up and never runs
+this rollback automatically.
+
 修改 schema 后，使用以下命令重新生成 Go 绑定：
 
 ```sh

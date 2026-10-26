@@ -73,6 +73,9 @@ jobs:
             exit 1
           fi
 
+      - name: Verify stable release workflow gates
+        run: python3 script/check-release-workflow-contract.py
+
       - name: Build
         run: go build ./...
 
