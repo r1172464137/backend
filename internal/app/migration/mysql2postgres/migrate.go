@@ -89,8 +89,8 @@ func Run(ctx context.Context, args []string) error {
 }
 
 // Migrate copies the rows of every table and column the MySQL source and the
-// PostgreSQL target share, then advances the target's sequences past the
-// copied ids. A dry run only prints the plan.
+// PostgreSQL target share and the filters select, then advances only those
+// tables' target sequences past the copied ids. A dry run only prints the plan.
 func Migrate(ctx context.Context, cfg Config) error {
 	if cfg.MySQLDSN == "" || cfg.PostgresDSN == "" {
 		return errors.New("both --mysql and --postgres are required")
@@ -153,7 +153,7 @@ func Migrate(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	if err := resetSequences(ctx, postgresDB, cfg.Schema); err != nil {
+	if err := resetSequences(ctx, postgresDB, cfg.Schema, plans); err != nil {
 		return err
 	}
 	log.Printf("migration completed")
@@ -866,7 +866,18 @@ func parseTimestamp(value string, location *time.Location) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unsupported timestamp %q", value)
 }
 
-func resetSequences(ctx context.Context, db *sql.DB, schema string) (err error) {
+// resetSequences aligns sequences only for tables in the completed copy plan.
+// Other target tables may be excluded, absent from the source, or concurrently
+// changed by another operation; their sequence state is not ours to reset.
+func resetSequences(ctx context.Context, db *sql.DB, schema string, plans []tablePlan) (err error) {
+	if len(plans) == 0 {
+		return nil
+	}
+	tables := make(map[string]struct{}, len(plans))
+	for _, plan := range plans {
+		tables[plan.Name] = struct{}{}
+	}
+
 	rows, err := db.QueryContext(ctx, //nolint:sqlclosecheck // closed by closeRows, which folds the close error into err
 		`
 SELECT table_name, column_name
@@ -889,7 +900,9 @@ ORDER BY table_name, ordinal_position`, schema)
 		if err := rows.Scan(&item.table, &item.column); err != nil {
 			return err
 		}
-		columns = append(columns, item)
+		if _, planned := tables[item.table]; planned {
+			columns = append(columns, item)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return err

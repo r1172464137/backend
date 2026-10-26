@@ -81,7 +81,7 @@ func TestMigrateCopiesRowsIntoPostgres(t *testing.T) {
 	}
 	exec(mysqlDB, "CREATE TABLE "+quoteMySQLIdent(table)+" (id BIGINT PRIMARY KEY, note TEXT NULL, flag TINYINT(1) NOT NULL, amount DECIMAL(10,2) NOT NULL, at DATETIME(3) NULL)")
 	t.Cleanup(func() { _, _ = mysqlDB.ExecContext(ctx, "DROP TABLE IF EXISTS "+quoteMySQLIdent(table)) })
-	exec(postgresDB, "CREATE TABLE public."+quotePGIdent(table)+" (id bigint PRIMARY KEY, note text, flag boolean NOT NULL, amount numeric(10,2) NOT NULL, at timestamp(3))")
+	exec(postgresDB, "CREATE TABLE public."+quotePGIdent(table)+" (id bigserial PRIMARY KEY, note text, flag boolean NOT NULL, amount numeric(10,2) NOT NULL, at timestamp(3))")
 	t.Cleanup(func() { _, _ = postgresDB.ExecContext(ctx, "DROP TABLE IF EXISTS public."+quotePGIdent(table)) })
 
 	at := time.Date(2026, 9, 28, 10, 30, 0, 123000000, time.UTC)
@@ -139,6 +139,7 @@ func TestMigrateCopiesRowsIntoPostgres(t *testing.T) {
 	if got != len(notes) {
 		t.Fatalf("copied %d rows, want %d", got, len(notes))
 	}
+	assertNextSequenceValue(t, postgresDB, "public", table, int64(len(notes)+1))
 }
 
 // copyTable streams a source table into PostgreSQL. SQLite stands in for
