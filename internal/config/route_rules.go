@@ -137,7 +137,7 @@ func normalizeDomainRule(value string) (string, error) {
 			return "", fmt.Errorf("regular expression is empty")
 		}
 		if _, err := regexp.Compile(payload); err != nil {
-			return "", fmt.Errorf("regular expression is not supported by RE2: %v", err)
+			return "", fmt.Errorf("regular expression is not supported by RE2: %w", err)
 		}
 		return "regexp:" + payload, nil
 	case "geosite":
@@ -271,25 +271,49 @@ func NormalizeOutboundProtocols(field string, protocols []string) ([]string, err
 // values without ever assigning hidden fields by an ambiguous position.
 // Result entries are existing indexes, or -1 for demonstrably new outbounds.
 func MatchLegacyOutbounds(field string, next, current []LegacyOutboundMatchInput) ([]int, error) {
+	if err := normalizeLegacyOutboundMatchNames(field, next); err != nil {
+		return nil, err
+	}
+	matches := newLegacyOutboundMatches(len(next))
+	if len(next) == 0 || len(current) == 0 {
+		return matches, nil
+	}
+
+	used := matchLegacyOutboundsByName(next, current, matches)
+	if err := matchLegacyOutboundsByFingerprint(field, next, current, matches, used); err != nil {
+		return nil, err
+	}
+	resolved, ambiguousIndex := resolveLegacyOutboundPosition(matches, len(current), used)
+	if resolved {
+		return matches, nil
+	}
+	return nil, routeRuleError(field, ambiguousIndex, "cannot safely match this outbound to preserve hidden ip_rules/protocol_rules; submit all structured fields with an upgraded client")
+}
+
+func normalizeLegacyOutboundMatchNames(field string, next []LegacyOutboundMatchInput) error {
 	names := make([]string, len(next))
 	for index := range next {
 		names[index] = next[index].Name
 	}
 	names, err := NormalizeOutboundNames(field, names)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for index := range next {
 		next[index].Name = names[index]
 	}
-	matches := make([]int, len(next))
+	return nil
+}
+
+func newLegacyOutboundMatches(count int) []int {
+	matches := make([]int, count)
 	for index := range matches {
 		matches[index] = -1
 	}
-	if len(next) == 0 || len(current) == 0 {
-		return matches, nil
-	}
+	return matches
+}
 
+func matchLegacyOutboundsByName(next, current []LegacyOutboundMatchInput, matches []int) map[int]struct{} {
 	currentNames := make(map[string][]int, len(current))
 	for index, item := range current {
 		name := strings.TrimSpace(item.Name)
@@ -299,34 +323,23 @@ func MatchLegacyOutbounds(field string, next, current []LegacyOutboundMatchInput
 	}
 	used := make(map[int]struct{}, len(current))
 	for index, item := range next {
-		candidates := unusedIndexes(currentNames[strings.TrimSpace(item.Name)], used)
+		candidates := unusedIndexes(currentNames[item.Name], used)
 		if len(candidates) == 1 {
 			matches[index] = candidates[0]
 			used[candidates[0]] = struct{}{}
 		}
 	}
+	return used
+}
 
-	nextFingerprints := make(map[string][]int)
-	currentFingerprints := make(map[string][]int)
-	for index, item := range next {
-		if matches[index] >= 0 {
-			continue
-		}
-		fingerprint, err := legacyOutboundFingerprint(item.Value)
-		if err != nil {
-			return nil, errorsWithField(field, fmt.Sprintf("fingerprint outbound line %d: %v", index+1, err))
-		}
-		nextFingerprints[fingerprint] = append(nextFingerprints[fingerprint], index)
+func matchLegacyOutboundsByFingerprint(field string, next, current []LegacyOutboundMatchInput, matches []int, used map[int]struct{}) error {
+	nextFingerprints, err := unmatchedNextFingerprints(field, next, matches)
+	if err != nil {
+		return err
 	}
-	for index, item := range current {
-		if _, exists := used[index]; exists {
-			continue
-		}
-		fingerprint, err := legacyOutboundFingerprint(item.Value)
-		if err != nil {
-			return nil, errorsWithField(field, fmt.Sprintf("fingerprint existing outbound line %d: %v", index+1, err))
-		}
-		currentFingerprints[fingerprint] = append(currentFingerprints[fingerprint], index)
+	currentFingerprints, err := unmatchedCurrentFingerprints(field, current, used)
+	if err != nil {
+		return err
 	}
 	for fingerprint, nextIndexes := range nextFingerprints {
 		currentIndexes := currentFingerprints[fingerprint]
@@ -337,47 +350,86 @@ func MatchLegacyOutbounds(field string, next, current []LegacyOutboundMatchInput
 		matches[nextIndex] = currentIndex
 		used[currentIndex] = struct{}{}
 	}
+	return nil
+}
 
-	unmatchedNext := make([]int, 0)
+func unmatchedNextFingerprints(field string, next []LegacyOutboundMatchInput, matches []int) (map[string][]int, error) {
+	fingerprints := make(map[string][]int)
+	for index, item := range next {
+		if matches[index] >= 0 {
+			continue
+		}
+		fingerprint, err := legacyOutboundFingerprint(item.Value)
+		if err != nil {
+			return nil, errorsWithField(field, fmt.Sprintf("fingerprint outbound line %d: %v", index+1, err))
+		}
+		fingerprints[fingerprint] = append(fingerprints[fingerprint], index)
+	}
+	return fingerprints, nil
+}
+
+func unmatchedCurrentFingerprints(field string, current []LegacyOutboundMatchInput, used map[int]struct{}) (map[string][]int, error) {
+	fingerprints := make(map[string][]int)
+	for index, item := range current {
+		if _, exists := used[index]; exists {
+			continue
+		}
+		fingerprint, err := legacyOutboundFingerprint(item.Value)
+		if err != nil {
+			return nil, errorsWithField(field, fmt.Sprintf("fingerprint existing outbound line %d: %v", index+1, err))
+		}
+		fingerprints[fingerprint] = append(fingerprints[fingerprint], index)
+	}
+	return fingerprints, nil
+}
+
+func resolveLegacyOutboundPosition(matches []int, currentCount int, used map[int]struct{}) (bool, int) {
+	unmatchedNext := unmatchedLegacyOutboundIndexes(matches)
+	unmatchedCurrent := unusedLegacyOutboundIndexes(currentCount, used)
+	if len(unmatchedCurrent) == 0 || len(unmatchedNext) == 0 {
+		return true, -1
+	}
+	if safeLegacyOutboundPosition(matches, currentCount, unmatchedNext, unmatchedCurrent) {
+		matches[unmatchedNext[0]] = unmatchedCurrent[0]
+		return true, -1
+	}
+	return false, unmatchedNext[0]
+}
+
+func unmatchedLegacyOutboundIndexes(matches []int) []int {
+	result := make([]int, 0)
 	for index, match := range matches {
 		if match < 0 {
-			unmatchedNext = append(unmatchedNext, index)
+			result = append(result, index)
 		}
 	}
-	unmatchedCurrent := make([]int, 0)
-	for index := range current {
+	return result
+}
+
+func unusedLegacyOutboundIndexes(count int, used map[int]struct{}) []int {
+	result := make([]int, 0)
+	for index := 0; index < count; index++ {
 		if _, exists := used[index]; !exists {
-			unmatchedCurrent = append(unmatchedCurrent, index)
+			result = append(result, index)
 		}
 	}
-	if len(unmatchedCurrent) == 0 {
-		return matches, nil // every unmatched submitted item is a true insertion
-	}
-	if len(unmatchedNext) == 0 {
-		return matches, nil // unmatched existing items were deleted
-	}
+	return result
+}
 
-	// Position is safe only by elimination: equal-length sequences, at least
-	// one deterministic anchor, all anchors stayed at their positions, and one
-	// remaining item occupies the same position. A rename plus simultaneous
-	// legacy-field edit without those facts is intentionally rejected.
-	anchored := len(next) - len(unmatchedNext)
-	sequenceUnchanged := len(next) == len(current) && anchored > 0 && len(unmatchedNext) == 1 && len(unmatchedCurrent) == 1
-	if sequenceUnchanged {
-		for nextIndex, currentIndex := range matches {
-			if currentIndex >= 0 && nextIndex != currentIndex {
-				sequenceUnchanged = false
-				break
-			}
+// safeLegacyOutboundPosition permits position only by elimination: equal
+// sequence lengths, at least one deterministic anchor, every anchor still at
+// its position, and exactly one unmatched item at that same position.
+func safeLegacyOutboundPosition(matches []int, currentCount int, unmatchedNext, unmatchedCurrent []int) bool {
+	anchored := len(matches) - len(unmatchedNext)
+	if len(matches) != currentCount || anchored == 0 || len(unmatchedNext) != 1 || len(unmatchedCurrent) != 1 {
+		return false
+	}
+	for nextIndex, currentIndex := range matches {
+		if currentIndex >= 0 && nextIndex != currentIndex {
+			return false
 		}
 	}
-	if sequenceUnchanged && unmatchedNext[0] == unmatchedCurrent[0] {
-		matches[unmatchedNext[0]] = unmatchedCurrent[0]
-		return matches, nil
-	}
-
-	index := unmatchedNext[0]
-	return nil, routeRuleError(field, index, "cannot safely match this outbound to preserve hidden ip_rules/protocol_rules; submit all structured fields with an upgraded client")
+	return unmatchedNext[0] == unmatchedCurrent[0]
 }
 
 func unusedIndexes(indexes []int, used map[int]struct{}) []int {
