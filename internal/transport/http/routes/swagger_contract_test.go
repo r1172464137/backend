@@ -176,70 +176,91 @@ func TestSwaggerKeepsStableDTOModelNames(t *testing.T) {
 	}
 }
 
+type swaggerArrayProperty struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+	Items       struct {
+		Type string `json:"type"`
+	} `json:"items"`
+}
+
+type swaggerObjectSchema struct {
+	Required   []string                        `json:"required"`
+	Properties map[string]swaggerArrayProperty `json:"properties"`
+}
+
 func TestSwaggerDocumentsStructuredRouteRuleContract(t *testing.T) {
 	document := readSwaggerDocument(t)
-	for definition, fields := range map[string][]string{
+	definitions := map[string][]string{
 		"dto.NodeConfig":                    {"block_ips", "block_protocols"},
 		"dto.NodeOutbound":                  {"ip_rules", "protocol_rules"},
 		"dto.QueryServerConfigResponse":     {"block_ips", "block_protocols"},
 		"dto.ServerNodeConfigOverride":      {"block_ips", "block_protocols"},
 		"dto.ServerNodeConfigValues":        {"block_ips", "block_protocols"},
 		"dto.UpdateServerNodeConfigRequest": {"block_ips", "block_protocols"},
-	} {
-		raw, ok := document.Definitions[definition]
-		if !ok {
-			t.Errorf("Swagger definition %q is missing", definition)
-			continue
-		}
-		var schema struct {
-			Required   []string `json:"required"`
-			Properties map[string]struct {
-				Type        string `json:"type"`
-				Description string `json:"description"`
-				Items       struct {
-					Type string `json:"type"`
-				} `json:"items"`
-			} `json:"properties"`
-		}
-		if err := json.Unmarshal(raw, &schema); err != nil {
-			t.Fatalf("decode %s: %v", definition, err)
-		}
-		required := make(map[string]bool, len(schema.Required))
-		for _, field := range schema.Required {
-			required[field] = true
-		}
-		for _, field := range fields {
-			property, exists := schema.Properties[field]
-			if !exists {
-				t.Errorf("Swagger definition %s has no %s property", definition, field)
-				continue
-			}
-			if required[field] {
-				t.Errorf("Swagger %s.%s must remain optional for additive old-consumer compatibility", definition, field)
-			}
-			if property.Type != "array" || property.Items.Type != "string" {
-				t.Errorf("Swagger %s.%s = type %q items %q, want array of string", definition, field, property.Type, property.Items.Type)
-			}
-			wantGrammar := "bittorrent"
-			if field == "block_ips" || field == "ip_rules" {
-				wantGrammar = "^[A-Za-z0-9][A-Za-z0-9_-]*$"
-			}
-			if !strings.Contains(property.Description, wantGrammar) {
-				t.Errorf("Swagger %s.%s description %q does not document %q", definition, field, property.Description, wantGrammar)
-			}
-			if !strings.Contains(property.Description, "1024") || !strings.Contains(property.Description, "4096") {
-				t.Errorf("Swagger %s.%s description %q does not document per-list limits", definition, field, property.Description)
-			}
-		}
 	}
+	for definition, fields := range definitions {
+		t.Run(definition, func(t *testing.T) {
+			assertStructuredRouteDefinition(t, document, definition, fields)
+		})
+	}
+	t.Run("outbound rule descriptions", func(t *testing.T) {
+		assertNodeOutboundRuleDescriptions(t, document)
+	})
+	t.Run("outbound aggregate limits", func(t *testing.T) {
+		assertNodeConfigOutboundLimits(t, document)
+	})
+}
 
-	nodeOutbound := document.Definitions["dto.NodeOutbound"]
-	var outboundSchema struct {
-		Properties map[string]struct {
-			Description string `json:"description"`
-		} `json:"properties"`
+func assertStructuredRouteDefinition(t *testing.T, document swaggerDocument, definition string, fields []string) {
+	t.Helper()
+	raw, ok := document.Definitions[definition]
+	if !ok {
+		t.Errorf("Swagger definition %q is missing", definition)
+		return
 	}
-	if err := json.Unmarshal(nodeOutbound, &outboundSchema); err != nil {
+	var schema swaggerObjectSchema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("decode %s: %v", definition, err)
+	}
+	required := make(map[string]bool, len(schema.Required))
+	for _, field := range schema.Required {
+		required[field] = true
+	}
+	for _, field := range fields {
+		assertStructuredRouteProperty(t, definition, field, schema.Properties, required)
+	}
+}
+
+func assertStructuredRouteProperty(t *testing.T, definition, field string, properties map[string]swaggerArrayProperty, required map[string]bool) {
+	t.Helper()
+	property, exists := properties[field]
+	if !exists {
+		t.Errorf("Swagger definition %s has no %s property", definition, field)
+		return
+	}
+	if required[field] {
+		t.Errorf("Swagger %s.%s must remain optional for additive old-consumer compatibility", definition, field)
+	}
+	if property.Type != "array" || property.Items.Type != "string" {
+		t.Errorf("Swagger %s.%s = type %q items %q, want array of string", definition, field, property.Type, property.Items.Type)
+	}
+	wantGrammar := "bittorrent"
+	if field == "block_ips" || field == "ip_rules" {
+		wantGrammar = "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+	}
+	if !strings.Contains(property.Description, wantGrammar) {
+		t.Errorf("Swagger %s.%s description %q does not document %q", definition, field, property.Description, wantGrammar)
+	}
+	if !strings.Contains(property.Description, "1024") || !strings.Contains(property.Description, "4096") {
+		t.Errorf("Swagger %s.%s description %q does not document per-list limits", definition, field, property.Description)
+	}
+}
+
+func assertNodeOutboundRuleDescriptions(t *testing.T, document swaggerDocument) {
+	t.Helper()
+	var schema swaggerObjectSchema
+	if err := json.Unmarshal(document.Definitions["dto.NodeOutbound"], &schema); err != nil {
 		t.Fatal(err)
 	}
 	for field, fragment := range map[string]string{
@@ -247,7 +268,7 @@ func TestSwaggerDocumentsStructuredRouteRuleContract(t *testing.T) {
 		"ip_rules":       "^[A-Za-z0-9][A-Za-z0-9_-]*$",
 		"protocol_rules": "bittorrent",
 	} {
-		description := outboundSchema.Properties[field].Description
+		description := schema.Properties[field].Description
 		if !strings.Contains(description, fragment) {
 			t.Errorf("Swagger dto.NodeOutbound.%s does not document %q: %q", field, fragment, description)
 		}
@@ -255,19 +276,18 @@ func TestSwaggerDocumentsStructuredRouteRuleContract(t *testing.T) {
 			t.Errorf("Swagger dto.NodeOutbound.%s does not document per-list limits: %q", field, description)
 		}
 	}
+}
 
-	var nodeConfigSchema struct {
-		Properties map[string]struct {
-			Description string `json:"description"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(document.Definitions["dto.NodeConfig"], &nodeConfigSchema); err != nil {
+func assertNodeConfigOutboundLimits(t *testing.T, document swaggerDocument) {
+	t.Helper()
+	var schema swaggerObjectSchema
+	if err := json.Unmarshal(document.Definitions["dto.NodeConfig"], &schema); err != nil {
 		t.Fatal(err)
 	}
-	outboundDescription := nodeConfigSchema.Properties["outbound"].Description
+	description := schema.Properties["outbound"].Description
 	for _, limit := range []string{"128", "4096", "48 KiB", "60 KiB"} {
-		if !strings.Contains(outboundDescription, limit) {
-			t.Errorf("Swagger dto.NodeConfig.outbound does not document %s: %q", limit, outboundDescription)
+		if !strings.Contains(description, limit) {
+			t.Errorf("Swagger dto.NodeConfig.outbound does not document %s: %q", limit, description)
 		}
 	}
 }
