@@ -82,6 +82,8 @@ func (s *Service) QueryServerProtocolConfig(ctx context.Context, req *dto.QueryS
 		IPStrategy:             nodeValues.IPStrategy,
 		DNS:                    nodeValues.DNS,
 		Block:                  nodeValues.Block,
+		BlockIPs:               nodeValues.BlockIPs,
+		BlockProtocols:         nodeValues.BlockProtocols,
 		Outbound:               nodeValues.Outbound,
 		Protocols:              protocols,
 		Total:                  int64(len(protocols)),

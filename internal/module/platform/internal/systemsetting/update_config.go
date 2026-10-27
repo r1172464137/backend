@@ -32,8 +32,12 @@ func configFields(data any, valueFn func(reflect.Value) string) []configFieldVal
 	fields := make([]configFieldValue, 0, v.NumField())
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
+		structField := t.Field(i)
+		if structField.PkgPath != "" || structField.Tag.Get("json") == "-" {
+			continue
+		}
 		fields = append(fields, configFieldValue{
-			key:       t.Field(i).Name,
+			key:       structField.Name,
 			value:     valueFn(field),
 			valueType: configFieldType(field),
 		})
@@ -95,18 +99,22 @@ func (c settingsChange) changedKeys() []string {
 // update changed. Values are never recorded: several categories hold
 // secrets.
 func updateConfigFields(ctx context.Context, deps Deps, change settingsChange) error {
-	changed := change.changedKeys()
 	return deps.Store.InSettingsTx(ctx, func(settings SettingsStore) error {
-		for _, field := range change.next {
-			if err := settings.UpdateValueByCategoryKey(ctx, change.category, field.key, field.value, field.valueType); err != nil {
-				return err
-			}
-		}
-		if len(changed) == 0 {
-			return nil
-		}
-		return recordSettingsAction(ctx, settings, "settings.update", change.category, "keys: "+strings.Join(changed, ", "))
+		return updateConfigFieldsWithStore(ctx, settings, change)
 	})
+}
+
+func updateConfigFieldsWithStore(ctx context.Context, settings SettingsStore, change settingsChange) error {
+	changed := change.changedKeys()
+	for _, field := range change.next {
+		if err := settings.UpdateValueByCategoryKey(ctx, change.category, field.key, field.value, field.valueType); err != nil {
+			return err
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	return recordSettingsAction(ctx, settings, "settings.update", change.category, "keys: "+strings.Join(changed, ", "))
 }
 
 // recordSettingsAction writes the audit row of an administrator's settings

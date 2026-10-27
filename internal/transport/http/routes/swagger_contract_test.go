@@ -181,6 +181,102 @@ func TestSwaggerKeepsStableDTOModelNames(t *testing.T) {
 	}
 }
 
+func TestSwaggerDocumentsStructuredRouteRuleContract(t *testing.T) {
+	document := readSwaggerDocument(t)
+	for definition, fields := range map[string][]string{
+		"dto.NodeConfig":                    {"block_ips", "block_protocols"},
+		"dto.NodeOutbound":                  {"ip_rules", "protocol_rules"},
+		"dto.QueryServerConfigResponse":     {"block_ips", "block_protocols"},
+		"dto.ServerNodeConfigOverride":      {"block_ips", "block_protocols"},
+		"dto.ServerNodeConfigValues":        {"block_ips", "block_protocols"},
+		"dto.UpdateServerNodeConfigRequest": {"block_ips", "block_protocols"},
+	} {
+		raw, ok := document.Definitions[definition]
+		if !ok {
+			t.Errorf("Swagger definition %q is missing", definition)
+			continue
+		}
+		var schema struct {
+			Required   []string `json:"required"`
+			Properties map[string]struct {
+				Type        string `json:"type"`
+				Description string `json:"description"`
+				Items       struct {
+					Type string `json:"type"`
+				} `json:"items"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode %s: %v", definition, err)
+		}
+		required := make(map[string]bool, len(schema.Required))
+		for _, field := range schema.Required {
+			required[field] = true
+		}
+		for _, field := range fields {
+			property, exists := schema.Properties[field]
+			if !exists {
+				t.Errorf("Swagger definition %s has no %s property", definition, field)
+				continue
+			}
+			if required[field] {
+				t.Errorf("Swagger %s.%s must remain optional for additive old-consumer compatibility", definition, field)
+			}
+			if property.Type != "array" || property.Items.Type != "string" {
+				t.Errorf("Swagger %s.%s = type %q items %q, want array of string", definition, field, property.Type, property.Items.Type)
+			}
+			wantGrammar := "bittorrent"
+			if field == "block_ips" || field == "ip_rules" {
+				wantGrammar = "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+			}
+			if !strings.Contains(property.Description, wantGrammar) {
+				t.Errorf("Swagger %s.%s description %q does not document %q", definition, field, property.Description, wantGrammar)
+			}
+			if !strings.Contains(property.Description, "1024") || !strings.Contains(property.Description, "4096") {
+				t.Errorf("Swagger %s.%s description %q does not document per-list limits", definition, field, property.Description)
+			}
+		}
+	}
+
+	nodeOutbound := document.Definitions["dto.NodeOutbound"]
+	var outboundSchema struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(nodeOutbound, &outboundSchema); err != nil {
+		t.Fatal(err)
+	}
+	for field, fragment := range map[string]string{
+		"rules":          "^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$",
+		"ip_rules":       "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+		"protocol_rules": "bittorrent",
+	} {
+		description := outboundSchema.Properties[field].Description
+		if !strings.Contains(description, fragment) {
+			t.Errorf("Swagger dto.NodeOutbound.%s does not document %q: %q", field, fragment, description)
+		}
+		if !strings.Contains(description, "1024") || !strings.Contains(description, "4096") {
+			t.Errorf("Swagger dto.NodeOutbound.%s does not document per-list limits: %q", field, description)
+		}
+	}
+
+	var nodeConfigSchema struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(document.Definitions["dto.NodeConfig"], &nodeConfigSchema); err != nil {
+		t.Fatal(err)
+	}
+	outboundDescription := nodeConfigSchema.Properties["outbound"].Description
+	for _, limit := range []string{"128", "4096", "48 KiB", "60 KiB"} {
+		if !strings.Contains(outboundDescription, limit) {
+			t.Errorf("Swagger dto.NodeConfig.outbound does not document %s: %q", limit, outboundDescription)
+		}
+	}
+}
+
 func validatePathParameters(t *testing.T, key, routePath string, parameters []swaggerParameter) {
 	t.Helper()
 	for _, part := range strings.Split(routePath, "/") {

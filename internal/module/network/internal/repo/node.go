@@ -114,6 +114,13 @@ func (m *nodeRepo) FindOneServer(ctx context.Context, id int64) (*node.Server, e
 	return &server, err
 }
 
+func (m *nodeRepo) FindOneServerForUpdate(ctx context.Context, id int64) (*node.Server, error) {
+	var server node.Server
+	err := m.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).
+		Model(&node.Server{}).Where("id = ?", id).First(&server).Error
+	return &server, err
+}
+
 // serverAdminColumns are the server columns an administrator's update
 // writes. last_reported_at is the nodes' heartbeat: a whole-row save wrote
 // back the value read at the start of the request over a heartbeat that

@@ -199,6 +199,8 @@ func TestUpdateServerNodeConfigHandler_forwardsTheOverride(t *testing.T) {
 		DNS:             []dto.NodeDNS{{Proto: "https", Address: "https://dns.example/dns-query", Domains: []string{"example.com"}}},
 		Block:           []string{},
 		InheritOutbound: true,
+	}, RequestFields: map[string]struct{}{
+		"server_id": {}, "inherit_ip_strategy": {}, "ip_strategy": {}, "inherit_dns": {}, "dns": {}, "inherit_block": {}, "block": {}, "inherit_outbound": {},
 	}}
 	if len(svc.nodeConfig) != 1 || !reflect.DeepEqual(svc.nodeConfig[0], want) {
 		t.Fatalf("facade requests = %+v, want %+v", svc.nodeConfig, want)

@@ -144,6 +144,8 @@ func queryServerProtocolConfigResponseToProtobuf(response *dto.QueryServerConfig
 			IpStrategy:             response.IPStrategy,
 			Dns:                    dns,
 			Block:                  append([]string(nil), response.Block...),
+			BlockIps:               append([]string(nil), response.BlockIPs...),
+			BlockProtocols:         append([]string(nil), response.BlockProtocols...),
 			Outbound:               outbound,
 			Protocols:              protocols,
 			Total:                  response.Total,
@@ -198,6 +200,8 @@ func outboundToProtobuf(outbound dto.NodeOutbound) (*serverv1.Outbound, error) {
 		Settings:                outbound.Settings,
 		StreamSettings:          outbound.StreamSettings,
 		Rules:                   append([]string(nil), outbound.Rules...),
+		IpRules:                 append([]string(nil), outbound.IPRules...),
+		ProtocolRules:           append([]string(nil), outbound.ProtocolRules...),
 	}, nil
 }
 

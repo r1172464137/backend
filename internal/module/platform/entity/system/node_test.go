@@ -36,7 +36,9 @@ func TestParseNodeConfig(t *testing.T) {
 		"IPStrategy":             "prefer_ipv4",
 		"DNS":                    `[{"proto":"udp","address":"1.1.1.1:53","domains":["example.com"]}]`,
 		"Block":                  `["ads.example","","ads.example","tracker.example"]`,
-		"Outbound":               `[{"name":"warp","protocol":"wireguard","address":"162.159.192.1","port":2408,"password":"k","rules":["geosite:openai"]}]`,
+		"BlockIPs":               `["geoip:private","10.0.0.0/8"]`,
+		"BlockProtocols":         `["bittorrent"]`,
+		"Outbound":               `[{"name":"warp","protocol":"wireguard","address":"162.159.192.1","port":2408,"password":"k","rules":["geosite:openai"],"ip_rules":["geoip:cn"],"protocol_rules":["bittorrent"]}]`,
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -49,9 +51,11 @@ func TestParseNodeConfig(t *testing.T) {
 		IPStrategy:             "prefer_ipv4",
 		DNS:                    []config.NodeDNS{{Proto: "udp", Address: "1.1.1.1:53", Domains: []string{"example.com"}}},
 		Block:                  []string{"ads.example", "tracker.example"},
+		BlockIPs:               []string{"geoip:private", "10.0.0.0/8"},
+		BlockProtocols:         []string{"bittorrent"},
 		Outbound: []config.NodeOutbound{{
 			Name: "warp", Protocol: "wireguard", Address: "162.159.192.1", Port: 2408,
-			Password: "k", Rules: []string{"geosite:openai"},
+			Password: "k", Rules: []string{"geosite:openai"}, IPRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"},
 		}},
 	}
 	if !reflect.DeepEqual(parsed, want) {
@@ -61,11 +65,11 @@ func TestParseNodeConfig(t *testing.T) {
 
 // The rows a fresh installation seeds hold empty documents.
 func TestParseNodeConfigEmptyDocuments(t *testing.T) {
-	parsed, err := ParseNodeConfig(serverRows(map[string]string{"DNS": "", "Block": "", "Outbound": ""}))
+	parsed, err := ParseNodeConfig(serverRows(map[string]string{"DNS": "", "Block": "", "BlockIPs": "", "BlockProtocols": "", "Outbound": ""}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.DNS != nil || parsed.Block != nil || parsed.Outbound != nil {
+	if parsed.DNS != nil || parsed.Block != nil || parsed.BlockIPs != nil || parsed.BlockProtocols != nil || parsed.Outbound != nil {
 		t.Fatalf("empty documents decoded as %+v", parsed)
 	}
 	// An explicitly empty list stays a list: the admin console receives [].
@@ -83,7 +87,7 @@ func TestParseNodeConfigEmptyDocuments(t *testing.T) {
 }
 
 func TestParseNodeConfigReportsMalformedDocuments(t *testing.T) {
-	for _, key := range []string{"DNS", "Outbound"} {
+	for _, key := range []string{"DNS", "Block", "BlockIPs", "BlockProtocols", "Outbound"} {
 		_, err := ParseNodeConfig(serverRows(map[string]string{key: `{not json`}))
 		if err == nil || !strings.Contains(err.Error(), key) {
 			t.Fatalf("%s: err = %v, want a decode error naming the setting", key, err)
@@ -95,15 +99,11 @@ func TestParseNodeConfigReportsMalformedDocuments(t *testing.T) {
 	}
 }
 
-// A malformed block list never failed the node configuration; it still
-// does not, and whatever decodes is kept.
-func TestParseNodeConfigBlockIsLenient(t *testing.T) {
-	parsed, err := ParseNodeConfig(serverRows(map[string]string{"Block": `{not json`}))
-	if err != nil || len(parsed.Block) != 0 {
-		t.Fatalf("malformed block = %v (err %v), want it ignored", parsed.Block, err)
-	}
-	parsed, err = ParseNodeConfig(serverRows(map[string]string{"Block": `["a", 1, "b"]`}))
-	if err != nil || !reflect.DeepEqual(parsed.Block, []string{"a", "b"}) {
-		t.Fatalf("partially malformed block = %v (err %v), want [a b]", parsed.Block, err)
+func TestParseNodeConfigRejectsPartiallyMalformedBlockLists(t *testing.T) {
+	for _, key := range []string{"Block", "BlockIPs", "BlockProtocols"} {
+		_, err := ParseNodeConfig(serverRows(map[string]string{key: `["a", 1, "b"]`}))
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("%s: err = %v, want strict string-list decoding", key, err)
+		}
 	}
 }

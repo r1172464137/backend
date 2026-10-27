@@ -53,6 +53,24 @@ jobs:
         run: |
           bash script/test-release.sh
           go test -race -timeout 5m ./internal/module/network/entity/node ./internal/module/network/internal/adminserver ./internal/module/network/internal/serverapi ./internal/module/network/transport/http/server -run 'TestRealityXver|TestNormalizeProtocol|TestSanitizeProtocols|TestMergeMissingProtocol|TestCompatible' -count=1
+      - name: Structured route-rule release gates
+        run: |
+          go test -race -timeout 5m -count=1 \
+            ./internal/config \
+            ./internal/app/bootstrap \
+            ./internal/app/migration/schema \
+            ./internal/module/network/internal/adminserver \
+            ./internal/module/network/internal/nodeconfig \
+            ./internal/module/network/internal/repo \
+            ./internal/module/network/internal/serverapi \
+            ./internal/module/network/transport/http/admin/server \
+            ./internal/module/network/transport/http/server \
+            ./internal/module/platform/entity/system \
+            ./internal/module/platform/internal/repo \
+            ./internal/module/platform/internal/systemsetting \
+            ./internal/module/platform/transport/http/admin/system \
+            ./internal/transport/http/routes
+          python3 script/check-release-workflow-contract.py
 
   binaries:
     needs: prepare

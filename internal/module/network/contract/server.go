@@ -4,6 +4,8 @@
 // schema names stay dto.*.
 package dto
 
+import "encoding/json"
+
 type CreateServerRequest struct {
 	Name      string     `json:"name"`
 	Country   string     `json:"country,omitempty"`
@@ -55,10 +57,16 @@ type GetServerUserListResponse struct {
 }
 
 type ServerNodeConfigValues struct {
-	IPStrategy string         `json:"ip_strategy"`
-	DNS        []NodeDNS      `json:"dns"`
-	Block      []string       `json:"block"`
-	Outbound   []NodeOutbound `json:"outbound"`
+	IPStrategy string    `json:"ip_strategy"`
+	DNS        []NodeDNS `json:"dns"`
+	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	Block []string `json:"block"`
+	// Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	BlockIPs []string `json:"block_ips"`
+	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	BlockProtocols []string `json:"block_protocols"`
+	// Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.
+	Outbound []NodeOutbound `json:"outbound"`
 }
 
 type ServerNodeConfigOverride struct {
@@ -68,11 +76,17 @@ type ServerNodeConfigOverride struct {
 	InheritDNS bool      `json:"inherit_dns"`
 	DNS        []NodeDNS `json:"dns"`
 
-	InheritBlock bool     `json:"inherit_block"`
-	Block        []string `json:"block"`
+	InheritBlock bool `json:"inherit_block"`
+	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	Block []string `json:"block"`
+	// Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	BlockIPs []string `json:"block_ips"`
+	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
+	BlockProtocols []string `json:"block_protocols"`
 
-	InheritOutbound bool           `json:"inherit_outbound"`
-	Outbound        []NodeOutbound `json:"outbound"`
+	InheritOutbound bool `json:"inherit_outbound"`
+	// Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.
+	Outbound []NodeOutbound `json:"outbound"`
 }
 
 type OnlineUser struct {
@@ -227,15 +241,20 @@ type QueryServerConfigRequest struct {
 }
 
 type QueryServerConfigResponse struct {
-	TrafficReportThreshold int64          `json:"traffic_report_threshold"`
-	PushInterval           int64          `json:"push_interval"`
-	PullInterval           int64          `json:"pull_interval"`
-	IPStrategy             string         `json:"ip_strategy"`
-	DNS                    []NodeDNS      `json:"dns"`
-	Block                  []string       `json:"block"`
-	Outbound               []NodeOutbound `json:"outbound"`
-	Protocols              []Protocol     `json:"protocols"`
-	Total                  int64          `json:"total"`
+	TrafficReportThreshold int64     `json:"traffic_report_threshold"`
+	PushInterval           int64     `json:"push_interval"`
+	PullInterval           int64     `json:"pull_interval"`
+	IPStrategy             string    `json:"ip_strategy"`
+	DNS                    []NodeDNS `json:"dns"`
+	// Canonical domain rules (full, non-whitespace keyword, no-root-dot domain, regexp or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$); limits apply to 1024 canonical unique rules and 4096 bytes each.
+	Block []string `json:"block"`
+	// Canonical netip/GeoIP rules with labels matching ^[A-Za-z0-9][A-Za-z0-9_-]*$; limits apply to 1024 canonical unique rules and 4096 bytes each.
+	BlockIPs []string `json:"block_ips"`
+	// Canonical protocol rules; only bittorrent; limits apply to 1024 canonical unique rules and 4096 bytes each.
+	BlockProtocols []string       `json:"block_protocols"`
+	Outbound       []NodeOutbound `json:"outbound"`
+	Protocols      []Protocol     `json:"protocols"`
+	Total          int64          `json:"total"`
 }
 
 type GetServerNodeConfigRequest struct {
@@ -251,6 +270,43 @@ type GetServerNodeConfigResponse struct {
 type UpdateServerNodeConfigRequest struct {
 	ServerID int64 `json:"server_id" validate:"required"`
 	ServerNodeConfigOverride
+	RequestFields     map[string]struct{}   `json:"-" swaggerignore:"true"`
+	OutboundFieldSets []map[string]struct{} `json:"-" swaggerignore:"true"`
+}
+
+// UnmarshalJSON records additive-field presence independently from empty
+// arrays, which lets legacy clients preserve route rules they cannot display.
+func (r *UpdateServerNodeConfigRequest) UnmarshalJSON(data []byte) error {
+	type alias UpdateServerNodeConfigRequest
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = UpdateServerNodeConfigRequest(decoded)
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	r.RequestFields = make(map[string]struct{}, len(fields))
+	for field := range fields {
+		r.RequestFields[field] = struct{}{}
+	}
+	if raw, ok := fields["outbound"]; ok && string(raw) != "null" {
+		var outbound []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &outbound); err != nil {
+			return err
+		}
+		r.OutboundFieldSets = make([]map[string]struct{}, len(outbound))
+		for index, item := range outbound {
+			set := make(map[string]struct{}, len(item))
+			for field := range item {
+				set[field] = struct{}{}
+			}
+			r.OutboundFieldSets[index] = set
+		}
+	}
+	return nil
 }
 
 type Server struct {

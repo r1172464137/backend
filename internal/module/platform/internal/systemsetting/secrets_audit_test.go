@@ -147,8 +147,8 @@ func TestOutboundSecretsAreMaskedAndKept(t *testing.T) {
 		t.Fatalf("node secret = %q, want it readable for node deployment", got.NodeSecret)
 	}
 	wantMasked := []dto.PlatformNodeOutboundSnapshot{
-		{Name: "warp", Protocol: "wireguard", Address: "a", Port: 1, Password: dto.SecretMask, UUID: dto.SecretMask},
-		{Name: "relay", Protocol: "vless", Address: "b", Port: 2, UUID: dto.SecretMask, EncryptionPassword: dto.SecretMask},
+		{Name: "warp", Protocol: "wireguard", Address: "a", Port: 1, Password: dto.SecretMask, UUID: dto.SecretMask, Rules: []string{}, IPRules: []string{}, ProtocolRules: []string{}},
+		{Name: "relay", Protocol: "vless", Address: "b", Port: 2, UUID: dto.SecretMask, EncryptionPassword: dto.SecretMask, Rules: []string{}, IPRules: []string{}, ProtocolRules: []string{}},
 	}
 	if !reflect.DeepEqual(got.Outbound, wantMasked) {
 		t.Fatalf("outbounds = %+v, want %+v", got.Outbound, wantMasked)
@@ -213,17 +213,20 @@ func TestOutboundSecretsAreMaskedAndKept(t *testing.T) {
 	}
 }
 
-// A malformed stored node document does not stop the update that fixes it.
-func TestNodeConfigUpdateRepairsAMalformedDocument(t *testing.T) {
+// A malformed persisted node document fails closed; operators repair it in
+// the database rather than overwriting a snapshot whose hidden fields cannot
+// be preserved safely.
+func TestNodeConfigUpdateRejectsMalformedStoredDocument(t *testing.T) {
 	w := newSettingsWorld(t)
 	if err := w.system.UpdateValueByCategoryKey(context.Background(), "server", "Outbound", "{not json"); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.svc.UpdateNodeConfig(adminContext(), &dto.NodeConfig{NodeSecret: "s", Outbound: []dto.PlatformNodeOutboundSnapshot{{Name: "warp", Password: "pw"}}}); err != nil {
-		t.Fatalf("UpdateNodeConfig over a malformed document: %v", err)
+	err := w.svc.UpdateNodeConfig(adminContext(), &dto.NodeConfig{NodeSecret: "s", Outbound: []dto.PlatformNodeOutboundSnapshot{{Name: "warp", Protocol: "direct", Password: "pw"}}})
+	if xerr.CodeOf(err) != xerr.ERROR {
+		t.Fatalf("UpdateNodeConfig error = %v, want fail-closed internal error", err)
 	}
-	if got, err := w.svc.GetNodeConfig(context.Background()); err != nil || len(got.Outbound) != 1 {
-		t.Fatalf("node config after the repair = %+v (err %v)", got, err)
+	if got := w.storedValue(t, "server", "Outbound"); got != "{not json" {
+		t.Fatalf("malformed stored outbound was overwritten with %q", got)
 	}
 }
 

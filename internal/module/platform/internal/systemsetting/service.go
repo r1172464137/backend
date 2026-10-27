@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/perfect-panel/server/internal/module/platform/entity/log"
+	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	"github.com/perfect-panel/server/internal/repository/kernel"
 	"github.com/perfect-panel/server/pkg/xerr"
 )
@@ -21,6 +22,12 @@ type SettingsWriter interface {
 	UpdateValueByCategoryKey(ctx context.Context, category, key, value string, valueType ...string) error
 }
 
+// SettingsReader locks and reads the node settings in the same transaction as
+// their omission-preserving write.
+type SettingsReader interface {
+	GetNodeConfigForUpdate(ctx context.Context) ([]*system.System, error)
+}
+
 // AuditWriter records the administrator's change next to the settings it
 // changed, in the same transaction.
 type AuditWriter interface {
@@ -31,6 +38,7 @@ type AuditWriter interface {
 // the settings it writes and the audit trail it records the change in.
 type SettingsStore interface {
 	SettingsWriter
+	SettingsReader
 	AuditWriter
 }
 
@@ -62,12 +70,14 @@ type platformSettings struct {
 // settingsStore is the settings and the log of one platform transaction.
 type settingsStore struct {
 	SettingsWriter
+	SettingsReader
 	AuditWriter
 }
 
 func (p platformSettings) InSettingsTx(ctx context.Context, fn func(SettingsStore) error) error {
 	return p.store.InPlatformTx(ctx, func(store kernel.PlatformStore) error {
-		return fn(settingsStore{SettingsWriter: store.System(), AuditWriter: store.Log()})
+		systemStore := store.System()
+		return fn(settingsStore{SettingsWriter: systemStore, SettingsReader: systemStore, AuditWriter: store.Log()})
 	})
 }
 

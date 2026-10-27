@@ -87,7 +87,12 @@ type NodeOutbound struct {
 	SpiderX              string   `json:"spider_x,omitempty"`
 	Settings             string   `json:"settings,omitempty"`
 	StreamSettings       string   `json:"stream_settings,omitempty"`
-	Rules                []string `json:"rules"`
+	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	Rules []string `json:"rules"`
+	// Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	IPRules []string `json:"ip_rules"`
+	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	ProtocolRules []string `json:"protocol_rules"`
 }
 
 type QueryNodeTagResponse struct {

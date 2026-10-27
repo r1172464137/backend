@@ -14605,6 +14605,21 @@
             "type": "object",
             "properties": {
                 "block": {
+                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_ips": {
+                    "description": "IP rules: strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_protocols": {
+                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -14629,6 +14644,7 @@
                     "type": "string"
                 },
                 "outbound": {
+                    "description": "Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/dto.NodeOutbound"
@@ -14710,6 +14726,13 @@
                 "host": {
                     "type": "string"
                 },
+                "ip_rules": {
+                    "description": "Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "multiplex": {
                     "type": "string"
                 },
@@ -14732,6 +14755,13 @@
                 "protocol": {
                     "type": "string"
                 },
+                "protocol_rules": {
+                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "reality_public_key": {
                     "type": "string"
                 },
@@ -14742,6 +14772,7 @@
                     "type": "boolean"
                 },
                 "rules": {
+                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -15924,6 +15955,21 @@
             "type": "object",
             "properties": {
                 "block": {
+                    "description": "Canonical domain rules (full, non-whitespace keyword, no-root-dot domain, regexp or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$); limits apply to 1024 canonical unique rules and 4096 bytes each.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_ips": {
+                    "description": "Canonical netip/GeoIP rules with labels matching ^[A-Za-z0-9][A-Za-z0-9_-]*$; limits apply to 1024 canonical unique rules and 4096 bytes each.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_protocols": {
+                    "description": "Canonical protocol rules; only bittorrent; limits apply to 1024 canonical unique rules and 4096 bytes each.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -16579,6 +16625,21 @@
             "type": "object",
             "properties": {
                 "block": {
+                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_ips": {
+                    "description": "Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_protocols": {
+                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -16606,6 +16667,7 @@
                     "type": "string"
                 },
                 "outbound": {
+                    "description": "Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/dto.NodeOutbound"
@@ -16617,6 +16679,21 @@
             "type": "object",
             "properties": {
                 "block": {
+                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_ips": {
+                    "description": "Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_protocols": {
+                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -16632,6 +16709,7 @@
                     "type": "string"
                 },
                 "outbound": {
+                    "description": "Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/dto.NodeOutbound"
@@ -17969,6 +18047,21 @@
             ],
             "properties": {
                 "block": {
+                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_ips": {
+                    "description": "Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "block_protocols": {
+                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -17996,6 +18089,7 @@
                     "type": "string"
                 },
                 "outbound": {
+                    "description": "Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/dto.NodeOutbound"

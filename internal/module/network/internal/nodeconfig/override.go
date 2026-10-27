@@ -13,21 +13,22 @@ import (
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
 )
 
-// GlobalValues is the node configuration every server inherits, normalized
-// like any other configuration values.
 func GlobalValues(c config.NodeConfig) dto.ServerNodeConfigValues {
-	values := dto.ServerNodeConfigValues{IPStrategy: c.IPStrategy, Block: c.Block}
-	for _, d := range c.DNS {
-		values.DNS = append(values.DNS, dto.NodeDNS(d))
+	values := dto.ServerNodeConfigValues{
+		IPStrategy:     c.IPStrategy,
+		Block:          c.Block,
+		BlockIPs:       c.BlockIPs,
+		BlockProtocols: c.BlockProtocols,
 	}
-	for _, o := range c.Outbound {
-		values.Outbound = append(values.Outbound, dto.NodeOutbound(o))
+	for _, dns := range c.DNS {
+		values.DNS = append(values.DNS, dto.NodeDNS(dns))
+	}
+	for _, outbound := range c.Outbound {
+		values.Outbound = append(values.Outbound, dto.NodeOutbound(outbound))
 	}
 	return CloneValues(values)
 }
 
-// ApplyOverride replaces the values the override sets; a missing override
-// changes nothing.
 func ApplyOverride(values *dto.ServerNodeConfigValues, override *node.ServerConfigOverride) error {
 	if values == nil || override == nil || override.Id == 0 {
 		return nil
@@ -43,12 +44,31 @@ func ApplyOverride(values *dto.ServerNodeConfigValues, override *node.ServerConf
 		}
 		values.DNS = ensureDNS(dns)
 	}
-	if override.Block != nil {
-		var block []string
-		if err := unmarshalJSONField(*override.Block, &block, "block"); err != nil {
-			return err
+	if override.Block != nil || override.BlockIPs != nil || override.BlockProtocols != nil {
+		values.Block = []string{}
+		values.BlockIPs = []string{}
+		values.BlockProtocols = []string{}
+		if override.Block != nil {
+			var block []string
+			if err := unmarshalJSONField(*override.Block, &block, "block"); err != nil {
+				return err
+			}
+			values.Block = normalizeStrings(block)
 		}
-		values.Block = normalizeStrings(block)
+		if override.BlockIPs != nil {
+			var blockIPs []string
+			if err := unmarshalJSONField(*override.BlockIPs, &blockIPs, "block_ips"); err != nil {
+				return err
+			}
+			values.BlockIPs = normalizeStrings(blockIPs)
+		}
+		if override.BlockProtocols != nil {
+			var blockProtocols []string
+			if err := unmarshalJSONField(*override.BlockProtocols, &blockProtocols, "block_protocols"); err != nil {
+				return err
+			}
+			values.BlockProtocols = normalizeStrings(blockProtocols)
+		}
 	}
 	if override.Outbound != nil {
 		var outbound []dto.NodeOutbound
@@ -60,8 +80,6 @@ func ApplyOverride(values *dto.ServerNodeConfigValues, override *node.ServerConf
 	return nil
 }
 
-// OverrideResponse is the API form of a server's override: each value it
-// does not set is marked inherited.
 func OverrideResponse(override *node.ServerConfigOverride) (dto.ServerNodeConfigOverride, error) {
 	resp := dto.ServerNodeConfigOverride{
 		InheritIPStrategy: true,
@@ -70,6 +88,8 @@ func OverrideResponse(override *node.ServerConfigOverride) (dto.ServerNodeConfig
 		InheritOutbound:   true,
 		DNS:               []dto.NodeDNS{},
 		Block:             []string{},
+		BlockIPs:          []string{},
+		BlockProtocols:    []string{},
 		Outbound:          []dto.NodeOutbound{},
 	}
 	if override == nil || override.Id == 0 {
@@ -88,13 +108,29 @@ func OverrideResponse(override *node.ServerConfigOverride) (dto.ServerNodeConfig
 		}
 		resp.DNS = ensureDNS(dns)
 	}
-	if override.Block != nil {
+	if override.Block != nil || override.BlockIPs != nil || override.BlockProtocols != nil {
 		resp.InheritBlock = false
-		var block []string
-		if err := unmarshalJSONField(*override.Block, &block, "block"); err != nil {
-			return resp, err
+		if override.Block != nil {
+			var block []string
+			if err := unmarshalJSONField(*override.Block, &block, "block"); err != nil {
+				return resp, err
+			}
+			resp.Block = normalizeStrings(block)
 		}
-		resp.Block = normalizeStrings(block)
+		if override.BlockIPs != nil {
+			var blockIPs []string
+			if err := unmarshalJSONField(*override.BlockIPs, &blockIPs, "block_ips"); err != nil {
+				return resp, err
+			}
+			resp.BlockIPs = normalizeStrings(blockIPs)
+		}
+		if override.BlockProtocols != nil {
+			var blockProtocols []string
+			if err := unmarshalJSONField(*override.BlockProtocols, &blockProtocols, "block_protocols"); err != nil {
+				return resp, err
+			}
+			resp.BlockProtocols = normalizeStrings(blockProtocols)
+		}
 	}
 	if override.Outbound != nil {
 		resp.InheritOutbound = false
@@ -108,15 +144,47 @@ func OverrideResponse(override *node.ServerConfigOverride) (dto.ServerNodeConfig
 	return resp, nil
 }
 
-// OverrideModel is the stored form of a server's override as the API sets
-// it, and whether it inherits every value, in which case nothing need be
-// stored.
+// MergeRouteRuleOmissions preserves additive fields hidden from older admin
+// clients. Explicitly submitted empty arrays remain empty.
+func MergeRouteRuleOmissions(req *dto.UpdateServerNodeConfigRequest, existing dto.ServerNodeConfigOverride, inheritedOutbound []dto.NodeOutbound) error {
+	if req == nil {
+		return fmt.Errorf("server node config request is nil")
+	}
+	if !req.InheritOutbound {
+		if err := normalizeOutboundIdentities(req.Outbound); err != nil {
+			return err
+		}
+	}
+	if req.RequestFields == nil {
+		return nil
+	}
+	if !req.InheritBlock {
+		if _, ok := req.RequestFields["block_ips"]; !ok {
+			req.BlockIPs = cloneStrings(existing.BlockIPs)
+		}
+		if _, ok := req.RequestFields["block_protocols"]; !ok {
+			req.BlockProtocols = cloneStrings(existing.BlockProtocols)
+		}
+	}
+	if req.InheritOutbound {
+		return nil
+	}
+	current := existing.Outbound
+	if existing.InheritOutbound {
+		current = inheritedOutbound
+	}
+	return mergeOutboundRuleOmissions(req.Outbound, current, req.OutboundFieldSets)
+}
+
 func OverrideModel(serverID int64, req dto.ServerNodeConfigOverride) (*node.ServerConfigOverride, bool, error) {
 	data := &node.ServerConfigOverride{
 		ServerId: serverID,
 	}
 
 	if !req.InheritIPStrategy {
+		if len(req.IPStrategy) > 32 {
+			return nil, false, &config.RouteRuleError{Field: "ip_strategy", Message: "exceeds the 32-byte database limit"}
+		}
 		data.IPStrategy = stringPtr(req.IPStrategy)
 	}
 	if !req.InheritDNS {
@@ -124,29 +192,66 @@ func OverrideModel(serverID int64, req dto.ServerNodeConfigOverride) (*node.Serv
 		if err != nil {
 			return nil, false, err
 		}
+		if err := config.ValidateSerializedJSON("dns", value); err != nil {
+			return nil, false, err
+		}
 		data.DNS = &value
 	}
 	if !req.InheritBlock {
-		value, err := marshalJSONField(normalizeStrings(req.Block), "block")
+		block, err := config.NormalizeDomainRules("block", req.Block)
 		if err != nil {
 			return nil, false, err
 		}
-		data.Block = &value
+		blockIPs, err := config.NormalizeIPRules("block_ips", req.BlockIPs)
+		if err != nil {
+			return nil, false, err
+		}
+		blockProtocols, err := config.NormalizeProtocolRules("block_protocols", req.BlockProtocols)
+		if err != nil {
+			return nil, false, err
+		}
+		blockValue, err := marshalJSONField(block, "block")
+		if err != nil {
+			return nil, false, err
+		}
+		blockIPValue, err := marshalJSONField(blockIPs, "block_ips")
+		if err != nil {
+			return nil, false, err
+		}
+		blockProtocolValue, err := marshalJSONField(blockProtocols, "block_protocols")
+		if err != nil {
+			return nil, false, err
+		}
+		for _, persisted := range []struct{ field, value string }{
+			{"block", blockValue}, {"block_ips", blockIPValue}, {"block_protocols", blockProtocolValue},
+		} {
+			if err := config.ValidateSerializedJSON(persisted.field, persisted.value); err != nil {
+				return nil, false, err
+			}
+		}
+		data.Block = &blockValue
+		data.BlockIPs = &blockIPValue
+		data.BlockProtocols = &blockProtocolValue
 	}
 	if !req.InheritOutbound {
-		value, err := marshalJSONField(ensureOutbound(req.Outbound), "outbound")
+		outbound, err := normalizeOutboundRulesForWrite(req.Outbound)
 		if err != nil {
+			return nil, false, err
+		}
+		value, err := marshalJSONField(outbound, "outbound")
+		if err != nil {
+			return nil, false, err
+		}
+		if err := config.ValidateSerializedJSON("outbound", value); err != nil {
 			return nil, false, err
 		}
 		data.Outbound = &value
 	}
 
-	allInherited := data.IPStrategy == nil && data.DNS == nil && data.Block == nil && data.Outbound == nil
+	allInherited := data.IPStrategy == nil && data.DNS == nil && data.Block == nil && data.BlockIPs == nil && data.BlockProtocols == nil && data.Outbound == nil
 	return data, allInherited, nil
 }
 
-// CloneValues deep-copies values, normalizing its string lists and giving the
-// DNS and outbound lists their defaults when empty.
 func CloneValues(values dto.ServerNodeConfigValues) dto.ServerNodeConfigValues {
 	dns := make([]dto.NodeDNS, 0, len(values.DNS))
 	for _, d := range values.DNS {
@@ -202,14 +307,18 @@ func CloneValues(values dto.ServerNodeConfigValues) dto.ServerNodeConfigValues {
 			Settings:             o.Settings,
 			StreamSettings:       o.StreamSettings,
 			Rules:                normalizeStrings(o.Rules),
+			IPRules:              normalizeStrings(o.IPRules),
+			ProtocolRules:        normalizeStrings(o.ProtocolRules),
 		})
 	}
 
 	return dto.ServerNodeConfigValues{
-		IPStrategy: values.IPStrategy,
-		DNS:        ensureDNS(dns),
-		Block:      normalizeStrings(values.Block),
-		Outbound:   ensureOutbound(outbound),
+		IPStrategy:     values.IPStrategy,
+		DNS:            ensureDNS(dns),
+		Block:          normalizeStrings(values.Block),
+		BlockIPs:       normalizeStrings(values.BlockIPs),
+		BlockProtocols: normalizeStrings(values.BlockProtocols),
+		Outbound:       ensureOutbound(outbound),
 	}
 }
 
@@ -281,6 +390,8 @@ func ensureOutbound(values []dto.NodeOutbound) []dto.NodeOutbound {
 		name := strings.TrimSpace(item.Name)
 		protocol := strings.TrimSpace(item.Protocol)
 		rules := normalizeStrings(item.Rules)
+		ipRules := normalizeStrings(item.IPRules)
+		protocolRules := normalizeStrings(item.ProtocolRules)
 		if name == "" || protocol == "" {
 			continue
 		}
@@ -326,9 +437,113 @@ func ensureOutbound(values []dto.NodeOutbound) []dto.NodeOutbound {
 			Settings:             strings.TrimSpace(item.Settings),
 			StreamSettings:       strings.TrimSpace(item.StreamSettings),
 			Rules:                rules,
+			IPRules:              ipRules,
+			ProtocolRules:        protocolRules,
 		})
 	}
 	return result
+}
+
+func normalizeOutboundIdentities(values []dto.NodeOutbound) error {
+	names := make([]string, len(values))
+	protocols := make([]string, len(values))
+	for index := range values {
+		names[index] = values[index].Name
+		protocols[index] = values[index].Protocol
+	}
+	names, err := config.NormalizeOutboundNames("outbound", names)
+	if err != nil {
+		return err
+	}
+	protocols, err = config.NormalizeOutboundProtocols("outbound", protocols)
+	if err != nil {
+		return err
+	}
+	for index := range values {
+		values[index].Name = names[index]
+		values[index].Protocol = protocols[index]
+	}
+	return nil
+}
+
+func normalizeOutboundRulesForWrite(values []dto.NodeOutbound) ([]dto.NodeOutbound, error) {
+	if err := normalizeOutboundIdentities(values); err != nil {
+		return nil, err
+	}
+	values = ensureOutbound(values)
+	totalRules, totalRuleBytes := 0, 0
+	for index := range values {
+		field := fmt.Sprintf("outbound[%d]", index+1)
+		var err error
+		if values[index].Rules, err = config.NormalizeDomainRules(field+".rules", values[index].Rules); err != nil {
+			return nil, err
+		}
+		if values[index].IPRules, err = config.NormalizeIPRules(field+".ip_rules", values[index].IPRules); err != nil {
+			return nil, err
+		}
+		if values[index].ProtocolRules, err = config.NormalizeProtocolRules(field+".protocol_rules", values[index].ProtocolRules); err != nil {
+			return nil, err
+		}
+		for _, rules := range [][]string{values[index].Rules, values[index].IPRules, values[index].ProtocolRules} {
+			totalRules += len(rules)
+			for _, rule := range rules {
+				totalRuleBytes += len(rule)
+			}
+		}
+	}
+	if err := config.ValidateOutboundAggregate("outbound", len(values), totalRules, totalRuleBytes); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func mergeOutboundRuleOmissions(next, current []dto.NodeOutbound, fieldSets []map[string]struct{}) error {
+	needsMatch := false
+	for index := range next {
+		if index >= len(fieldSets) || fieldSets[index] == nil {
+			continue
+		}
+		_, hasIP := fieldSets[index]["ip_rules"]
+		_, hasProtocol := fieldSets[index]["protocol_rules"]
+		if !hasIP || !hasProtocol {
+			needsMatch = true
+			break
+		}
+	}
+	if !needsMatch {
+		return nil
+	}
+	nextInputs := make([]config.LegacyOutboundMatchInput, len(next))
+	for index := range next {
+		nextInputs[index] = config.LegacyOutboundMatchInput{Name: next[index].Name, Value: next[index]}
+	}
+	currentInputs := make([]config.LegacyOutboundMatchInput, len(current))
+	for index := range current {
+		currentInputs[index] = config.LegacyOutboundMatchInput{Name: current[index].Name, Value: current[index]}
+	}
+	matches, err := config.MatchLegacyOutbounds("outbound", nextInputs, currentInputs)
+	if err != nil {
+		return err
+	}
+	for index, currentIndex := range matches {
+		if currentIndex < 0 || index >= len(fieldSets) || fieldSets[index] == nil {
+			continue
+		}
+		if _, ok := fieldSets[index]["ip_rules"]; !ok {
+			next[index].IPRules = cloneStrings(current[currentIndex].IPRules)
+		}
+		if _, ok := fieldSets[index]["protocol_rules"]; !ok {
+			next[index].ProtocolRules = cloneStrings(current[currentIndex].ProtocolRules)
+		}
+	}
+	return nil
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return append([]string(nil), values...)
 }
 
 func stringPtr(value string) *string {

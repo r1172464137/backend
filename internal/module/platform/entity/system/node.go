@@ -13,10 +13,9 @@ import (
 // settings rows. Startup, the admin reload and the admin settings read all
 // parse it here, so they agree on every rule.
 //
-// DNS and Outbound hold JSON documents; a malformed one is reported rather
-// than dropped. A scalar setting that does not decode keeps its zero value
-// and Block is decoded leniently, as they always have been; both are logged
-// with the setting's key.
+// DNS, all block categories and Outbound hold JSON documents; malformed
+// persisted JSON is reported rather than silently weakening routing. A scalar
+// setting that does not decode keeps its zero value and is logged with its key.
 func ParseNodeConfig(rows []*System) (config.NodeConfig, error) {
 	var stored config.NodeDBConfig
 	if err := config.DecodeSystemConfig(rows, &stored); err != nil {
@@ -38,11 +37,23 @@ func ParseNodeConfig(rows []*System) (config.NodeConfig, error) {
 	if stored.Block != "" {
 		var block []string
 		if err := json.Unmarshal([]byte(stored.Block), &block); err != nil {
-			// An unreadable list blocks nothing, as before.
-			logger.Errorw("[NodeConfig] the Block node setting is not a JSON string list, blocking nothing",
-				logger.Field("key", "Block"), logger.Field("error", err.Error()))
+			return config.NodeConfig{}, fmt.Errorf("node setting Block: %w", err)
 		}
 		parsed.Block = slicesx.RemoveDuplicateElements(block...)
+	}
+	if stored.BlockIPs != "" {
+		var blockIPs []string
+		if err := json.Unmarshal([]byte(stored.BlockIPs), &blockIPs); err != nil {
+			return config.NodeConfig{}, fmt.Errorf("node setting BlockIPs: %w", err)
+		}
+		parsed.BlockIPs = slicesx.RemoveDuplicateElements(blockIPs...)
+	}
+	if stored.BlockProtocols != "" {
+		var blockProtocols []string
+		if err := json.Unmarshal([]byte(stored.BlockProtocols), &blockProtocols); err != nil {
+			return config.NodeConfig{}, fmt.Errorf("node setting BlockProtocols: %w", err)
+		}
+		parsed.BlockProtocols = slicesx.RemoveDuplicateElements(blockProtocols...)
 	}
 	if stored.Outbound != "" {
 		if err := json.Unmarshal([]byte(stored.Outbound), &parsed.Outbound); err != nil {

@@ -175,7 +175,14 @@ var settingCases = []settingCase{
 			DNS:   []dto.PlatformNodeDNSSnapshot{{Proto: "tcp", Address: "8.8.8.8:53", Domains: []string{"example.org"}}},
 			Block: []string{"tracker.example"},
 			Outbound: []dto.PlatformNodeOutboundSnapshot{{Name: "relay", Protocol: "shadowsocks", Address: "relay.example", Port: 8388, Password: "pw",
-				Cipher: "aes-256-gcm", PluginOptions: map[string]any{"mode": "fast"}, Rules: []string{"geosite:netflix"}}}}},
+				Cipher: "aes-256-gcm", PluginOptions: map[string]any{"mode": "fast"}, Rules: []string{"geosite:netflix"}}},
+			RequestFields: map[string]struct{}{
+				"node_secret": {}, "node_pull_interval": {}, "node_push_interval": {}, "traffic_report_threshold": {}, "ip_strategy": {}, "dns": {}, "block": {}, "outbound": {},
+			},
+			OutboundFieldSets: []map[string]struct{}{{
+				"name": {}, "protocol": {}, "address": {}, "port": {}, "password": {}, "cipher": {}, "plugin_opts": {}, "rules": {},
+			}},
+		}},
 	{name: "multiplier preview", httpMethod: http.MethodGet, path: "/node_multiplier/preview", call: "PreViewNodeMultiplier",
 		answer: &dto.PreViewNodeMultiplierResponse{CurrentTime: "03:00", Ratio: 0.5}},
 	{name: "privacy", httpMethod: http.MethodGet, path: "/privacy", call: "GetPrivacyPolicyConfig",

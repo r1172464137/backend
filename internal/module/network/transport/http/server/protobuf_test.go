@@ -3,12 +3,16 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	serverv1 "github.com/perfect-panel/server/api/server/v1"
+	appconfig "github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 func newProtobufContext(t *testing.T, message proto.Message) *app.RequestContext {
@@ -158,9 +162,12 @@ func TestResponseConversions(t *testing.T) {
 		DNS: []dto.NodeDNS{{
 			Proto: "https", Address: "https://dns.example/dns-query", Domains: []string{"example.com"},
 		}},
-		Block: []string{"example.com"},
+		Block:          []string{"full:example.com"},
+		BlockIPs:       []string{"geoip:private", "10.0.0.0/8"},
+		BlockProtocols: []string{"bittorrent"},
 		Outbound: []dto.NodeOutbound{{
 			Name: "direct", Protocol: "shadowsocks", Port: 443, PluginOptions: "mode=fast",
+			Rules: []string{"geosite:cn"}, IPRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"},
 		}},
 		Protocols: []dto.Protocol{
 			{
@@ -186,6 +193,23 @@ func TestResponseConversions(t *testing.T) {
 	if len(protocols.Data.Outbound) != 1 || protocols.Data.Outbound[0].PluginOptions.GetStringValue() != "mode=fast" {
 		t.Fatalf("outbound = %+v, want strongly typed outbound configuration", protocols.Data.Outbound)
 	}
+	if !reflect.DeepEqual(protocols.Data.BlockIps, []string{"geoip:private", "10.0.0.0/8"}) ||
+		!reflect.DeepEqual(protocols.Data.BlockProtocols, []string{"bittorrent"}) ||
+		!reflect.DeepEqual(protocols.Data.Outbound[0].IpRules, []string{"geoip:cn"}) ||
+		!reflect.DeepEqual(protocols.Data.Outbound[0].ProtocolRules, []string{"bittorrent"}) {
+		t.Fatalf("structured protobuf routes = %+v", protocols.Data)
+	}
+	wire, err := proto.Marshal(protocols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped serverv1.QueryServerProtocolConfigResponse
+	if err := proto.Unmarshal(wire, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(protocols, &roundTripped) {
+		t.Fatalf("protobuf exact round trip changed response\nwant: %v\ngot:  %v", protocols, &roundTripped)
+	}
 	if len(protocols.Data.Protocols) != 2 || protocols.Data.Protocols[0].XhttpMode != "auto" || protocols.Data.Protocols[0].PluginOptions.GetStructValue().Fields["host"].GetStringValue() != "example.com" {
 		t.Fatalf("protocols = %+v, want strongly typed protocol configuration", protocols.Data.Protocols)
 	}
@@ -195,6 +219,178 @@ func TestResponseConversions(t *testing.T) {
 		len(nowhere.Alpn) != 1 || nowhere.Alpn[0] != "now/1" || nowhere.CertMode != "self" {
 		t.Fatalf("Nowhere protobuf protocol = %+v, want complete server contract", nowhere)
 	}
+}
+
+func TestStructuredRouteCanonicalCrosswireProjection(t *testing.T) {
+	domains, err := appconfig.NormalizeDomainRules("outbound[1].rules", []string{
+		"example.com.", "KEYWORD:tracker", "SUFFIX:example.org.", `regex:(?i)(^|\.)announce\.`, "geosite:category-ai-!cn@ads",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ips, err := appconfig.NormalizeIPRules("outbound[1].ip_rules", []string{"geoip:cn_test-1", "10.2.3.4/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocolRules, err := appconfig.NormalizeProtocolRules("outbound[1].protocol_rules", []string{"BitTorrent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	converted, err := queryServerProtocolConfigResponseToProtobuf(&dto.QueryServerConfigResponse{
+		Block: domains, BlockIPs: ips, BlockProtocols: protocolRules,
+		Outbound: []dto.NodeOutbound{{Name: "crosswire", Protocol: "direct", Rules: domains, IPRules: ips, ProtocolRules: protocolRules}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDomains := []string{"full:example.com", "keyword:tracker", "domain:example.org", `regexp:(?i)(^|\.)announce\.`, "geosite:category-ai-!cn@ads"}
+	wantIPs := []string{"geoip:cn_test-1", "10.0.0.0/8"}
+	if !reflect.DeepEqual(converted.Data.Block, wantDomains) || !reflect.DeepEqual(converted.Data.BlockIps, wantIPs) ||
+		!reflect.DeepEqual(converted.Data.BlockProtocols, []string{"bittorrent"}) ||
+		!reflect.DeepEqual(converted.Data.Outbound[0].Rules, wantDomains) || !reflect.DeepEqual(converted.Data.Outbound[0].IpRules, wantIPs) {
+		t.Fatalf("crosswire protobuf projection = %#v", converted.Data)
+	}
+}
+
+func TestStructuredRouteProtoTagsAndOldConsumerProjection(t *testing.T) {
+	queryFields := (&serverv1.QueryServerProtocolConfigData{}).ProtoReflect().Descriptor().Fields()
+	outboundFields := (&serverv1.Outbound{}).ProtoReflect().Descriptor().Fields()
+	for name, want := range map[string]int{"traffic_report_threshold": 1, "push_interval": 2, "pull_interval": 3, "ip_strategy": 4, "dns": 5, "block": 6, "outbound": 7, "protocols": 8, "total": 9} {
+		if got := int(queryFields.ByName(protoreflect.Name(name)).Number()); got != want {
+			t.Errorf("QueryServerProtocolConfigData.%s tag = %d, want unchanged %d", name, got, want)
+		}
+	}
+	for name, want := range map[string]int{"name": 1, "protocol": 2, "stream_settings": 40, "rules": 41} {
+		if got := int(outboundFields.ByName(protoreflect.Name(name)).Number()); got != want {
+			t.Errorf("Outbound.%s tag = %d, want unchanged %d", name, got, want)
+		}
+	}
+	if got := queryFields.ByName("block_ips").Number(); got != 10 {
+		t.Fatalf("block_ips tag = %d, want 10", got)
+	}
+	if got := queryFields.ByName("block_protocols").Number(); got != 11 {
+		t.Fatalf("block_protocols tag = %d, want 11", got)
+	}
+	if got := outboundFields.ByName("ip_rules").Number(); got != 42 {
+		t.Fatalf("ip_rules tag = %d, want 42", got)
+	}
+	if got := outboundFields.ByName("protocol_rules").Number(); got != 43 {
+		t.Fatalf("protocol_rules tag = %d, want 43", got)
+	}
+
+	message := &serverv1.QueryServerProtocolConfigData{
+		Block:          []string{"full:legacy.example"},
+		BlockIps:       []string{"geoip:private"},
+		BlockProtocols: []string{"bittorrent"},
+		Outbound: []*serverv1.Outbound{{
+			Name: "legacy", Rules: []string{"geosite:cn"}, IpRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"},
+		}},
+	}
+	wire, err := proto.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, names, rules, err := projectOldQueryWire(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(block, []string{"full:legacy.example"}) || !reflect.DeepEqual(names, []string{"legacy"}) || !reflect.DeepEqual(rules, []string{"geosite:cn"}) {
+		t.Fatalf("old protobuf projection block=%#v names=%#v rules=%#v", block, names, rules)
+	}
+
+	jsonWire, err := json.Marshal(dto.QueryServerConfigResponse{
+		Block: []string{"full:legacy.example"}, BlockIPs: []string{"geoip:private"}, BlockProtocols: []string{"bittorrent"},
+		Outbound: []dto.NodeOutbound{{Name: "legacy", Rules: []string{"geosite:cn"}, IPRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newJSON dto.QueryServerConfigResponse
+	if err := json.Unmarshal(jsonWire, &newJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(newJSON.BlockIPs, []string{"geoip:private"}) ||
+		!reflect.DeepEqual(newJSON.BlockProtocols, []string{"bittorrent"}) ||
+		!reflect.DeepEqual(newJSON.Outbound[0].IPRules, []string{"geoip:cn"}) ||
+		!reflect.DeepEqual(newJSON.Outbound[0].ProtocolRules, []string{"bittorrent"}) {
+		t.Fatalf("new JSON exact round trip = %#v", newJSON)
+	}
+	var oldJSON struct {
+		Block    []string `json:"block"`
+		Outbound []struct {
+			Name  string   `json:"name"`
+			Rules []string `json:"rules"`
+		} `json:"outbound"`
+	}
+	if err := json.Unmarshal(jsonWire, &oldJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(oldJSON.Block, block) || oldJSON.Outbound[0].Name != names[0] || !reflect.DeepEqual(oldJSON.Outbound[0].Rules, rules) {
+		t.Fatalf("old JSON projection = %#v", oldJSON)
+	}
+}
+
+func projectOldQueryWire(wire []byte) (block, names, rules []string, err error) {
+	for len(wire) > 0 {
+		number, wireType, tagLength := protowire.ConsumeTag(wire)
+		if tagLength < 0 {
+			return nil, nil, nil, protowire.ParseError(tagLength)
+		}
+		wire = wire[tagLength:]
+		if number == 6 || number == 7 {
+			value, valueLength := protowire.ConsumeBytes(wire)
+			if valueLength < 0 {
+				return nil, nil, nil, protowire.ParseError(valueLength)
+			}
+			wire = wire[valueLength:]
+			if number == 6 {
+				block = append(block, string(value))
+				continue
+			}
+			name, outboundRules, parseErr := projectOldOutboundWire(value)
+			if parseErr != nil {
+				return nil, nil, nil, parseErr
+			}
+			names = append(names, name)
+			rules = append(rules, outboundRules...)
+			continue
+		}
+		fieldLength := protowire.ConsumeFieldValue(number, wireType, wire)
+		if fieldLength < 0 {
+			return nil, nil, nil, protowire.ParseError(fieldLength)
+		}
+		wire = wire[fieldLength:]
+	}
+	return block, names, rules, nil
+}
+
+func projectOldOutboundWire(wire []byte) (name string, rules []string, err error) {
+	for len(wire) > 0 {
+		number, wireType, tagLength := protowire.ConsumeTag(wire)
+		if tagLength < 0 {
+			return "", nil, protowire.ParseError(tagLength)
+		}
+		wire = wire[tagLength:]
+		if number == 1 || number == 41 {
+			value, valueLength := protowire.ConsumeBytes(wire)
+			if valueLength < 0 {
+				return "", nil, protowire.ParseError(valueLength)
+			}
+			wire = wire[valueLength:]
+			if number == 1 {
+				name = string(value)
+			} else {
+				rules = append(rules, string(value))
+			}
+			continue
+		}
+		fieldLength := protowire.ConsumeFieldValue(number, wireType, wire)
+		if fieldLength < 0 {
+			return "", nil, protowire.ParseError(fieldLength)
+		}
+		wire = wire[fieldLength:]
+	}
+	return name, rules, nil
 }
 
 func TestAcceptsProtobuf_RejectsZeroQuality(t *testing.T) {

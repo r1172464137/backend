@@ -37,7 +37,8 @@ var _ SettingsTransactor = (*platformTx)(nil)
 
 func (p *platformTx) InSettingsTx(ctx context.Context, fn func(SettingsStore) error) error {
 	return p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := fn(settingsStore{SettingsWriter: repo.NewSystemRepo(cache.NewConn(tx, p.rds)), AuditWriter: repo.NewLogRepo(tx)}); err != nil {
+		systemStore := repo.NewSystemRepo(cache.NewConn(tx, p.rds))
+		if err := fn(settingsStore{SettingsWriter: systemStore, SettingsReader: systemStore, AuditWriter: repo.NewLogRepo(tx)}); err != nil {
 			return err
 		}
 		return p.failCommit
@@ -190,7 +191,10 @@ func TestSettingsReadBackAsWritten(t *testing.T) {
 	// The node secret reads back in clear: administrators copy it to deploy
 	// nodes. The outbound credentials read back masked.
 	maskedNode := *node
-	maskedNode.Outbound = []dto.PlatformNodeOutboundSnapshot{{Name: "warp", Protocol: "wireguard", Address: "162.159.192.1", Port: 2408, Password: dto.SecretMask, Rules: []string{"geosite:openai"}}}
+	maskedNode.Block = []string{"full:ads.example"}
+	maskedNode.BlockIPs = []string{}
+	maskedNode.BlockProtocols = []string{}
+	maskedNode.Outbound = []dto.PlatformNodeOutboundSnapshot{{Name: "warp", Protocol: "wireguard", Address: "162.159.192.1", Port: 2408, Password: dto.SecretMask, Rules: []string{"geosite:openai"}, IPRules: []string{}, ProtocolRules: []string{}}}
 	check("node", func() error { return w.svc.UpdateNodeConfig(ctx, node) },
 		func() (any, error) { return w.svc.GetNodeConfig(ctx) }, &maskedNode)
 

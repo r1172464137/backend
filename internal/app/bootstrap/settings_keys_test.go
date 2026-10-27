@@ -116,6 +116,9 @@ func writtenSettings(reader settingsReader, seeded []storedSetting) []storedSett
 	var written []storedSetting
 	for i := 0; i < request.NumField(); i++ {
 		field := request.Type().Field(i)
+		if field.Tag.Get("json") == "-" {
+			continue
+		}
 		sample := sampleValue(field.Type)
 		typ, ok := seededTypes[field.Name]
 		if !ok {

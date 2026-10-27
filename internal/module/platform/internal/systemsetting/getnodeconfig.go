@@ -10,8 +10,8 @@ import (
 )
 
 // GetNodeConfig returns the stored node settings, the outbound credentials
-// masked. A malformed DNS or outbound document is reported as an error
-// instead of taking the process down.
+// masked. Malformed persisted DNS, block-category or outbound JSON is
+// reported as an error instead of silently weakening the node configuration.
 func (s *Service) GetNodeConfig(ctx context.Context) (*dto.NodeConfig, error) {
 	view, err := s.storedNodeConfig(ctx)
 	if err != nil {
@@ -46,7 +46,9 @@ func nodeConfigView(c config.NodeConfig) *dto.NodeConfig {
 		NodePushInterval:       c.NodePushInterval,
 		TrafficReportThreshold: c.TrafficReportThreshold,
 		IPStrategy:             c.IPStrategy,
-		Block:                  c.Block,
+		Block:                  nonNilStrings(c.Block),
+		BlockIPs:               nonNilStrings(c.BlockIPs),
+		BlockProtocols:         nonNilStrings(c.BlockProtocols),
 	}
 	if c.DNS != nil {
 		view.DNS = make([]dto.PlatformNodeDNSSnapshot, len(c.DNS))
@@ -58,7 +60,17 @@ func nodeConfigView(c config.NodeConfig) *dto.NodeConfig {
 		view.Outbound = make([]dto.PlatformNodeOutboundSnapshot, len(c.Outbound))
 		for i, outbound := range c.Outbound {
 			view.Outbound[i] = dto.PlatformNodeOutboundSnapshot(outbound)
+			view.Outbound[i].Rules = nonNilStrings(view.Outbound[i].Rules)
+			view.Outbound[i].IPRules = nonNilStrings(view.Outbound[i].IPRules)
+			view.Outbound[i].ProtocolRules = nonNilStrings(view.Outbound[i].ProtocolRules)
 		}
 	}
 	return view
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
