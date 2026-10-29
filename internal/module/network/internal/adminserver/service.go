@@ -8,19 +8,15 @@ import (
 	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/repository"
+	"github.com/redis/go-redis/v9"
 )
-
-// Snapshot is the per-request view of the runtime-mutable node settings.
-type Snapshot struct {
-	Node config.NodeConfig
-}
 
 // Deps declares the subdomain's dependencies; the module facade forwards
 // them from the composition root.
 type Deps struct {
-	Store Store
-	// Config snapshots the runtime-mutable node settings per request.
-	Config func() Snapshot
+	Store                Store
+	Redis                *redis.Client
+	ReadGlobalNodeConfig func(context.Context) (config.NodeConfig, error)
 }
 
 // Service is the admin server-management entry point used by the network
@@ -33,7 +29,7 @@ func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
 }
 
-func (s *Service) CreateServer(ctx context.Context, req *dto.CreateServerRequest) error {
+func (s *Service) CreateServer(ctx context.Context, req *dto.CreateServerRequest) (*dto.CreateServerResponse, error) {
 	return newCreateServerLogic(ctx, s.deps).CreateServer(req)
 }
 

@@ -13,9 +13,10 @@ import (
 // per-request snapshot closure.
 func newNetworkModule(store repository.Store, srv *Application) network.Service {
 	return network.New(network.Deps{
-		Store:        store,
-		TrafficUsage: subscription.NewTrafficUsage(store),
-		Redis:        srv.Redis,
+		Store:                store,
+		TrafficUsage:         subscription.NewTrafficUsage(store),
+		Redis:                srv.Redis,
+		ReadGlobalNodeConfig: srv.Platform.ReadNodeConfigSnapshot,
 		Config: func() network.Snapshot {
 			current := srv.Runtime.Config()
 			return network.Snapshot{

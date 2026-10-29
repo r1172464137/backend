@@ -23,11 +23,12 @@ type swaggerDocument struct {
 }
 
 type swaggerOperation struct {
-	Summary    string                     `json:"summary"`
-	Tags       []string                   `json:"tags"`
-	Responses  map[string]json.RawMessage `json:"responses"`
-	Parameters []swaggerParameter         `json:"parameters"`
-	Security   []map[string][]string      `json:"security"`
+	Summary     string                     `json:"summary"`
+	Description string                     `json:"description"`
+	Tags        []string                   `json:"tags"`
+	Responses   map[string]json.RawMessage `json:"responses"`
+	Parameters  []swaggerParameter         `json:"parameters"`
+	Security    []map[string][]string      `json:"security"`
 }
 
 type swaggerParameter struct {
@@ -189,105 +190,76 @@ type swaggerObjectSchema struct {
 	Properties map[string]swaggerArrayProperty `json:"properties"`
 }
 
-func TestSwaggerDocumentsStructuredRouteRuleContract(t *testing.T) {
+func TestSwaggerCreateServerReturnsCommittedID(t *testing.T) {
 	document := readSwaggerDocument(t)
-	definitions := map[string][]string{
-		"dto.NodeConfig":                    {"block_ips", "block_protocols"},
-		"dto.NodeOutbound":                  {"ip_rules", "protocol_rules"},
-		"dto.QueryServerConfigResponse":     {"block_ips", "block_protocols"},
-		"dto.ServerNodeConfigOverride":      {"block_ips", "block_protocols"},
-		"dto.ServerNodeConfigValues":        {"block_ips", "block_protocols"},
-		"dto.UpdateServerNodeConfigRequest": {"block_ips", "block_protocols"},
-	}
-	for definition, fields := range definitions {
-		t.Run(definition, func(t *testing.T) {
-			assertStructuredRouteDefinition(t, document, definition, fields)
-		})
-	}
-	t.Run("outbound rule descriptions", func(t *testing.T) {
-		assertNodeOutboundRuleDescriptions(t, document)
-	})
-	t.Run("outbound aggregate limits", func(t *testing.T) {
-		assertNodeConfigOutboundLimits(t, document)
-	})
-}
-
-func assertStructuredRouteDefinition(t *testing.T, document swaggerDocument, definition string, fields []string) {
-	t.Helper()
-	raw, ok := document.Definitions[definition]
-	if !ok {
-		t.Errorf("Swagger definition %q is missing", definition)
-		return
+	operation := document.Paths["/v1/admin/server/create"]["post"]
+	if !strings.Contains(string(operation.Responses["200"]), "#/definitions/dto.CreateServerResponse") {
+		t.Fatal("create response does not document data.id")
 	}
 	var schema swaggerObjectSchema
-	if err := json.Unmarshal(raw, &schema); err != nil {
-		t.Fatalf("decode %s: %v", definition, err)
-	}
-	required := make(map[string]bool, len(schema.Required))
-	for _, field := range schema.Required {
-		required[field] = true
-	}
-	for _, field := range fields {
-		assertStructuredRouteProperty(t, definition, field, schema.Properties, required)
-	}
-}
-
-func assertStructuredRouteProperty(t *testing.T, definition, field string, properties map[string]swaggerArrayProperty, required map[string]bool) {
-	t.Helper()
-	property, exists := properties[field]
-	if !exists {
-		t.Errorf("Swagger definition %s has no %s property", definition, field)
-		return
-	}
-	if required[field] {
-		t.Errorf("Swagger %s.%s must remain optional for additive old-consumer compatibility", definition, field)
-	}
-	if property.Type != "array" || property.Items.Type != "string" {
-		t.Errorf("Swagger %s.%s = type %q items %q, want array of string", definition, field, property.Type, property.Items.Type)
-	}
-	wantGrammar := "bittorrent"
-	if field == "block_ips" || field == "ip_rules" {
-		wantGrammar = "^[A-Za-z0-9][A-Za-z0-9_-]*$"
-	}
-	if !strings.Contains(property.Description, wantGrammar) {
-		t.Errorf("Swagger %s.%s description %q does not document %q", definition, field, property.Description, wantGrammar)
-	}
-	if !strings.Contains(property.Description, "1024") || !strings.Contains(property.Description, "4096") {
-		t.Errorf("Swagger %s.%s description %q does not document per-list limits", definition, field, property.Description)
-	}
-}
-
-func assertNodeOutboundRuleDescriptions(t *testing.T, document swaggerDocument) {
-	t.Helper()
-	var schema swaggerObjectSchema
-	if err := json.Unmarshal(document.Definitions["dto.NodeOutbound"], &schema); err != nil {
+	if err := json.Unmarshal(document.Definitions["dto.CreateServerResponse"], &schema); err != nil {
 		t.Fatal(err)
 	}
-	for field, fragment := range map[string]string{
-		"rules":          "^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$",
-		"ip_rules":       "^[A-Za-z0-9][A-Za-z0-9_-]*$",
-		"protocol_rules": "bittorrent",
-	} {
-		description := schema.Properties[field].Description
-		if !strings.Contains(description, fragment) {
-			t.Errorf("Swagger dto.NodeOutbound.%s does not document %q: %q", field, fragment, description)
+	found := false
+	for _, name := range schema.Required {
+		if name == "id" {
+			found = true
 		}
-		if !strings.Contains(description, "1024") || !strings.Contains(description, "4096") {
-			t.Errorf("Swagger dto.NodeOutbound.%s does not document per-list limits: %q", field, description)
-		}
+	}
+	if !found || schema.Properties["id"].Type != "integer" {
+		t.Fatal("created id is not a required integer")
 	}
 }
 
-func assertNodeConfigOutboundLimits(t *testing.T, document swaggerDocument) {
-	t.Helper()
-	var schema swaggerObjectSchema
-	if err := json.Unmarshal(document.Definitions["dto.NodeConfig"], &schema); err != nil {
-		t.Fatal(err)
+func TestSwaggerDesiredRoutingIsIndependentOfNodeStatus(t *testing.T) {
+	document := readSwaggerDocument(t)
+	update := document.Paths["/v1/admin/server/node_config/update"]["post"]
+	for _, text := range []string{"offline", "without requiring a routing status report", "does not mean applied", "routing_status", "routing_revision"} {
+		if !strings.Contains(update.Description, text) {
+			t.Errorf("update description missing %q", text)
+		}
 	}
-	description := schema.Properties["outbound"].Description
-	for _, limit := range []string{"128", "4096", "48 KiB", "60 KiB"} {
-		if !strings.Contains(description, limit) {
-			t.Errorf("Swagger dto.NodeConfig.outbound does not document %s: %q", limit, description)
+	if _, present := update.Responses["426"]; present {
+		t.Fatal("admin update incorrectly documents node upgrade gate")
+	}
+	get := document.Paths["/v1/admin/server/node_config"]["get"]
+	if !strings.Contains(get.Description, "matching applied identity") {
+		t.Fatal("get description does not distinguish desired from applied")
+	}
+}
+
+func TestSwaggerDocumentsOrderedOnlyRoutingContract(t *testing.T) {
+	document := readSwaggerDocument(t)
+	for _, name := range []string{"dto.NodeConfig", "dto.QueryServerConfigResponse", "dto.ServerNodeConfigOverride", "dto.ServerNodeConfigValues", "dto.UpdateServerNodeConfigRequest"} {
+		var schema swaggerObjectSchema
+		if err := json.Unmarshal(document.Definitions[name], &schema); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		if _, ok := schema.Properties["routing"]; !ok {
+			t.Errorf("%s missing routing", name)
+		}
+		for _, removed := range []string{"block", "block_ips", "block_protocols", "outbound", "inherit_block", "inherit_outbound"} {
+			if _, ok := schema.Properties[removed]; ok {
+				t.Errorf("%s exposes removed %s", name, removed)
+			}
+		}
+	}
+	for name, fields := range map[string][]string{"config.NodeRouting": {"version", "outbounds", "rules", "default_outbound_id"}, "config.NodeRoute": {"id", "enabled", "kind", "values", "outbound_id"}, "dto.NodeRoutingPolicy": {"version", "outbounds", "rules", "default_outbound_id", "mode", "source", "source_server_id", "source_revision", "local_transition_revision"}, "dto.NodeRoutingRule": {"id", "enabled", "kind", "values", "outbound_id"}} {
+		var schema swaggerObjectSchema
+		if err := json.Unmarshal(document.Definitions[name], &schema); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		required := map[string]bool{}
+		for _, field := range schema.Required {
+			required[field] = true
+		}
+		for _, field := range fields {
+			if _, ok := schema.Properties[field]; !ok {
+				t.Errorf("%s missing %s", name, field)
+			}
+			if !required[field] {
+				t.Errorf("%s must mark %s required", name, field)
+			}
 		}
 	}
 }

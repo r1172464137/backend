@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/oschwald/geoip2-golang"
+	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/internal/module/platform/internal/auditlog"
 	"github.com/perfect-panel/server/internal/module/platform/internal/dashboard"
@@ -46,6 +47,7 @@ type Service interface {
 	GetCurrencyConfig(ctx context.Context) (*dto.CurrencyConfig, error)
 	GetInviteConfig(ctx context.Context) (*dto.InviteConfig, error)
 	GetNodeConfig(ctx context.Context) (*dto.NodeConfig, error)
+	ReadNodeConfigSnapshot(ctx context.Context) (config.NodeConfig, error)
 	GetNodeMultiplier(ctx context.Context) (*dto.GetNodeMultiplierResponse, error)
 	GetPrivacyPolicyConfig(ctx context.Context) (*dto.PrivacyPolicyConfig, error)
 	GetRegisterConfig(ctx context.Context) (*dto.RegisterConfig, error)
@@ -271,6 +273,10 @@ func (s *service) GetInviteConfig(ctx context.Context) (*dto.InviteConfig, error
 
 func (s *service) GetNodeConfig(ctx context.Context) (*dto.NodeConfig, error) {
 	return s.settings.GetNodeConfig(ctx)
+}
+
+func (s *service) ReadNodeConfigSnapshot(ctx context.Context) (config.NodeConfig, error) {
+	return s.settings.ReadNodeConfigSnapshot(ctx)
 }
 
 func (s *service) GetNodeMultiplier(ctx context.Context) (*dto.GetNodeMultiplierResponse, error) {

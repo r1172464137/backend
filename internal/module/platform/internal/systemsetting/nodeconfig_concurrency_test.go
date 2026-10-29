@@ -9,20 +9,20 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/pkg/xerr"
+	"github.com/pkg/errors"
 )
 
 type serializedPlatformConfigStore struct {
 	mu      sync.Mutex
 	systems map[string]*system.System
 }
-
 type serializedPlatformView struct {
 	repository.PlatformStore
 	system repository.SystemRepo
 }
 
 func (v serializedPlatformView) System() repository.SystemRepo { return v.system }
-
 func (s *serializedPlatformConfigStore) InPlatformTx(_ context.Context, fn func(repository.PlatformStore) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -37,48 +37,54 @@ type serializedSystemRepo struct {
 func (r *serializedSystemRepo) GetNodeConfigForUpdate(context.Context) ([]*system.System, error) {
 	result := make([]*system.System, 0, len(r.owner.systems))
 	for _, item := range r.owner.systems {
+		if item.Key == "Block" || item.Key == "BlockIPs" || item.Key == "BlockProtocols" || item.Key == "Outbound" {
+			continue
+		}
 		clone := *item
 		result = append(result, &clone)
 	}
 	return result, nil
 }
-
+func (r *serializedSystemRepo) GetNodeConfigUncached(ctx context.Context) ([]*system.System, error) {
+	return r.GetNodeConfigForUpdate(ctx)
+}
 func (r *serializedSystemRepo) UpdateValueByCategoryKey(_ context.Context, category, key, value string, valueType ...string) error {
 	item, ok := r.owner.systems[key]
 	if !ok {
-		typeName := "string"
+		typ := "string"
 		if len(valueType) > 0 {
-			typeName = valueType[0]
+			typ = valueType[0]
 		}
-		item = &system.System{Category: category, Key: key, Type: typeName}
+		item = &system.System{Category: category, Key: key, Type: typ}
 		r.owner.systems[key] = item
 	}
 	item.Value = value
 	return nil
 }
-
-func TestConcurrentGlobalOldClientCannotLoseNewStructuredRules(t *testing.T) {
-	store := &serializedPlatformConfigStore{systems: map[string]*system.System{
-		"NodeSecret": {Category: "server", Key: "NodeSecret", Value: "secret", Type: "string"},
-		"Block":      {Category: "server", Key: "Block", Value: `[]`, Type: "string"},
-		"Outbound":   {Category: "server", Key: "Outbound", Value: `[]`, Type: "string"},
+func testPlatformStore() *serializedPlatformConfigStore {
+	return &serializedPlatformConfigStore{systems: map[string]*system.System{
+		"NodeSecret":      {Category: "server", Key: "NodeSecret", Value: "secret", Type: "string"},
+		"Block":           {Category: "server", Key: "Block", Value: `["geosite:cn"]`, Type: "string"},
+		"Routing":         {Category: "server", Key: "Routing", Value: `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`, Type: "string"},
+		"RoutingRevision": {Category: "server", Key: "RoutingRevision", Value: "2", Type: "int64"},
+		"RoutingCutover":  {Category: "server", Key: "RoutingCutover", Value: "complete", Type: "string"},
 	}}
+}
+func TestConcurrentGlobalOrderedRevision(t *testing.T) {
+	store := testPlatformStore()
 	deps := Deps{Store: store}
-	bind := func(body string) *dto.NodeConfig {
+	bind := func(def string) *dto.NodeConfig {
 		var req dto.NodeConfig
+		body := `{"routing_revision":2,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"` + def + `"}}`
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			t.Fatal(err)
 		}
 		return &req
 	}
-	requests := []*dto.NodeConfig{
-		bind(`{"block":[],"block_ips":["geoip:cn"],"block_protocols":[],"outbound":[]}`),
-		bind(`{"block":["legacy.example"],"outbound":[]}`),
-	}
 	start := make(chan struct{})
-	errs := make(chan error, len(requests))
+	errs := make(chan error, 2)
 	var wg sync.WaitGroup
-	for _, req := range requests {
+	for _, req := range []*dto.NodeConfig{bind("direct"), bind("block")} {
 		wg.Add(1)
 		go func(req *dto.NodeConfig) {
 			defer wg.Done()
@@ -89,16 +95,20 @@ func TestConcurrentGlobalOldClientCannotLoseNewStructuredRules(t *testing.T) {
 	close(start)
 	wg.Wait()
 	close(errs)
+	success, conflicts := 0, 0
 	for err := range errs {
-		if err != nil {
-			t.Fatalf("concurrent update error = %v", err)
+		if err == nil {
+			success++
+			continue
+		}
+		var c *xerr.CodeError
+		if errors.As(errors.Cause(err), &c) && c.GetErrCode() == xerr.PlatformRoutingRevisionConflict {
+			conflicts++
+		} else {
+			t.Fatalf("unexpected error %v", err)
 		}
 	}
-
-	store.mu.Lock()
-	blockIPs := store.systems["BlockIPs"].Value
-	store.mu.Unlock()
-	if blockIPs != `["geoip:cn"]` {
-		t.Fatalf("BlockIPs = %s, want preserved concurrent explicit update", blockIPs)
+	if success != 1 || conflicts != 1 || store.systems["RoutingRevision"].Value != "3" || store.systems["Block"].Value != `["geosite:cn"]` {
+		t.Fatalf("success=%d conflict=%d data=%#v", success, conflicts, store.systems)
 	}
 }

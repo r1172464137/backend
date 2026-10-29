@@ -1,242 +1,100 @@
 package systemsetting
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
-	"reflect"
-	"strings"
 	"testing"
 
-	appconfig "github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
-	"github.com/perfect-panel/server/internal/module/platform/entity/system"
+	"github.com/perfect-panel/server/pkg/xerr"
+	"github.com/pkg/errors"
 )
 
-func TestNodeConfigSystemRoundTripIncludesStructuredRules(t *testing.T) {
-	entries := []*system.System{
-		{Key: "NodeSecret", Value: "secret", Type: "string"},
-		{Key: "NodePullInterval", Value: "30", Type: "int64"},
-		{Key: "NodePushInterval", Value: "60", Type: "int64"},
-		{Key: "TrafficReportThreshold", Value: "1024", Type: "int64"},
-		{Key: "IPStrategy", Value: "prefer_ipv4", Type: "string"},
-		{Key: "DNS", Value: `[{"proto":"udp","address":"1.1.1.1:53","domains":[]}]`, Type: "string"},
-		{Key: "Block", Value: `["geosite:ads"]`, Type: "string"},
-		{Key: "BlockIPs", Value: `["geoip:private","10.0.0.0/8"]`, Type: "string"},
-		{Key: "BlockProtocols", Value: `["bittorrent"]`, Type: "string"},
-		{Key: "Outbound", Value: `[{"name":"cn","protocol":"direct","rules":["geosite:cn"],"ip_rules":["geoip:cn"],"protocol_rules":["bittorrent"],"plugin_opts":{"mode":"test"}}]`, Type: "string"},
-	}
-
-	got, err := nodeConfigFromSystemEntries(entries)
-	if err != nil {
-		t.Fatalf("nodeConfigFromSystemEntries() error = %v", err)
-	}
-	if !reflect.DeepEqual(got.BlockIPs, []string{"geoip:private", "10.0.0.0/8"}) || !reflect.DeepEqual(got.BlockProtocols, []string{"bittorrent"}) {
-		t.Fatalf("structured block rules = %#v/%#v", got.BlockIPs, got.BlockProtocols)
-	}
-	if len(got.Outbound) != 1 || !reflect.DeepEqual(got.Outbound[0].IPRules, []string{"geoip:cn"}) ||
-		!reflect.DeepEqual(got.Outbound[0].ProtocolRules, []string{"bittorrent"}) {
-		t.Fatalf("outbound = %#v, want structured rules", got.Outbound)
-	}
-	plugin, ok := got.Outbound[0].PluginOptions.(map[string]any)
-	if !ok || plugin["mode"] != "test" {
-		t.Fatalf("plugin options = %#v, want existing object preserved", got.Outbound[0].PluginOptions)
-	}
-
-	encoded, err := json.Marshal(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, field := range []string{`"block"`, `"block_ips"`, `"block_protocols"`, `"ip_rules"`, `"protocol_rules"`} {
-		if !strings.Contains(string(encoded), field) {
-			t.Errorf("JSON %s does not contain %s", encoded, field)
-		}
-	}
-}
-
-func TestPrepareNodeConfigUpdatePreservesOldClientOmissions(t *testing.T) {
-	current := &dto.NodeConfig{
-		BlockIPs:       []string{"geoip:private"},
-		BlockProtocols: []string{"bittorrent"},
-		Outbound: []dto.PlatformNodeOutboundSnapshot{
-			{Name: "first", IPRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"}},
-			{Name: "second", IPRules: []string{"192.0.2.0/24"}, ProtocolRules: []string{"bittorrent"}},
-		},
-	}
-	var request dto.NodeConfig
-	if err := json.Unmarshal([]byte(`{
-		"block":["example.com"],
-		"outbound":[
-			{"name":"second","protocol":"direct","rules":["geosite:cn"]},
-			{"name":"first","protocol":"direct","rules":[]}
-		]
-	}`), &request); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepareNodeConfigUpdate(&request, current); err != nil {
-		t.Fatalf("prepareNodeConfigUpdate() error = %v", err)
-	}
-	if !reflect.DeepEqual(request.Block, []string{"full:example.com"}) ||
-		!reflect.DeepEqual(request.BlockIPs, current.BlockIPs) || !reflect.DeepEqual(request.BlockProtocols, current.BlockProtocols) {
-		t.Fatalf("global block merge = %#v/%#v/%#v", request.Block, request.BlockIPs, request.BlockProtocols)
-	}
-	if !reflect.DeepEqual(request.Outbound[0].IPRules, []string{"192.0.2.0/24"}) ||
-		!reflect.DeepEqual(request.Outbound[1].IPRules, []string{"geoip:cn"}) {
-		t.Fatalf("outbound hidden rules were not preserved through reorder: %#v", request.Outbound)
-	}
-}
-
-func TestPrepareNodeConfigUpdateHonorsExplicitEmptyAndRejectsInvalid(t *testing.T) {
-	current := &dto.NodeConfig{
-		BlockIPs:       []string{"geoip:private"},
-		BlockProtocols: []string{"bittorrent"},
-		Outbound: []dto.PlatformNodeOutboundSnapshot{{
-			Name: "direct", IPRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"},
-		}},
-	}
-	var request dto.NodeConfig
-	if err := json.Unmarshal([]byte(`{
-		"block":[],"block_ips":[],"block_protocols":[],
-		"outbound":[{"name":"direct","protocol":"direct","rules":[],"ip_rules":[],"protocol_rules":[]}]
-	}`), &request); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepareNodeConfigUpdate(&request, current); err != nil {
-		t.Fatal(err)
-	}
-	if request.BlockIPs == nil || request.BlockProtocols == nil || request.Outbound[0].IPRules == nil || request.Outbound[0].ProtocolRules == nil {
-		t.Fatalf("explicit empty arrays became nil: %#v", request)
-	}
-	if len(request.BlockIPs) != 0 || len(request.BlockProtocols) != 0 || len(request.Outbound[0].IPRules) != 0 || len(request.Outbound[0].ProtocolRules) != 0 {
-		t.Fatalf("explicit empty arrays were not honored: %#v", request)
-	}
-
-	invalid := &dto.NodeConfig{Block: []string{"geoip:private"}}
-	if err := prepareNodeConfigUpdate(invalid, current); err == nil || !strings.Contains(err.Error(), `block line 1: unknown domain rule prefix "geoip"`) {
-		t.Fatalf("invalid category error = %v", err)
-	}
-}
-
-func TestGlobalOutboundOmissionMatchingScenarios(t *testing.T) {
-	current := &dto.NodeConfig{Outbound: []dto.PlatformNodeOutboundSnapshot{
-		{Name: "a", Protocol: "direct", Address: "a.example", Rules: []string{}, IPRules: []string{"geoip:a"}},
-		{Name: "b", Protocol: "socks", Address: "b.example", Rules: []string{}, IPRules: []string{"geoip:b"}},
-		{Name: "c", Protocol: "direct", Address: "c.example", Rules: []string{}, IPRules: []string{"geoip:c"}},
-	}}
-	bind := func(t *testing.T, outbound string) dto.NodeConfig {
-		t.Helper()
-		var req dto.NodeConfig
-		if err := json.Unmarshal([]byte(`{"block":[],"block_ips":[],"block_protocols":[],"outbound":`+outbound+`}`), &req); err != nil {
-			t.Fatal(err)
-		}
-		return req
-	}
-
-	t.Run("rename and reorder", func(t *testing.T) {
-		req := bind(t, `[{"name":"b","protocol":"socks","address":"b.example","rules":[]},{"name":"renamed-a","protocol":"direct","address":"a.example","rules":[]}]`)
-		if err := prepareNodeConfigUpdate(&req, current); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(req.Outbound[0].IPRules, []string{"geoip:b"}) || !reflect.DeepEqual(req.Outbound[1].IPRules, []string{"geoip:a"}) {
-			t.Fatalf("hidden rules swapped: %#v", req.Outbound)
-		}
-	})
-	t.Run("insertion", func(t *testing.T) {
-		req := bind(t, `[{"name":"new","protocol":"vless","address":"new.example","rules":[]},{"name":"a","protocol":"direct","address":"a.example","rules":[]},{"name":"b","protocol":"socks","address":"b.example","rules":[]},{"name":"c","protocol":"direct","address":"c.example","rules":[]}]`)
-		if err := prepareNodeConfigUpdate(&req, current); err != nil {
-			t.Fatal(err)
-		}
-		if len(req.Outbound[0].IPRules) != 0 || !reflect.DeepEqual(req.Outbound[1].IPRules, []string{"geoip:a"}) {
-			t.Fatalf("insertion inherited unrelated hidden rules: %#v", req.Outbound)
-		}
-	})
-	t.Run("rename plus edit with unchanged anchors", func(t *testing.T) {
-		req := bind(t, `[{"name":"a","protocol":"direct","address":"a.example","rules":[]},{"name":"renamed-b","protocol":"socks","address":"edited.example","rules":[]},{"name":"c","protocol":"direct","address":"c.example","rules":[]}]`)
-		if err := prepareNodeConfigUpdate(&req, current); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(req.Outbound[1].IPRules, []string{"geoip:b"}) {
-			t.Fatalf("safe positional preservation failed: %#v", req.Outbound)
-		}
-	})
-	t.Run("rename plus edit and reorder is rejected", func(t *testing.T) {
-		req := bind(t, `[{"name":"renamed-b","protocol":"socks","address":"edited.example","rules":[]},{"name":"a","protocol":"direct","address":"a.example","rules":[]},{"name":"c","protocol":"direct","address":"c.example","rules":[]}]`)
-		if err := prepareNodeConfigUpdate(&req, current); err == nil || !strings.Contains(err.Error(), "upgraded client") {
-			t.Fatalf("error = %v, want ambiguity rejection", err)
-		}
-	})
-	t.Run("deletion and reorder", func(t *testing.T) {
-		req := bind(t, `[{"name":"c","protocol":"direct","address":"c.example","rules":[]},{"name":"a","protocol":"direct","address":"a.example","rules":[]}]`)
-		if err := prepareNodeConfigUpdate(&req, current); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(req.Outbound[0].IPRules, []string{"geoip:c"}) || !reflect.DeepEqual(req.Outbound[1].IPRules, []string{"geoip:a"}) {
-			t.Fatalf("deletion/reorder hidden rules = %#v", req.Outbound)
-		}
-	})
-	for name, outbound := range map[string]string{
-		"blank":     `[{"name":" ","protocol":"direct","rules":[]}]`,
-		"duplicate": `[{"name":"a","protocol":"direct","rules":[]},{"name":" a ","protocol":"socks","rules":[]}]`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			req := bind(t, outbound)
-			if err := prepareNodeConfigUpdate(&req, current); err == nil {
-				t.Fatalf("%s outbound names unexpectedly accepted", name)
+func TestAdminNodeIntervalsBounds(t *testing.T) {
+	store := testPlatformStore()
+	deps := Deps{Store: store, System: &serializedSystemRepo{owner: store}}
+	for _, field := range []string{"node_pull_interval", "node_push_interval"} {
+		for _, value := range []string{"0", "1", "86400"} {
+			var req dto.NodeConfig
+			if err := json.Unmarshal([]byte(`{"`+field+`":`+value+`}`), &req); err != nil {
+				t.Fatal(err)
 			}
-		})
+			if err := newUpdateNodeConfigLogic(context.Background(), deps).UpdateNodeConfig(&req); err != nil {
+				t.Fatalf("%s=%s: %v", field, value, err)
+			}
+		}
+		for _, value := range []string{"-1", "86401", "9223372036854775807"} {
+			var req dto.NodeConfig
+			if err := json.Unmarshal([]byte(`{"`+field+`":`+value+`}`), &req); err != nil {
+				t.Fatal(err)
+			}
+			if err := newUpdateNodeConfigLogic(context.Background(), deps).UpdateNodeConfig(&req); err == nil {
+				t.Fatalf("accepted %s=%s", field, value)
+			}
+		}
+		var req dto.NodeConfig
+		if json.Unmarshal([]byte(`{"`+field+`":null}`), &req) == nil {
+			t.Fatalf("accepted null %s", field)
+		}
 	}
 }
 
-func TestGlobalConfigRejectsBlankOutboundProtocolBeforeNormalization(t *testing.T) {
-	outbound := []dto.PlatformNodeOutboundSnapshot{
-		{Name: "first", Protocol: "   ", IPRules: []string{"geoip:first"}},
-		{Name: "second", Protocol: "direct", IPRules: []string{"geoip:second"}},
+func TestOrderedNodeConfigPresenceAndRemovedLegacy(t *testing.T) {
+	store := testPlatformStore()
+	deps := Deps{Store: store, System: &serializedSystemRepo{owner: store}}
+	update := func(body string) error {
+		var req dto.NodeConfig
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatal(err)
+		}
+		return newUpdateNodeConfigLogic(context.Background(), deps).UpdateNodeConfig(&req)
 	}
-	req := &dto.NodeConfig{Outbound: outbound}
-	if err := prepareNodeConfigUpdate(req, &dto.NodeConfig{}); err == nil || !strings.Contains(err.Error(), "outbound line 1: outbound protocol must not be blank") {
-		t.Fatalf("blank protocol error = %v", err)
+	if err := update(`{"node_push_interval":33}`); err != nil {
+		t.Fatal(err)
 	}
-	if outbound[1].Name != "second" || !reflect.DeepEqual(outbound[1].IPRules, []string{"geoip:second"}) {
-		t.Fatalf("invalid first outbound shifted the second identity: %#v", outbound)
+	if store.systems["RoutingRevision"].Value != "2" || store.systems["Block"].Value != `["geosite:cn"]` {
+		t.Fatal("non-routing update changed routing or backup")
 	}
-}
-
-func TestGlobalNodeConfigEnforcesSerializedTextLimit(t *testing.T) {
-	rules := make([]string, 900)
-	for index := range rules {
-		rules[index] = fmt.Sprintf("host-%04d.%s.example", index, strings.Repeat("a", 55))
+	if err := update(`{"block":[]}`); err == nil {
+		t.Fatal("removed legacy field accepted")
+	} else {
+		var c *xerr.CodeError
+		if !errors.As(errors.Cause(err), &c) || c.GetErrCode() != xerr.PlatformLegacyRoutingRemoved {
+			t.Fatalf("error %v", err)
+		}
 	}
-	req := &dto.NodeConfig{Block: rules}
-	if err := prepareNodeConfigUpdate(req, &dto.NodeConfig{}); err == nil || !strings.Contains(err.Error(), "serialized JSON") {
-		t.Fatalf("oversize block error = %v", err)
+	if err := update(`{"routing":null,"routing_revision":2}`); err == nil {
+		t.Fatal("null routing accepted")
 	}
-	outbound := &dto.NodeConfig{Outbound: []dto.PlatformNodeOutboundSnapshot{{
-		Name: "large", Protocol: "direct", Settings: strings.Repeat("x", appconfig.MaxPersistedJSONBytes),
-	}}}
-	if err := prepareNodeConfigUpdate(outbound, &dto.NodeConfig{}); err == nil || !strings.Contains(err.Error(), "outbound: serialized JSON") {
-		t.Fatalf("oversize outbound error = %v", err)
+	if err := update(`{"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"block"}}`); err == nil {
+		t.Fatal("missing revision accepted")
 	}
-}
-
-func TestConvertedNodeConfigFieldsExcludePresenceMetadata(t *testing.T) {
-	fields := nodeConfigFields(dto.NodeConfig{
-		BlockIPs:          []string{"geoip:private"},
-		RequestFields:     map[string]struct{}{"block_ips": {}},
-		OutboundFieldSets: []map[string]struct{}{{"ip_rules": {}}},
-	})
-	seen := make(map[string]configFieldValue, len(fields))
-	for _, field := range fields {
-		seen[field.key] = field
+	if err := update(`{"routing_revision":0,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"block"}}`); err == nil {
+		t.Fatal("zero stale global revision accepted")
 	}
-	if _, ok := seen["BlockIPs"]; !ok {
-		t.Fatalf("persisted node config fields = %#v", seen)
+	var nullRevision dto.NodeConfig
+	if err := json.Unmarshal([]byte(`{"routing_revision":null}`), &nullRevision); err == nil {
+		t.Fatal("null revision accepted")
 	}
-	if _, ok := seen["RequestFields"]; ok {
-		t.Fatalf("RequestFields must not be persisted: %#v", seen)
+	if err := update(`{"routing_revision":1,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"block"}}`); err == nil {
+		t.Fatal("stale revision accepted")
 	}
-	if _, ok := seen["OutboundFieldSets"]; ok {
-		t.Fatalf("OutboundFieldSets must not be persisted: %#v", seen)
+	if err := update(`{"routing_revision":2,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"block"}}`); err != nil {
+		t.Fatal(err)
 	}
-	if seen["BlockIPs"].valueType != "string" || seen["Outbound"].valueType != "string" {
-		t.Fatalf("JSON node fields must keep string storage type: %#v", seen)
+	if store.systems["RoutingRevision"].Value != "3" {
+		t.Fatal("ordered save did not advance revision")
+	}
+	var invalid dto.NodeConfig
+	if err := json.Unmarshal([]byte(`{"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct","unknown":true}}`), &invalid); err == nil {
+		t.Fatal("unknown routing field accepted")
+	}
+	got, err := newGetNodeConfigLogic(context.Background(), deps).GetNodeConfig()
+	if err != nil || got.Routing == nil || got.RoutingRevision != 3 || got.RoutingMode != "global-v1" {
+		t.Fatalf("get %#v %v", got, err)
+	}
+	store.systems["Routing"].Value = ""
+	if _, err = newGetNodeConfigLogic(context.Background(), deps).GetNodeConfig(); err == nil {
+		t.Fatal("missing global routing accepted")
 	}
 }

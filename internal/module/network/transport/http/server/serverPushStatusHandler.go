@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/perfect-panel/server/internal/module/network"
@@ -21,20 +22,25 @@ import (
 // @Router /v1/server/status [post]
 func ServerPushStatusHandler(service network.Service) app.HandlerFunc {
 	return func(c context.Context, ctx *app.RequestContext) {
-		req := dto.ServerPushStatusRequest{}
-		if err := bindServerStatusRequest(ctx, &req); err != nil {
-			writeParamError(ctx, err)
+		// Authentication is performed by ServerMiddleware before this handler.
+		// Resolve the server before parsing so malformed reports invalidate only
+		// that server's routing status without retaining body/error details.
+		commonReq, err := serverCommonRequest(ctx)
+		if err != nil || commonReq.ServerId <= 0 {
+			writeParamError(ctx, errors.New("invalid server identity"))
 			return
 		}
-		commonReq, err := serverCommonRequest(ctx)
-		if err != nil {
-			writeParamError(ctx, err)
+		req := dto.ServerPushStatusRequest{}
+		if err := bindServerStatusRequest(ctx, &req); err != nil {
+			_ = service.InvalidateRoutingStatus(c, commonReq.ServerId)
+			writeParamError(ctx, errors.New("invalid status payload"))
 			return
 		}
 		req.ServerCommon = commonReq
 		req.CertPinSHA256 = string(ctx.GetHeader(certificateSHA256Header))
 		if validateErr := validation.Validate(&req); validateErr != nil {
-			writeParamError(ctx, validateErr)
+			_ = service.InvalidateRoutingStatus(c, commonReq.ServerId)
+			writeParamError(ctx, errors.New("invalid status payload"))
 			return
 		}
 

@@ -35,11 +35,17 @@ func init() {
 		InviteCodeError:     "Invite code error",
 
 		// Node error
-		NodeExist:         "Node already exists",
-		NodeNotExist:      "Node does not exist",
-		NodeGroupExist:    "Node group already exists",
-		NodeGroupNotExist: "Node group does not exist",
-		NodeGroupNotEmpty: "Node group is not empty",
+		NodeExist:                       "Node already exists",
+		NodeNotExist:                    "Node does not exist",
+		NodeGroupExist:                  "Node group already exists",
+		NodeGroupNotExist:               "Node group does not exist",
+		NodeGroupNotEmpty:               "Node group is not empty",
+		NetworkNodeProtocolInvalid:      "Enabled node protocol is not supported or is invalid",
+		NodeRoutingUpgradeRequired:      "Node must support routing version 1",
+		NetworkRoutingRevisionConflict:  "Server routing revision is stale",
+		PlatformRoutingRevisionConflict: "Global routing revision is stale",
+		PlatformLegacyRoutingRemoved:    "Legacy routing writes have been removed",
+		NetworkLegacyRoutingRemoved:     "Legacy routing writes have been removed",
 
 		//coupon error
 		CouponNotExist:          "Coupon does not exist",

@@ -10,7 +10,6 @@ import (
 	serverv1 "github.com/perfect-panel/server/api/server/v1"
 	appconfig "github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
-	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -132,21 +131,6 @@ func TestWriteServerReportResult_ProtobufError(t *testing.T) {
 }
 
 func TestResponseConversions(t *testing.T) {
-	config, err := serverConfigResponseToProtobuf(&dto.GetServerConfigResponse{
-		Basic:    dto.ServerBasic{PushInterval: 60, PullInterval: 30},
-		Protocol: "vless",
-		Config:   map[string]interface{}{"port": 443},
-	})
-	if err != nil {
-		t.Fatalf("serverConfigResponseToProtobuf() error = %v", err)
-	}
-	if config.Code != 200 || config.Data.Protocol != "vless" || config.Data.Basic.PushInterval != 60 {
-		t.Fatalf("config = %+v, want protobuf config envelope", config)
-	}
-	if got := config.Data.Config.AsMap()["port"]; got != float64(443) {
-		t.Fatalf("config port = %#v, want 443", got)
-	}
-
 	users := serverUserListResponseToProtobuf(&dto.GetServerUserListResponse{Users: []dto.ServerUser{{
 		Id: 1, UUID: "uuid", SpeedLimit: 10, DeviceLimit: 2,
 	}}})
@@ -162,13 +146,7 @@ func TestResponseConversions(t *testing.T) {
 		DNS: []dto.NodeDNS{{
 			Proto: "https", Address: "https://dns.example/dns-query", Domains: []string{"example.com"},
 		}},
-		Block:          []string{"full:example.com"},
-		BlockIPs:       []string{"geoip:private", "10.0.0.0/8"},
-		BlockProtocols: []string{"bittorrent"},
-		Outbound: []dto.NodeOutbound{{
-			Name: "direct", Protocol: "shadowsocks", Port: 443, PluginOptions: "mode=fast",
-			Rules: []string{"geosite:cn"}, IPRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"},
-		}},
+		Routing: routeTestPolicy(),
 		Protocols: []dto.Protocol{
 			{
 				Type: "vless", Port: 443, Enable: true, Transport: "xhttp", XhttpMode: "auto",
@@ -190,14 +168,8 @@ func TestResponseConversions(t *testing.T) {
 	if len(protocols.Data.Dns) != 1 || protocols.Data.Dns[0].Address != "https://dns.example/dns-query" {
 		t.Fatalf("dns = %+v, want strongly typed DNS configuration", protocols.Data.Dns)
 	}
-	if len(protocols.Data.Outbound) != 1 || protocols.Data.Outbound[0].PluginOptions.GetStringValue() != "mode=fast" {
-		t.Fatalf("outbound = %+v, want strongly typed outbound configuration", protocols.Data.Outbound)
-	}
-	if !reflect.DeepEqual(protocols.Data.BlockIps, []string{"geoip:private", "10.0.0.0/8"}) ||
-		!reflect.DeepEqual(protocols.Data.BlockProtocols, []string{"bittorrent"}) ||
-		!reflect.DeepEqual(protocols.Data.Outbound[0].IpRules, []string{"geoip:cn"}) ||
-		!reflect.DeepEqual(protocols.Data.Outbound[0].ProtocolRules, []string{"bittorrent"}) {
-		t.Fatalf("structured protobuf routes = %+v", protocols.Data)
+	if protocols.Data.Routing == nil || len(protocols.Data.Routing.Outbounds) != 1 || len(protocols.Data.Outbound) != 0 || len(protocols.Data.Block) != 0 {
+		t.Fatalf("ordered-only protobuf projection = %+v", protocols.Data)
 	}
 	wire, err := proto.Marshal(protocols)
 	if err != nil {
@@ -236,23 +208,26 @@ func TestStructuredRouteCanonicalCrosswireProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	converted, err := queryServerProtocolConfigResponseToProtobuf(&dto.QueryServerConfigResponse{
-		Block: domains, BlockIPs: ips, BlockProtocols: protocolRules,
-		Outbound: []dto.NodeOutbound{{Name: "crosswire", Protocol: "direct", Rules: domains, IPRules: ips, ProtocolRules: protocolRules}},
-	})
+	p := routeTestPolicy()
+	enabled := true
+	p.Rules = []dto.NodeRoutingRule{
+		{ID: "rr_00000001-0000-4000-8000-000000000001", Enabled: &enabled, Kind: "domain", Values: domains, OutboundID: "direct"},
+		{ID: "rr_00000002-0000-4000-8000-000000000002", Enabled: &enabled, Kind: "ip", Values: ips, OutboundID: "direct"},
+		{ID: "rr_00000003-0000-4000-8000-000000000003", Enabled: &enabled, Kind: "protocol", Values: protocolRules, OutboundID: "block"},
+	}
+	converted, err := queryServerProtocolConfigResponseToProtobuf(&dto.QueryServerConfigResponse{Routing: p})
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantDomains := []string{"full:example.com", "keyword:tracker", "domain:example.org", `regexp:(?i)(^|\.)announce\.`, "geosite:category-ai-!cn@ads"}
 	wantIPs := []string{"geoip:cn_test-1", "10.0.0.0/8"}
-	if !reflect.DeepEqual(converted.Data.Block, wantDomains) || !reflect.DeepEqual(converted.Data.BlockIps, wantIPs) ||
-		!reflect.DeepEqual(converted.Data.BlockProtocols, []string{"bittorrent"}) ||
-		!reflect.DeepEqual(converted.Data.Outbound[0].Rules, wantDomains) || !reflect.DeepEqual(converted.Data.Outbound[0].IpRules, wantIPs) {
+	if !reflect.DeepEqual(converted.Data.Routing.Rules[0].Values, wantDomains) || !reflect.DeepEqual(converted.Data.Routing.Rules[1].Values, wantIPs) ||
+		!reflect.DeepEqual(converted.Data.Routing.Rules[2].Values, []string{"bittorrent"}) {
 		t.Fatalf("crosswire protobuf projection = %#v", converted.Data)
 	}
 }
 
-func TestStructuredRouteProtoTagsAndOldConsumerProjection(t *testing.T) {
+func TestReservedLegacyProtoTagsRemainStable(t *testing.T) {
 	queryFields := (&serverv1.QueryServerProtocolConfigData{}).ProtoReflect().Descriptor().Fields()
 	outboundFields := (&serverv1.Outbound{}).ProtoReflect().Descriptor().Fields()
 	for name, want := range map[string]int{"traffic_report_threshold": 1, "push_interval": 2, "pull_interval": 3, "ip_strategy": 4, "dns": 5, "block": 6, "outbound": 7, "protocols": 8, "total": 9} {
@@ -278,119 +253,6 @@ func TestStructuredRouteProtoTagsAndOldConsumerProjection(t *testing.T) {
 		t.Fatalf("protocol_rules tag = %d, want 43", got)
 	}
 
-	message := &serverv1.QueryServerProtocolConfigData{
-		Block:          []string{"full:legacy.example"},
-		BlockIps:       []string{"geoip:private"},
-		BlockProtocols: []string{"bittorrent"},
-		Outbound: []*serverv1.Outbound{{
-			Name: "legacy", Rules: []string{"geosite:cn"}, IpRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"},
-		}},
-	}
-	wire, err := proto.Marshal(message)
-	if err != nil {
-		t.Fatal(err)
-	}
-	block, names, rules, err := projectOldQueryWire(wire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(block, []string{"full:legacy.example"}) || !reflect.DeepEqual(names, []string{"legacy"}) || !reflect.DeepEqual(rules, []string{"geosite:cn"}) {
-		t.Fatalf("old protobuf projection block=%#v names=%#v rules=%#v", block, names, rules)
-	}
-
-	jsonWire, err := json.Marshal(dto.QueryServerConfigResponse{
-		Block: []string{"full:legacy.example"}, BlockIPs: []string{"geoip:private"}, BlockProtocols: []string{"bittorrent"},
-		Outbound: []dto.NodeOutbound{{Name: "legacy", Rules: []string{"geosite:cn"}, IPRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"}}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var newJSON dto.QueryServerConfigResponse
-	if err := json.Unmarshal(jsonWire, &newJSON); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(newJSON.BlockIPs, []string{"geoip:private"}) ||
-		!reflect.DeepEqual(newJSON.BlockProtocols, []string{"bittorrent"}) ||
-		!reflect.DeepEqual(newJSON.Outbound[0].IPRules, []string{"geoip:cn"}) ||
-		!reflect.DeepEqual(newJSON.Outbound[0].ProtocolRules, []string{"bittorrent"}) {
-		t.Fatalf("new JSON exact round trip = %#v", newJSON)
-	}
-	var oldJSON struct {
-		Block    []string `json:"block"`
-		Outbound []struct {
-			Name  string   `json:"name"`
-			Rules []string `json:"rules"`
-		} `json:"outbound"`
-	}
-	if err := json.Unmarshal(jsonWire, &oldJSON); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(oldJSON.Block, block) || oldJSON.Outbound[0].Name != names[0] || !reflect.DeepEqual(oldJSON.Outbound[0].Rules, rules) {
-		t.Fatalf("old JSON projection = %#v", oldJSON)
-	}
-}
-
-func projectOldQueryWire(wire []byte) (block, names, rules []string, err error) {
-	for len(wire) > 0 {
-		number, wireType, tagLength := protowire.ConsumeTag(wire)
-		if tagLength < 0 {
-			return nil, nil, nil, protowire.ParseError(tagLength)
-		}
-		wire = wire[tagLength:]
-		if number == 6 || number == 7 {
-			value, valueLength := protowire.ConsumeBytes(wire)
-			if valueLength < 0 {
-				return nil, nil, nil, protowire.ParseError(valueLength)
-			}
-			wire = wire[valueLength:]
-			if number == 6 {
-				block = append(block, string(value))
-				continue
-			}
-			name, outboundRules, parseErr := projectOldOutboundWire(value)
-			if parseErr != nil {
-				return nil, nil, nil, parseErr
-			}
-			names = append(names, name)
-			rules = append(rules, outboundRules...)
-			continue
-		}
-		fieldLength := protowire.ConsumeFieldValue(number, wireType, wire)
-		if fieldLength < 0 {
-			return nil, nil, nil, protowire.ParseError(fieldLength)
-		}
-		wire = wire[fieldLength:]
-	}
-	return block, names, rules, nil
-}
-
-func projectOldOutboundWire(wire []byte) (name string, rules []string, err error) {
-	for len(wire) > 0 {
-		number, wireType, tagLength := protowire.ConsumeTag(wire)
-		if tagLength < 0 {
-			return "", nil, protowire.ParseError(tagLength)
-		}
-		wire = wire[tagLength:]
-		if number == 1 || number == 41 {
-			value, valueLength := protowire.ConsumeBytes(wire)
-			if valueLength < 0 {
-				return "", nil, protowire.ParseError(valueLength)
-			}
-			wire = wire[valueLength:]
-			if number == 1 {
-				name = string(value)
-			} else {
-				rules = append(rules, string(value))
-			}
-			continue
-		}
-		fieldLength := protowire.ConsumeFieldValue(number, wireType, wire)
-		if fieldLength < 0 {
-			return "", nil, protowire.ParseError(fieldLength)
-		}
-		wire = wire[fieldLength:]
-	}
-	return name, rules, nil
 }
 
 func TestAcceptsProtobuf_RejectsZeroQuality(t *testing.T) {

@@ -100,6 +100,15 @@ func writeParamError(ctx *app.RequestContext, err error) {
 	ctx.JSON(resp.StatusCode, resp.Body)
 }
 
+func writeRoutingUpgrade(ctx *app.RequestContext) {
+	message := xerr.MapErrMsg(xerr.NodeRoutingUpgradeRequired)
+	if acceptsProtobuf(ctx) {
+		writeServerProtobuf(ctx, consts.StatusUpgradeRequired, &serverv1.Result{Code: xerr.NodeRoutingUpgradeRequired, Message: message})
+	} else {
+		ctx.JSON(consts.StatusUpgradeRequired, httpx.Error(xerr.NodeRoutingUpgradeRequired, message))
+	}
+}
+
 func writeServerText(ctx *app.RequestContext, statusCode int, message string) {
 	if acceptsProtobuf(ctx) {
 		writeServerProtobuf(ctx, statusCode, &serverv1.Result{Code: uint32(statusCode), Message: message})
@@ -118,7 +127,7 @@ func writeServerProtobuf(ctx *app.RequestContext, statusCode int, message proto.
 }
 
 func writeServerProtobufWithETag(ctx *app.RequestContext, message proto.Message, ifNoneMatch string) error {
-	body, err := proto.Marshal(message)
+	body, err := (proto.MarshalOptions{Deterministic: true}).Marshal(message)
 	if err != nil {
 		return err
 	}

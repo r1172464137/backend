@@ -2,13 +2,12 @@ package systemsetting
 
 import (
 	"context"
-	"encoding/json"
+	"strconv"
 
 	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/slicesx"
 	"github.com/perfect-panel/server/pkg/xerr"
 	"github.com/pkg/errors"
 )
@@ -29,7 +28,7 @@ func newGetNodeConfigLogic(ctx context.Context, deps Deps) *GetNodeConfigLogic {
 
 func (l *GetNodeConfigLogic) GetNodeConfig() (*dto.NodeConfig, error) {
 	// get server config from db
-	configs, err := l.deps.System.GetNodeConfig(l.ctx)
+	configs, err := l.deps.System.GetNodeConfigUncached(l.ctx)
 	if err != nil {
 		l.Errorw("[GetNodeConfigLogic] GetNodeConfig get server config error: ", logger.Field("error", err.Error()))
 		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetNodeConfig get server config error: %v", err.Error())
@@ -39,7 +38,19 @@ func (l *GetNodeConfigLogic) GetNodeConfig() (*dto.NodeConfig, error) {
 		l.Errorw("[GetNodeConfigLogic] parse node config error", logger.Field("error", err.Error()))
 		return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "parse node config error: %v", err)
 	}
+	if c.Routing == nil || c.RoutingRevision <= 0 || !cutoverComplete(configs) {
+		return nil, errors.New("ordered routing cutover is incomplete")
+	}
 	return c, nil
+}
+
+func cutoverComplete(entries []*system.System) bool {
+	for _, entry := range entries {
+		if entry.Key == "RoutingCutover" {
+			return entry.Value == "complete"
+		}
+	}
+	return false
 }
 
 func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, error) {
@@ -52,54 +63,57 @@ func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, err
 		IPStrategy:             dbConfig.IPStrategy,
 		TrafficReportThreshold: dbConfig.TrafficReportThreshold,
 		DNS:                    []dto.PlatformNodeDNSSnapshot{},
-		Block:                  []string{},
-		BlockIPs:               []string{},
-		BlockProtocols:         []string{},
-		Outbound:               []dto.PlatformNodeOutboundSnapshot{},
+		RoutingCapabilities:    []int{1},
 	}
 
+	normal := []config.NodeDNS{}
 	if dbConfig.DNS != "" {
-		if err := json.Unmarshal([]byte(dbConfig.DNS), &c.DNS); err != nil {
-			return nil, errors.Wrap(err, "unmarshal DNS config")
+		var err error
+		normal, err = config.ParseNodeDNSJSON([]byte(dbConfig.DNS))
+		if err != nil {
+			return nil, errors.Wrap(err, "invalid DNS config")
 		}
 	}
-	if dbConfig.Block != "" {
-		var block []string
-		if err := json.Unmarshal([]byte(dbConfig.Block), &block); err != nil {
-			return nil, errors.Wrap(err, "unmarshal domain block config")
-		}
-		c.Block = slicesx.RemoveDuplicateElements(block...)
+	c.DNS = make([]dto.PlatformNodeDNSSnapshot, 0, len(normal))
+	for _, d := range normal {
+		c.DNS = append(c.DNS, dto.PlatformNodeDNSSnapshot{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
 	}
-	if dbConfig.BlockIPs != "" {
-		var blockIPs []string
-		if err := json.Unmarshal([]byte(dbConfig.BlockIPs), &blockIPs); err != nil {
-			return nil, errors.Wrap(err, "unmarshal IP block config")
-		}
-		c.BlockIPs = slicesx.RemoveDuplicateElements(blockIPs...)
-	}
-	if dbConfig.BlockProtocols != "" {
-		var blockProtocols []string
-		if err := json.Unmarshal([]byte(dbConfig.BlockProtocols), &blockProtocols); err != nil {
-			return nil, errors.Wrap(err, "unmarshal protocol block config")
-		}
-		c.BlockProtocols = slicesx.RemoveDuplicateElements(blockProtocols...)
-	}
-	if dbConfig.Outbound != "" {
-		if err := json.Unmarshal([]byte(dbConfig.Outbound), &c.Outbound); err != nil {
-			return nil, errors.Wrap(err, "unmarshal outbound config")
-		}
-		for index := range c.Outbound {
-			if c.Outbound[index].Rules == nil {
-				c.Outbound[index].Rules = []string{}
+	seen := map[string]bool{}
+	for _, item := range configs {
+		switch item.Key {
+		case "NodePullInterval", "NodePushInterval":
+			if seen[item.Key] {
+				return nil, errors.Errorf("duplicate %s setting", item.Key)
 			}
-			if c.Outbound[index].IPRules == nil {
-				c.Outbound[index].IPRules = []string{}
+			seen[item.Key] = true
+			seconds, err := strconv.ParseInt(item.Value, 10, 64)
+			if err != nil || (item.Type != "int" && item.Type != "int64") {
+				return nil, errors.Errorf("invalid %s setting", item.Key)
 			}
-			if c.Outbound[index].ProtocolRules == nil {
-				c.Outbound[index].ProtocolRules = []string{}
+			if err := config.ValidateNodeInterval(item.Key, seconds); err != nil {
+				return nil, err
+			}
+		case "Routing", "RoutingRevision":
+			if seen[item.Key] {
+				return nil, errors.Errorf("duplicate %s setting", item.Key)
+			}
+			seen[item.Key] = true
+			if item.Key == "Routing" && item.Value != "" {
+				policy, err := config.ParseNodeRouting([]byte(item.Value))
+				if err != nil {
+					return nil, errors.Wrap(err, "invalid global routing")
+				}
+				c.Routing = policy
+			}
+			if item.Key == "RoutingRevision" {
+				revision, err := strconv.ParseInt(item.Value, 10, 64)
+				if err != nil || revision < 0 {
+					return nil, errors.Errorf("invalid global routing revision")
+				}
+				c.RoutingRevision = revision
 			}
 		}
 	}
-
+	c.RoutingMode = "global-v1"
 	return c, nil
 }

@@ -3,6 +3,8 @@ package bootstrap
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strconv"
 
 	"github.com/perfect-panel/server/internal/config"
 	"github.com/perfect-panel/server/internal/module/network"
@@ -10,12 +12,11 @@ import (
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/random"
-	"github.com/perfect-panel/server/pkg/slicesx"
 )
 
 func Node(ctx *Dependencies) {
 	logger.Debug("Node config initialization")
-	configs, err := ctx.Store.System().GetNodeConfig(context.Background())
+	configs, err := ctx.Store.System().GetNodeConfigUncached(context.Background())
 	if err != nil {
 		panic(err)
 	}
@@ -29,31 +30,48 @@ func Node(ctx *Dependencies) {
 		TrafficReportThreshold: nodeConfig.TrafficReportThreshold,
 	}
 	if nodeConfig.DNS != "" {
-		var dns []config.NodeDNS
-		mustUnmarshalNodeConfigJSON("DNS", nodeConfig.DNS, &dns)
-		c.DNS = dns
+		c.DNS, err = config.ParseNodeDNSJSON([]byte(nodeConfig.DNS))
+		if err != nil {
+			panic(fmt.Errorf("invalid global DNS: %w", err))
+		}
 	}
-	if nodeConfig.Block != "" {
-		var block []string
-		mustUnmarshalNodeConfigJSON("domain block", nodeConfig.Block, &block)
-		c.Block = slicesx.RemoveDuplicateElements(block...)
+	servers, err := ctx.Store.Node().QueryServerSorts(context.Background())
+	if err != nil {
+		panic(err)
 	}
-	if nodeConfig.BlockIPs != "" {
-		var blockIPs []string
-		mustUnmarshalNodeConfigJSON("IP block", nodeConfig.BlockIPs, &blockIPs)
-		c.BlockIPs = slicesx.RemoveDuplicateElements(blockIPs...)
+	for _, server := range servers {
+		override, err := ctx.Store.Node().FindServerRoutingOverride(context.Background(), server.Id)
+		if err != nil {
+			panic(err)
+		}
+		if override != nil && override.DNS != nil {
+			if err := validateStoredDNS(*override.DNS); err != nil {
+				panic(fmt.Errorf("invalid server %d DNS: %w", server.Id, err))
+			}
+		}
 	}
-	if nodeConfig.BlockProtocols != "" {
-		var blockProtocols []string
-		mustUnmarshalNodeConfigJSON("protocol block", nodeConfig.BlockProtocols, &blockProtocols)
-		c.BlockProtocols = slicesx.RemoveDuplicateElements(blockProtocols...)
+	cutoverComplete := false
+	for _, entry := range configs {
+		switch entry.Key {
+		case "RoutingCutover":
+			cutoverComplete = entry.Value == "complete"
+		case "Routing":
+			if entry.Value != "" {
+				c.Routing, err = config.ParseNodeRouting([]byte(entry.Value))
+				if err != nil {
+					panic(fmt.Errorf("invalid global routing: %w", err))
+				}
+			}
+		case "RoutingRevision":
+			c.RoutingRevision, err = strconv.ParseInt(entry.Value, 10, 64)
+			if err != nil || c.RoutingRevision < 0 {
+				panic("invalid global routing revision")
+			}
+		}
 	}
-	if nodeConfig.Outbound != "" {
-		var outbound []config.NodeOutbound
-		mustUnmarshalNodeConfigJSON("outbound", nodeConfig.Outbound, &outbound)
-		c.Outbound = outbound
+	if !cutoverComplete || c.Routing == nil || c.RoutingRevision <= 0 {
+		panic("ordered routing cutover is incomplete")
 	}
-
 	ctx.updateConfig(func(current *config.Config) { current.Node = c })
 
 	nodeMultiplierData, err := ctx.Store.System().FindNodeMultiplierConfig(context.Background())
@@ -111,11 +129,9 @@ const nodeSecretLength = 32
 // reconfigures the nodes in the same window.
 func NodeSecret(svcCtx *Dependencies) {
 	logger.Debug("Node secret initialization")
-	// The read and the write share a transaction so the read goes to the
-	// database instead of Redis; GetNodeConfig is a cached query, and the write
-	// below does not invalidate that cache.
+	// Provision against an uncached database read in the owning transaction.
 	err := svcCtx.Store.InPlatformTx(context.Background(), func(store repository.PlatformStore) error {
-		configs, err := store.System().GetNodeConfig(context.Background())
+		configs, err := store.System().GetNodeConfigUncached(context.Background())
 		if err != nil {
 			return err
 		}

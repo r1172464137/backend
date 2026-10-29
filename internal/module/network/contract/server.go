@@ -1,6 +1,13 @@
 package dto
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/perfect-panel/server/internal/config"
+)
 
 type CreateServerRequest struct {
 	Name      string     `json:"name"`
@@ -9,6 +16,11 @@ type CreateServerRequest struct {
 	Address   string     `json:"address"`
 	Sort      int        `json:"sort,omitempty"`
 	Protocols []Protocol `json:"protocols"`
+}
+
+// CreateServerResponse identifies the committed row without returning secrets.
+type CreateServerResponse struct {
+	ID int64 `json:"id" binding:"required"`
 }
 
 type DeleteServerRequest struct {
@@ -24,16 +36,6 @@ type FilterServerListRequest struct {
 type FilterServerListResponse struct {
 	Total int64    `json:"total"`
 	List  []Server `json:"list"`
-}
-
-type GetServerConfigRequest struct {
-	ServerCommon
-}
-
-type GetServerConfigResponse struct {
-	Basic    ServerBasic `json:"basic"`
-	Protocol string      `json:"protocol"`
-	Config   interface{} `json:"config"`
 }
 
 type GetServerProtocolsRequest struct {
@@ -53,16 +55,11 @@ type GetServerUserListResponse struct {
 }
 
 type ServerNodeConfigValues struct {
-	IPStrategy string    `json:"ip_strategy"`
-	DNS        []NodeDNS `json:"dns"`
-	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	Block []string `json:"block"`
-	// Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	BlockIPs []string `json:"block_ips"`
-	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	BlockProtocols []string `json:"block_protocols"`
-	// Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.
-	Outbound []NodeOutbound `json:"outbound"`
+	IPStrategy      string             `json:"ip_strategy"`
+	DNS             []NodeDNS          `json:"dns"`
+	Routing         *NodeRoutingPolicy `json:"routing"`
+	RoutingRevision int64              `json:"routing_revision"`
+	RoutingMode     string             `json:"routing_mode"`
 }
 
 type ServerNodeConfigOverride struct {
@@ -72,17 +69,9 @@ type ServerNodeConfigOverride struct {
 	InheritDNS bool      `json:"inherit_dns"`
 	DNS        []NodeDNS `json:"dns"`
 
-	InheritBlock bool `json:"inherit_block"`
-	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	Block []string `json:"block"`
-	// Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	BlockIPs []string `json:"block_ips"`
-	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	BlockProtocols []string `json:"block_protocols"`
-
-	InheritOutbound bool `json:"inherit_outbound"`
-	// Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.
-	Outbound []NodeOutbound `json:"outbound"`
+	InheritRouting  bool                `json:"inherit_routing"`
+	Routing         *config.NodeRouting `json:"routing"`
+	RoutingRevision int64               `json:"routing_revision"`
 }
 
 type OnlineUser struct {
@@ -237,20 +226,52 @@ type QueryServerConfigRequest struct {
 }
 
 type QueryServerConfigResponse struct {
-	TrafficReportThreshold int64     `json:"traffic_report_threshold"`
-	PushInterval           int64     `json:"push_interval"`
-	PullInterval           int64     `json:"pull_interval"`
-	IPStrategy             string    `json:"ip_strategy"`
-	DNS                    []NodeDNS `json:"dns"`
-	// Canonical domain rules (full, non-whitespace keyword, no-root-dot domain, regexp or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$); limits apply to 1024 canonical unique rules and 4096 bytes each.
-	Block []string `json:"block"`
-	// Canonical netip/GeoIP rules with labels matching ^[A-Za-z0-9][A-Za-z0-9_-]*$; limits apply to 1024 canonical unique rules and 4096 bytes each.
-	BlockIPs []string `json:"block_ips"`
-	// Canonical protocol rules; only bittorrent; limits apply to 1024 canonical unique rules and 4096 bytes each.
-	BlockProtocols []string       `json:"block_protocols"`
-	Outbound       []NodeOutbound `json:"outbound"`
-	Protocols      []Protocol     `json:"protocols"`
-	Total          int64          `json:"total"`
+	TrafficReportThreshold int64              `json:"traffic_report_threshold"`
+	PushInterval           int64              `json:"push_interval"`
+	PullInterval           int64              `json:"pull_interval"`
+	IPStrategy             string             `json:"ip_strategy"`
+	DNS                    []NodeDNS          `json:"dns"`
+	Protocols              []Protocol         `json:"protocols"`
+	Total                  int64              `json:"total"`
+	Routing                *NodeRoutingPolicy `json:"routing"`
+}
+
+// NodeRoutingPolicy is the node-delivery projection. The identity fields are
+// not part of the persisted routing content and identify the exact candidate.
+type NodeRoutingPolicy struct {
+	Version                 int               `json:"version" binding:"required"`
+	Outbounds               []NodeOutbound    `json:"outbounds" binding:"required"`
+	Rules                   []NodeRoutingRule `json:"rules" binding:"required"`
+	DefaultOutboundID       string            `json:"default_outbound_id" binding:"required"`
+	Mode                    string            `json:"mode" binding:"required"`
+	Source                  string            `json:"source" binding:"required"`
+	SourceServerID          int64             `json:"source_server_id" binding:"required"`
+	SourceRevision          int64             `json:"source_revision" binding:"required"`
+	LocalTransitionRevision int64             `json:"local_transition_revision" binding:"required"`
+}
+
+type NodeRoutingRule struct {
+	ID         string   `json:"id" binding:"required"`
+	Enabled    *bool    `json:"enabled" binding:"required"`
+	Remark     string   `json:"remark"`
+	Kind       string   `json:"kind" binding:"required"`
+	Values     []string `json:"values" binding:"required"`
+	OutboundID string   `json:"outbound_id" binding:"required"`
+}
+
+// A node response is always ordered-v1; missing policy fails closed.
+func (r QueryServerConfigResponse) MarshalJSON() ([]byte, error) {
+	if r.Routing == nil {
+		return nil, fmt.Errorf("ordered routing is required")
+	}
+	if r.Protocols == nil {
+		r.Protocols = []Protocol{}
+	}
+	if r.Total != int64(len(r.Protocols)) {
+		return nil, fmt.Errorf("protocol total does not match protocols")
+	}
+	type alias QueryServerConfigResponse
+	return json.Marshal(alias(r))
 }
 
 type GetServerNodeConfigRequest struct {
@@ -258,24 +279,29 @@ type GetServerNodeConfigRequest struct {
 }
 
 type GetServerNodeConfigResponse struct {
-	Global    ServerNodeConfigValues   `json:"global"`
-	Override  ServerNodeConfigOverride `json:"override"`
-	Effective ServerNodeConfigValues   `json:"effective"`
+	Global        ServerNodeConfigValues   `json:"global"`
+	Override      ServerNodeConfigOverride `json:"override"`
+	Effective     ServerNodeConfigValues   `json:"effective"`
+	RoutingStatus RoutingStatusView        `json:"routing_status"`
 }
 
 type UpdateServerNodeConfigRequest struct {
 	ServerID int64 `json:"server_id" validate:"required"`
 	ServerNodeConfigOverride
-	RequestFields     map[string]struct{}   `json:"-" swaggerignore:"true"`
-	OutboundFieldSets []map[string]struct{} `json:"-" swaggerignore:"true"`
+	RequestFields map[string]struct{} `json:"-" swaggerignore:"true"`
 }
 
 // UnmarshalJSON records additive-field presence independently from empty
 // arrays, which lets legacy clients preserve route rules they cannot display.
 func (r *UpdateServerNodeConfigRequest) UnmarshalJSON(data []byte) error {
+	if err := config.ValidateUniqueJSON(data); err != nil {
+		return err
+	}
 	type alias UpdateServerNodeConfigRequest
 	var decoded alias
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
 		return err
 	}
 	*r = UpdateServerNodeConfigRequest(decoded)
@@ -284,23 +310,32 @@ func (r *UpdateServerNodeConfigRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
+	if raw, ok := fields["routing_revision"]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("routing_revision must not be null")
+	}
 	r.RequestFields = make(map[string]struct{}, len(fields))
 	for field := range fields {
+		if field != strings.ToLower(field) {
+			return fmt.Errorf("invalid JSON field %q", field)
+		}
 		r.RequestFields[field] = struct{}{}
 	}
-	if raw, ok := fields["outbound"]; ok && string(raw) != "null" {
-		var outbound []map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &outbound); err != nil {
+	if raw, ok := fields["dns"]; ok {
+		items, err := config.ParseNodeDNSJSON(raw)
+		if err != nil {
 			return err
 		}
-		r.OutboundFieldSets = make([]map[string]struct{}, len(outbound))
-		for index, item := range outbound {
-			set := make(map[string]struct{}, len(item))
-			for field := range item {
-				set[field] = struct{}{}
-			}
-			r.OutboundFieldSets[index] = set
+		r.DNS = make([]NodeDNS, 0, len(items))
+		for _, d := range items {
+			r.DNS = append(r.DNS, NodeDNS{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
 		}
+	}
+	if raw, ok := fields["routing"]; ok && string(bytes.TrimSpace(raw)) != "null" {
+		policy, err := config.ParseNodeRouting(raw)
+		if err != nil {
+			return err
+		}
+		r.Routing = policy
 	}
 	return nil
 }
@@ -317,11 +352,6 @@ type Server struct {
 	Status         ServerStatus `json:"status"`
 	CreatedAt      int64        `json:"created_at"`
 	UpdatedAt      int64        `json:"updated_at"`
-}
-
-type ServerBasic struct {
-	PushInterval int64 `json:"push_interval"`
-	PullInterval int64 `json:"pull_interval"`
 }
 
 type ServerCommon struct {
@@ -346,13 +376,51 @@ type ServerOnlineUser struct {
 
 type ServerPushStatusRequest struct {
 	ServerCommon
-	Cpu       float64 `json:"cpu"`
-	Mem       float64 `json:"mem"`
-	Disk      float64 `json:"disk"`
-	UpdatedAt int64   `json:"updated_at"`
+	Cpu             float64                   `json:"cpu"`
+	Mem             float64                   `json:"mem"`
+	Disk            float64                   `json:"disk"`
+	UpdatedAt       int64                     `json:"updated_at"`
+	RoutingVersion  int                       `json:"routing_version,omitempty"`
+	RoutingApplied  *RoutingCandidateIdentity `json:"routing_applied,omitempty"`
+	RoutingPending  *RoutingCandidateIdentity `json:"routing_pending,omitempty"`
+	RoutingError    *RoutingReportError       `json:"routing_error,omitempty"`
+	InstanceID      string                    `json:"instance_id,omitempty"`
+	RoutingSequence uint64                    `json:"routing_sequence,omitempty"`
 	// CertPinSHA256 is transport metadata carried by the
 	// X-Node-Certificate-SHA256 request header, not part of the body.
 	CertPinSHA256 string `json:"-"`
+}
+
+type RoutingCandidateIdentity struct {
+	Mode                    string `json:"mode"`
+	Source                  string `json:"source"`
+	SourceServerID          int64  `json:"source_server_id"`
+	SourceRevision          int64  `json:"source_revision"`
+	LocalTransitionRevision int64  `json:"local_transition_revision"`
+}
+type RoutingReportError struct {
+	Identity *RoutingCandidateIdentity `json:"identity,omitempty"`
+	Stage    string                    `json:"stage"`
+	Message  string                    `json:"message"`
+}
+type RoutingStatusReport struct {
+	Version int                       `json:"routing_version"`
+	Applied *RoutingCandidateIdentity `json:"routing_applied,omitempty"`
+	Pending *RoutingCandidateIdentity `json:"routing_pending,omitempty"`
+	Error   *RoutingReportError       `json:"routing_error,omitempty"`
+	// ReceivedAt is the Redis receive time of the last accepted sequence.
+	ReceivedAt int64 `json:"received_at"`
+	// LivenessAt may be newer when stale or duplicate reports arrive.
+	LivenessAt      int64  `json:"liveness_at,omitempty"`
+	InstanceID      string `json:"instance_id,omitempty"`
+	RoutingSequence uint64 `json:"routing_sequence,omitempty"`
+	UpdatedAt       int64  `json:"updated_at"`
+	Conflict        bool   `json:"conflict,omitempty"`
+}
+type RoutingStatusView struct {
+	Known            bool                 `json:"known"`
+	ReporterVerified bool                 `json:"reporter_verified"`
+	Report           *RoutingStatusReport `json:"report,omitempty"`
 }
 
 type ServerStatus struct {
@@ -362,6 +430,7 @@ type ServerStatus struct {
 	Protocol string             `json:"protocol"`
 	Online   []ServerOnlineUser `json:"online"`
 	Status   string             `json:"status"`
+	Routing  RoutingStatusView  `json:"routing"`
 }
 
 type ServerUser struct {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
+	"github.com/perfect-panel/server/internal/module/network/internal/routingstatus"
 	"github.com/perfect-panel/server/internal/module/subscription"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/redis/go-redis/v9"
@@ -24,9 +25,10 @@ type Snapshot struct {
 // Deps declares the subdomain's dependencies; the module facade forwards
 // them from the composition root.
 type Deps struct {
-	Store        Store
-	TrafficUsage subscription.TrafficUsage
-	Redis        *redis.Client
+	Store                Store
+	TrafficUsage         subscription.TrafficUsage
+	Redis                *redis.Client
+	ReadGlobalNodeConfig func(context.Context) (config.NodeConfig, error)
 	// Config snapshots the runtime-mutable settings per request.
 	Config func() Snapshot
 	// Multiplier returns the node traffic multiplier in effect at the given
@@ -41,12 +43,6 @@ type Service struct {
 
 func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
-}
-
-func (s *Service) GetServerConfig(ctx context.Context, req *dto.GetServerConfigRequest, meta RequestMeta) (*dto.GetServerConfigResponse, ResponseMeta, error) {
-	l := newGetServerConfigLogic(ctx, s.deps, meta)
-	resp, err := l.GetServerConfig(req)
-	return resp, l.ResponseMeta(), err
 }
 
 func (s *Service) GetServerUserList(ctx context.Context, req *dto.GetServerUserListRequest, meta RequestMeta) (*dto.GetServerUserListResponse, ResponseMeta, error) {
@@ -65,6 +61,17 @@ func (s *Service) PushOnlineUsers(ctx context.Context, req *dto.OnlineUsersReque
 
 func (s *Service) ServerPushStatus(ctx context.Context, req *dto.ServerPushStatusRequest) error {
 	return newServerPushStatusLogic(ctx, s.deps).ServerPushStatus(req)
+}
+
+// InvalidateRoutingStatus records no untrusted body or error text.
+func (s *Service) InvalidateRoutingStatus(ctx context.Context, serverID int64) error {
+	if serverID <= 0 {
+		return nil
+	}
+	if _, err := s.deps.Store.Node().FindOneServer(ctx, serverID); err != nil {
+		return err
+	}
+	return routingstatus.MarkUnknown(ctx, s.deps.Redis, serverID)
 }
 
 func (s *Service) ServerPushUserTraffic(ctx context.Context, req *dto.ServerPushUserTrafficRequest) error {

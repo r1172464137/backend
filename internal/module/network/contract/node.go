@@ -47,6 +47,7 @@ type NodeDNS struct {
 }
 
 type NodeOutbound struct {
+	ID                   string   `json:"id,omitempty"`
 	Name                 string   `json:"name"`
 	Protocol             string   `json:"protocol"`
 	Address              string   `json:"address"`
@@ -87,11 +88,11 @@ type NodeOutbound struct {
 	SpiderX              string   `json:"spider_x,omitempty"`
 	Settings             string   `json:"settings,omitempty"`
 	StreamSettings       string   `json:"stream_settings,omitempty"`
-	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	// Legacy match arrays are retained for protobuf compatibility and must be empty in v1.
 	Rules []string `json:"rules"`
-	// Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	// Must be empty in v1.
 	IPRules []string `json:"ip_rules"`
-	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
+	// Must be empty in v1.
 	ProtocolRules []string `json:"protocol_rules"`
 }
 

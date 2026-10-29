@@ -2,7 +2,11 @@ package adminserver
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"math"
 
+	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/internal/nodeconfig"
 	"github.com/perfect-panel/server/internal/repository"
@@ -18,62 +22,142 @@ type UpdateServerNodeConfigLogic struct {
 }
 
 func newUpdateServerNodeConfigLogic(ctx context.Context, deps Deps) *UpdateServerNodeConfigLogic {
-	return &UpdateServerNodeConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
+	return &UpdateServerNodeConfigLogic{Logger: logger.WithContext(ctx), ctx: ctx, deps: deps}
 }
 
 func (l *UpdateServerNodeConfigLogic) UpdateServerNodeConfig(req *dto.UpdateServerNodeConfigRequest) error {
-	var validationErr, queryErr, parseErr error
+	if req == nil || req.ServerID <= 0 {
+		return xerr.NewErrCodeMsg(xerr.InvalidParams, "server_id is required")
+	}
+	if req.RequestFields == nil {
+		return xerr.NewErrCodeMsg(xerr.InvalidParams, "explicit request field presence is required")
+	}
+	for _, field := range []string{"block", "block_ips", "block_protocols", "outbound", "inherit_block", "inherit_outbound"} {
+		if _, ok := req.RequestFields[field]; ok {
+			return xerr.NewErrCode(xerr.NetworkLegacyRoutingRemoved)
+		}
+	}
+	var validationErr, queryErr, businessErr error
 	err := l.deps.Store.InNetworkTx(l.ctx, func(store repository.NetworkStore) error {
-		nodeStore := store.Node()
-		// The parent server always exists, so locking it serializes both updates
-		// to an existing override and concurrent creation of the first override.
-		if _, err := nodeStore.FindOneServerForUpdate(l.ctx, req.ServerID); err != nil {
+		nodes := store.Node()
+		if _, err := nodes.FindOneServerForUpdate(l.ctx, req.ServerID); err != nil {
 			queryErr = err
-			return errors.Wrap(err, "find server for update")
+			return err
 		}
-		existingModel, err := nodeStore.FindServerConfigOverride(l.ctx, req.ServerID)
+		old, err := nodes.FindServerRoutingOverride(l.ctx, req.ServerID)
 		if err != nil {
 			queryErr = err
-			return errors.Wrap(err, "find server node config override")
+			return err
 		}
-		existing, err := nodeconfig.OverrideResponse(existingModel)
+		current, err := nodeconfig.OverrideResponse(old)
 		if err != nil {
-			parseErr = err
-			return errors.Wrap(err, "parse current server node config override")
+			queryErr = err
+			return err
 		}
-		global := nodeconfig.GlobalValues(l.deps.Config().Node)
-		if err := nodeconfig.MergeRouteRuleOmissions(req, existing, global.Outbound); err != nil {
+		if req.RequestFields != nil {
+			if _, ok := req.RequestFields["inherit_ip_strategy"]; !ok {
+				req.InheritIPStrategy = current.InheritIPStrategy
+			}
+			if _, ok := req.RequestFields["ip_strategy"]; !ok {
+				req.IPStrategy = current.IPStrategy
+			}
+			if _, ok := req.RequestFields["inherit_dns"]; !ok {
+				req.InheritDNS = current.InheritDNS
+			}
+			if _, ok := req.RequestFields["dns"]; !ok {
+				req.DNS = current.DNS
+			}
+		}
+		data, err := nodeconfig.OverrideModel(req.ServerID, req.ServerNodeConfigOverride)
+		if err != nil {
 			validationErr = err
 			return err
 		}
-
-		data, allInherited, err := nodeconfig.OverrideModel(req.ServerID, req.ServerNodeConfigOverride)
-		if err != nil {
-			validationErr = err
-			return err
+		currentRevision := int64(0)
+		var oldRouting *string
+		if old != nil {
+			currentRevision = old.RoutingRevision
+			oldRouting = old.Routing
 		}
-		if allInherited {
-			return nodeStore.DeleteServerConfigOverride(l.ctx, req.ServerID)
+		if currentRevision < 0 {
+			queryErr = fmt.Errorf("invalid server routing revision")
+			return queryErr
 		}
-		return nodeStore.SaveServerConfigOverride(l.ctx, data)
+		hasRouting, hasInherit := req.Routing != nil, false
+		if req.RequestFields != nil {
+			_, hasRouting = req.RequestFields["routing"]
+			_, hasInherit = req.RequestFields["inherit_routing"]
+		}
+		if hasRouting && req.Routing == nil {
+			validationErr = fmt.Errorf("routing must not be null")
+			return validationErr
+		}
+		if hasRouting && hasInherit && req.InheritRouting {
+			validationErr = fmt.Errorf("cannot save and inherit routing together")
+			return validationErr
+		}
+		// Persist desired state independently of live node reports; only the
+		// node can report a candidate as pending or applied.
+		transition := hasRouting || (hasInherit && req.InheritRouting)
+		if transition {
+			if req.RequestFields != nil {
+				if _, ok := req.RequestFields["routing_revision"]; !ok {
+					validationErr = fmt.Errorf("routing_revision is required")
+					return validationErr
+				}
+			}
+			if req.RoutingRevision != currentRevision {
+				businessErr = xerr.NewErrCode(xerr.NetworkRoutingRevisionConflict)
+				return businessErr
+			}
+			if currentRevision == math.MaxInt64 {
+				validationErr = fmt.Errorf("routing revision overflow")
+				return validationErr
+			}
+		}
+		data.Routing = oldRouting
+		data.RoutingRevision = currentRevision
+		if hasRouting {
+			policy, err := config.NormalizeNodeRouting(req.Routing)
+			if err != nil {
+				validationErr = err
+				return err
+			}
+			body, err := json.Marshal(policy)
+			if err != nil {
+				return err
+			}
+			raw := string(body)
+			data.Routing = &raw
+		} else if hasInherit && req.InheritRouting {
+			data.Routing = nil
+		} else if hasInherit && !req.InheritRouting && oldRouting == nil {
+			validationErr = fmt.Errorf("local routing requires a complete policy")
+			return validationErr
+		}
+		if transition {
+			data.RoutingRevision++
+		}
+		if data.Routing == nil && data.RoutingRevision == 0 && data.DNS == nil && data.IPStrategy == nil && old == nil {
+			return nil
+		}
+		return nodes.SaveServerRoutingOverride(l.ctx, data)
 	})
+	if businessErr != nil {
+		return businessErr
+	}
 	if validationErr != nil {
-		l.Errorf("[UpdateServerNodeConfig] invalid server node config: %v", validationErr)
-		return errors.Wrapf(xerr.NewErrCodeMsg(xerr.InvalidParams, validationErr.Error()), "server node config is invalid: %v", validationErr)
+		return errors.Wrapf(xerr.NewErrCodeMsg(xerr.InvalidParams, validationErr.Error()), "invalid server node config: %v", validationErr)
 	}
 	if queryErr != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "query server node config for update: %v", queryErr)
-	}
-	if parseErr != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "parse current server node config override: %v", parseErr)
+		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "query server node config: %v", queryErr)
 	}
 	if err != nil {
-		l.Errorf("[UpdateServerNodeConfig] transactional update error: %v", err)
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update server node config error: %v", err)
+		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update server node config: %v", err)
 	}
-	return l.deps.Store.Node().ClearServerCache(l.ctx, req.ServerID)
+	// Routing/DNS/IP overrides are always read from the database. The
+	// server-user cache has no dependency on these fields; invalidating that
+	// authorization-sensitive cache here creates an unrelated post-commit
+	// failure/retry window without making this write safer.
+	return nil
 }

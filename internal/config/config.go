@@ -36,10 +36,15 @@ type Config struct {
 	Telegram      Telegram            `yaml:"Telegram"`
 	Log           Log                 `yaml:"Log"`
 	Currency      Currency            `yaml:"Currency"`
-	Administrator struct {
-		Email    string `yaml:"Email" default:"admin@ppanel.dev"`
-		Password string `yaml:"Password" default:"password"`
-	} `yaml:"Administrator"`
+	Administrator AdministratorConfig `yaml:"Administrator"`
+}
+
+// AdministratorConfig includes an optional one-way staged hash for recovering
+// first installation if the process stops after schema creation.
+type AdministratorConfig struct {
+	Email        string `yaml:"Email" default:"admin@ppanel.dev"`
+	Password     string `yaml:"Password" default:"password"`
+	PasswordHash string `yaml:"PasswordHash,omitempty"`
 }
 
 type RedisConfig struct {
@@ -154,16 +159,14 @@ type SiteConfig struct {
 }
 
 type NodeConfig struct {
-	NodeSecret             string         `yaml:"NodeSecret" default:""`
-	NodePullInterval       int64          `yaml:"NodePullInterval" default:"60"`
-	NodePushInterval       int64          `yaml:"NodePushInterval" default:"60"`
-	TrafficReportThreshold int64          `yaml:"TrafficReportThreshold" default:"0"`
-	IPStrategy             string         `yaml:"IPStrategy" default:""`
-	DNS                    []NodeDNS      `yaml:"DNS"`
-	Block                  []string       `yaml:"Block"`
-	BlockIPs               []string       `yaml:"block_ips" json:"block_ips"`
-	BlockProtocols         []string       `yaml:"block_protocols" json:"block_protocols"`
-	Outbound               []NodeOutbound `yaml:"Outbound"`
+	NodeSecret             string       `yaml:"NodeSecret" default:""`
+	NodePullInterval       int64        `yaml:"NodePullInterval" default:"60"`
+	NodePushInterval       int64        `yaml:"NodePushInterval" default:"60"`
+	TrafficReportThreshold int64        `yaml:"TrafficReportThreshold" default:"0"`
+	IPStrategy             string       `yaml:"IPStrategy" default:""`
+	DNS                    []NodeDNS    `yaml:"DNS"`
+	Routing                *NodeRouting `yaml:"Routing,omitempty" json:"routing,omitempty"`
+	RoutingRevision        int64        `yaml:"RoutingRevision,omitempty" json:"routing_revision,omitempty"`
 }
 
 func (n *NodeConfig) Marshal() ([]byte, error) {
@@ -212,6 +215,7 @@ func (n *NodeDNS) Unmarshal(data []byte) error {
 }
 
 type NodeOutbound struct {
+	ID                   string   `json:"id,omitempty"`
 	Name                 string   `json:"name"`
 	Protocol             string   `json:"protocol"`
 	Address              string   `json:"address"`
@@ -267,18 +271,19 @@ func (n *NodeOutbound) Marshal() ([]byte, error) {
 }
 
 type File struct {
-	Host          string              `yaml:"Host" default:"0.0.0.0"`
-	Port          int                 `yaml:"Port" default:"8080"`
-	Transport     TransportConfig     `yaml:"Transport"`
-	TLS           TLS                 `yaml:"TLS"`
-	Debug         bool                `yaml:"Debug" default:"true"`
-	JwtAuth       JwtAuth             `yaml:"JwtAuth"`
-	Logger        logger.LogConf      `yaml:"Logger"`
-	Trace         trace.Config        `yaml:"Trace"`
-	Database      orm.Config          `yaml:"Database"`
-	MySQL         *orm.Config         `yaml:"MySQL,omitempty"` // Deprecated: use Database.
-	Redis         RedisConfig         `yaml:"Redis"`
-	EdgeSubscribe EdgeSubscribeConfig `yaml:"EdgeSubscribe"`
+	Host          string               `yaml:"Host" default:"0.0.0.0"`
+	Port          int                  `yaml:"Port" default:"8080"`
+	Transport     TransportConfig      `yaml:"Transport"`
+	TLS           TLS                  `yaml:"TLS"`
+	Debug         bool                 `yaml:"Debug" default:"true"`
+	JwtAuth       JwtAuth              `yaml:"JwtAuth"`
+	Logger        logger.LogConf       `yaml:"Logger"`
+	Trace         trace.Config         `yaml:"Trace"`
+	Database      orm.Config           `yaml:"Database"`
+	MySQL         *orm.Config          `yaml:"MySQL,omitempty"` // Deprecated: use Database.
+	Redis         RedisConfig          `yaml:"Redis"`
+	EdgeSubscribe EdgeSubscribeConfig  `yaml:"EdgeSubscribe"`
+	Administrator *AdministratorConfig `yaml:"Administrator,omitempty"`
 }
 
 func (c Config) DatabaseConfig() orm.Config {
@@ -359,10 +364,6 @@ type NodeDBConfig struct {
 	TrafficReportThreshold int64
 	IPStrategy             string
 	DNS                    string
-	Block                  string
-	BlockIPs               string
-	BlockProtocols         string
-	Outbound               string
 }
 
 type Currency struct {

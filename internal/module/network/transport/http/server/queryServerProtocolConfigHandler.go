@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -11,6 +12,7 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/pkg/httpx"
 	"github.com/perfect-panel/server/pkg/logger"
+	"google.golang.org/protobuf/proto"
 )
 
 // QueryServerProtocolConfigHandler documents Get Server Protocol Config.
@@ -21,11 +23,13 @@ import (
 // @Security NodeSecret
 // @Param server_id path int true "Server ID"
 // @Param protocols query []string false "Protocols to include" collectionFormat(multi)
+// @Param X-PPanel-Routing-Version header string true "Must be 1"
 // @Success 200 {object} httpx.ResponseSuccessBean{data=dto.QueryServerConfigResponse}
+// @Failure 426 {object} httpx.ResponseErrorBean "Node routing upgrade required"
 // @Router /v2/server/{server_id} [get]
 func QueryServerProtocolConfigHandler(service network.Service, nodeSecret func() string) app.HandlerFunc {
 	return func(c context.Context, ctx *app.RequestContext) {
-		ctx.Header("Vary", "Accept")
+		ctx.Header("Vary", "Accept, "+routingVersionHeader)
 		acceptsProtobuf := acceptsProtobuf(ctx)
 		serverID, err := strconv.ParseInt(ctx.Param("server_id"), 10, 64)
 		if err != nil {
@@ -45,8 +49,19 @@ func QueryServerProtocolConfigHandler(service network.Service, nodeSecret func()
 			return
 		}
 
+		// Ordered-v1 is the only runtime mode. Reject old nodes before any
+		// conditional-response or configuration read can return a candidate.
+		if string(ctx.GetHeader(routingVersionHeader)) != "1" {
+			writeRoutingUpgrade(ctx)
+			return
+		}
 		resp, err := service.QueryServerProtocolConfig(c, &req)
 		if err != nil {
+			writeServerReportResult(ctx, err)
+			return
+		}
+		if err := validateRoutingDelivery(resp, serverID); err != nil {
+			logger.WithContext(c).Errorf("[QueryServerProtocolConfigHandler] invalid routing candidate: %v", err)
 			writeServerReportResult(ctx, err)
 			return
 		}
@@ -54,6 +69,10 @@ func QueryServerProtocolConfigHandler(service network.Service, nodeSecret func()
 			message, err := queryServerProtocolConfigResponseToProtobuf(resp)
 			if err != nil {
 				writeServerReportResult(ctx, err)
+				return
+			}
+			if proto.Size(message) > maxRoutingNodeResponseBytes {
+				writeServerReportResult(ctx, errors.New("ordered routing response exceeds wire limit"))
 				return
 			}
 			if err := writeServerProtobufWithETag(ctx, message, string(ctx.GetHeader("If-None-Match"))); err != nil {
@@ -64,6 +83,11 @@ func QueryServerProtocolConfigHandler(service network.Service, nodeSecret func()
 		body, err := json.Marshal(resp)
 		if err != nil {
 			writeHTTPResult(ctx, nil, err)
+			return
+		}
+		envelope, err := json.Marshal(httpx.Success(resp))
+		if err != nil || len(envelope) > maxRoutingNodeResponseBytes {
+			writeServerReportResult(ctx, errors.New("ordered routing response exceeds wire limit"))
 			return
 		}
 		etag := httpx.GenerateETag(body)

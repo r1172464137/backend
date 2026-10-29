@@ -27,6 +27,7 @@
 | [design/package-layout.md](design/package-layout.md) | 包结构与职责归属 |
 | [design/device-authentication.md](design/device-authentication.md) | 设备登录的签名信封协议 |
 | [design/edge-subscribe.md](design/edge-subscribe.md) | 边缘节点订阅下发 |
+| [design/ordered-node-routing.md](design/ordered-node-routing.md) | 统一有序节点路由：独立出站、有序规则与停机切换 |
 | [design/telegram-bot.md](design/telegram-bot.md) | Telegram Bot 集成 |
 | [design/v2-order-checkout-design.md](design/v2-order-checkout-design.md) | 订单 outbox 与对账设计 |
 

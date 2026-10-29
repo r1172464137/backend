@@ -22,7 +22,7 @@ import (
 // lives under internal/ where the compiler seals it off.
 type Service interface {
 	// Admin-side server and node management.
-	CreateServer(ctx context.Context, req *dto.CreateServerRequest) error
+	CreateServer(ctx context.Context, req *dto.CreateServerRequest) (*dto.CreateServerResponse, error)
 	UpdateServer(ctx context.Context, req *dto.UpdateServerRequest) error
 	DeleteServer(ctx context.Context, req *dto.DeleteServerRequest) error
 	FilterServerList(ctx context.Context, req *dto.FilterServerListRequest) (*dto.FilterServerListResponse, error)
@@ -40,11 +40,11 @@ type Service interface {
 
 	// The node-facing server API. The ETag negotiation flows through
 	// RequestMeta/ResponseMeta; node authentication stays in the handlers.
-	GetServerConfig(ctx context.Context, req *dto.GetServerConfigRequest, meta RequestMeta) (*dto.GetServerConfigResponse, ResponseMeta, error)
 	GetServerUserList(ctx context.Context, req *dto.GetServerUserListRequest, meta RequestMeta) (*dto.GetServerUserListResponse, ResponseMeta, error)
 	QueryServerProtocolConfig(ctx context.Context, req *dto.QueryServerConfigRequest) (*dto.QueryServerConfigResponse, error)
 	PushOnlineUsers(ctx context.Context, req *dto.OnlineUsersRequest) error
 	ServerPushStatus(ctx context.Context, req *dto.ServerPushStatusRequest) error
+	InvalidateRoutingStatus(ctx context.Context, serverID int64) error
 	ServerPushUserTraffic(ctx context.Context, req *dto.ServerPushUserTrafficRequest) error
 
 	// EdgeManifest serves the token-authenticated edge client manifest.
@@ -74,9 +74,10 @@ type Snapshot struct {
 // migration and will own its persistence once the domain data moves in
 // (ADR-001 step 5).
 type Deps struct {
-	Store        Store
-	TrafficUsage subscription.TrafficUsage
-	Redis        *redis.Client
+	Store                Store
+	TrafficUsage         subscription.TrafficUsage
+	Redis                *redis.Client
+	ReadGlobalNodeConfig func(context.Context) (config.NodeConfig, error)
 	// Config snapshots the runtime-mutable settings per request.
 	Config func() Snapshot
 	// Multiplier returns the node traffic multiplier in effect at the given
@@ -88,6 +89,12 @@ type Deps struct {
 // store assembly. The node cache retrier is a background singleton that
 // survives per-transaction rebuilds, so it lives in this closure
 // (ADR-001 step-6 preparation).
+// ReconcileServerCaches is the startup recovery path for invalidations that
+// may have been lost with a previous process. It runs before HTTP/workers.
+func ReconcileServerCaches(ctx context.Context, rds *redis.Client) error {
+	return repo.ReconcileServerCaches(ctx, rds)
+}
+
 func NewRepoBuilder(rds *redis.Client) repository.NetworkBuilder {
 	retrier := repo.NewServerCacheInvalidationRetrier(rds)
 	return func(c repository.ModuleConn) repository.NetworkRepos {
@@ -103,15 +110,15 @@ func NewRepoBuilder(rds *redis.Client) repository.NetworkBuilder {
 func New(deps Deps) Service {
 	return &service{
 		admin: adminserver.NewService(adminserver.Deps{
-			Store: deps.Store,
-			Config: func() adminserver.Snapshot {
-				return adminserver.Snapshot{Node: deps.Config().Node}
-			},
+			Store:                deps.Store,
+			Redis:                deps.Redis,
+			ReadGlobalNodeConfig: deps.ReadGlobalNodeConfig,
 		}),
 		api: serverapi.NewService(serverapi.Deps{
-			TrafficUsage: deps.TrafficUsage,
-			Store:        deps.Store,
-			Redis:        deps.Redis,
+			TrafficUsage:         deps.TrafficUsage,
+			Store:                deps.Store,
+			Redis:                deps.Redis,
+			ReadGlobalNodeConfig: deps.ReadGlobalNodeConfig,
 			Config: func() serverapi.Snapshot {
 				cfg := deps.Config()
 				return serverapi.Snapshot{Node: cfg.Node, Subscribe: cfg.Subscribe}
@@ -133,7 +140,7 @@ type service struct {
 	edge  *edge.Service
 }
 
-func (s *service) CreateServer(ctx context.Context, req *dto.CreateServerRequest) error {
+func (s *service) CreateServer(ctx context.Context, req *dto.CreateServerRequest) (*dto.CreateServerResponse, error) {
 	return s.admin.CreateServer(ctx, req)
 }
 
@@ -193,10 +200,6 @@ func (s *service) QueryNodeTag(ctx context.Context) (*dto.QueryNodeTagResponse, 
 	return s.admin.QueryNodeTag(ctx)
 }
 
-func (s *service) GetServerConfig(ctx context.Context, req *dto.GetServerConfigRequest, meta RequestMeta) (*dto.GetServerConfigResponse, ResponseMeta, error) {
-	return s.api.GetServerConfig(ctx, req, meta)
-}
-
 func (s *service) GetServerUserList(ctx context.Context, req *dto.GetServerUserListRequest, meta RequestMeta) (*dto.GetServerUserListResponse, ResponseMeta, error) {
 	return s.api.GetServerUserList(ctx, req, meta)
 }
@@ -211,6 +214,9 @@ func (s *service) PushOnlineUsers(ctx context.Context, req *dto.OnlineUsersReque
 
 func (s *service) ServerPushStatus(ctx context.Context, req *dto.ServerPushStatusRequest) error {
 	return s.api.ServerPushStatus(ctx, req)
+}
+func (s *service) InvalidateRoutingStatus(ctx context.Context, serverID int64) error {
+	return s.api.InvalidateRoutingStatus(ctx, serverID)
 }
 
 func (s *service) ServerPushUserTraffic(ctx context.Context, req *dto.ServerPushUserTrafficRequest) error {

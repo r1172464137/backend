@@ -6,6 +6,7 @@ import (
 
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
+	"github.com/perfect-panel/server/internal/module/network/internal/routingstatus"
 	"github.com/perfect-panel/server/internal/module/network/internal/trafficagg"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/timeutil"
@@ -32,6 +33,11 @@ func (l *ServerPushStatusLogic) ServerPushStatus(req *dto.ServerPushStatusReques
 	if err != nil || serverInfo.Id <= 0 {
 		l.Errorw("[PushOnlineUsers] FindOne error", logger.Field("error", err))
 		return errors.New("server not found")
+	}
+	if l.deps.Redis != nil {
+		if err := routingstatus.Record(l.ctx, l.deps.Redis, req.ServerId, req); err != nil {
+			return err
+		}
 	}
 	err = l.deps.Store.Node().UpdateStatusCache(l.ctx, req.ServerId, &node.Status{
 		Cpu:       req.Cpu,

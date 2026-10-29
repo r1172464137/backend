@@ -7,6 +7,7 @@ import (
 	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
+	"github.com/perfect-panel/server/internal/module/network/internal/routingstatus"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
 	"github.com/pkg/errors"
@@ -58,11 +59,10 @@ func (l *FilterServerListLogic) FilterServerList(req *dto.FilterServerListReques
 		server.Protocols = protocols
 
 		nodeStatus, err := nodeStore.StatusCache(l.ctx, datum.Id)
-		if err != nil {
-			if !errors.Is(err, redis.Nil) {
-				l.Errorw("[handlerServerStatus] GetNodeStatus Error: ", logger.Field("error", err.Error()), logger.Field("node_id", datum.Id))
-			}
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetNodeStatus Error")
+		if err != nil && !errors.Is(err, redis.Nil) {
+			// A Redis outage must not turn stale routing status into success or
+			// make the entire server inventory disappear. Metrics are unknown.
+			l.Errorw("[handlerServerStatus] GetNodeStatus Error: ", logger.Field("error", err.Error()), logger.Field("node_id", datum.Id))
 		}
 		server.Status = dto.ServerStatus{
 			Mem:    nodeStatus.Mem,
@@ -71,6 +71,11 @@ func (l *FilterServerListLogic) FilterServerList(req *dto.FilterServerListReques
 			Online: l.handlerServerStatus(datum.Id, protocols),
 			Status: l.handlerServerStaus(datum.LastReportedAt),
 		}
+		status, err := routingstatus.Read(l.ctx, l.deps.Redis, datum.Id)
+		if err != nil {
+			status = dto.RoutingStatusView{Known: false}
+		}
+		server.Status.Routing = status
 		list = append(list, server)
 	}
 

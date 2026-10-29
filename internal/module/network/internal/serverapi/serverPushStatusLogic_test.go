@@ -7,6 +7,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
+	"github.com/perfect-panel/server/internal/module/network/internal/routingstatus"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -52,6 +53,41 @@ type statusStore struct {
 }
 
 func (s *statusStore) Node() repository.NodeRepo { return s.nodes }
+
+func TestServerRoutingReportsShareStateAcrossProtocolsAndZeroProtocols(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { client.Close() })
+	nodes := &statusNodeRepo{server: &node.Server{Id: 7, Protocols: `[]`}}
+	logic := newServerPushStatusLogic(context.Background(), Deps{Store: &statusStore{nodes: nodes}, Redis: client})
+	id := "11111111-1111-4111-8111-111111111111"
+	first := &dto.ServerPushStatusRequest{ServerCommon: dto.ServerCommon{ServerId: 7}, UpdatedAt: 10, RoutingVersion: 1, RoutingSequence: 2, InstanceID: id, RoutingApplied: &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 2}}
+	if err := logic.ServerPushStatus(first); err != nil {
+		t.Fatal(err)
+	}
+	older := *first
+	older.Protocol = "vless"
+	older.UpdatedAt = 9
+	older.RoutingSequence = 1
+	older.RoutingApplied = &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 1}
+	if err := logic.ServerPushStatus(&older); err != nil {
+		t.Fatal(err)
+	}
+	status, err := routingstatus.Read(context.Background(), client, 7)
+	if err != nil || !status.Known || status.Report.Applied.SourceRevision != 2 {
+		t.Fatalf("out-of-order report %#v %v", status, err)
+	}
+	other := *first
+	other.Protocol = "trojan"
+	other.InstanceID = "22222222-2222-4222-8222-222222222222"
+	if err := logic.ServerPushStatus(&other); err != nil {
+		t.Fatal(err)
+	}
+	status, err = routingstatus.Read(context.Background(), client, 7)
+	if err != nil || status.Known {
+		t.Fatalf("multiple instances %#v %v", status, err)
+	}
+}
 
 func TestServerPushStatusDefersLastReportedDatabaseWrite(t *testing.T) {
 	redisServer := miniredis.RunT(t)

@@ -30,6 +30,7 @@ func New(deps Dependencies, addr string, tlsConfig *tls.Config) *Server {
 	opts := []config.Option{
 		server.WithHostPorts(addr),
 		server.WithDisablePrintRoute(true),
+		server.WithMaxRequestBodySize(4 * 1024 * 1024),
 	}
 	if tlsConfig != nil {
 		opts = append(opts, server.WithTLS(tlsConfig))

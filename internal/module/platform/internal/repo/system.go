@@ -189,11 +189,20 @@ func (m *systemRepo) GetVerifyConfig(ctx context.Context) ([]*system.System, err
 	return configs, err
 }
 
-// GetNodeConfig returns the server config.
-func (m *systemRepo) GetNodeConfig(ctx context.Context) ([]*system.System, error) {
+// GetNodeConfigUncached reads the authoritative database, never Redis.
+func (m *systemRepo) GetNodeConfigUncached(ctx context.Context) ([]*system.System, error) {
 	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.NodeConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "server").Find(v).Error
+	err := m.QueryNoCacheCtx(ctx, &configs, func(conn *gorm.DB, v interface{}) error {
+		return conn.Where("category = ?", "server").Not(map[string]any{"key": []string{"Block", "BlockIPs", "BlockProtocols", "Outbound"}}).Order("id ASC").Find(v).Error
+	})
+	return configs, err
+}
+
+// GetLegacyNodeConfigUncached is reserved for the offline 02179 cutover.
+func (m *systemRepo) GetLegacyNodeConfigUncached(ctx context.Context) ([]*system.System, error) {
+	var configs []*system.System
+	err := m.QueryNoCacheCtx(ctx, &configs, func(conn *gorm.DB, v interface{}) error {
+		return conn.Where("category = ?", "server").Order("id ASC").Find(v).Error
 	})
 	return configs, err
 }
@@ -205,7 +214,7 @@ func (m *systemRepo) GetNodeConfigForUpdate(ctx context.Context) ([]*system.Syst
 	var configs []*system.System
 	err := m.QueryNoCacheCtx(ctx, &configs, func(conn *gorm.DB, v interface{}) error {
 		return conn.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("category = ?", "server").Order("id ASC").Find(v).Error
+			Where("category = ?", "server").Not(map[string]any{"key": []string{"Block", "BlockIPs", "BlockProtocols", "Outbound"}}).Order("id ASC").Find(v).Error
 	})
 	return configs, err
 }

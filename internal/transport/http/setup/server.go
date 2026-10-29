@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sync"
 	"uuid"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -16,6 +19,8 @@ import (
 	hertzconfig "github.com/cloudwego/hertz/pkg/common/config"
 	"github.com/cloudwego/hertz/pkg/common/utils"
 	"github.com/perfect-panel/server/internal/app/migration/schema"
+	"github.com/perfect-panel/server/internal/auth/identifier"
+	"github.com/perfect-panel/server/internal/auth/password"
 	"github.com/perfect-panel/server/internal/config"
 	"github.com/perfect-panel/server/pkg/conf"
 	"github.com/perfect-panel/server/pkg/logger"
@@ -29,6 +34,7 @@ var templateFS embed.FS
 
 var initStatus = make(chan bool)
 var configPath string
+var initConfigMu sync.Mutex
 
 // Start serves the first-installation UI on the local setup listener.
 func Start(path string) (chan bool, *server.Hertz) {
@@ -65,10 +71,23 @@ func handleInit(_ context.Context, ctx *app.RequestContext) {
 }
 
 func handleInitConfig(_ context.Context, ctx *app.RequestContext) {
-	// Load configuration file
-
+	initConfigMu.Lock()
+	defer initConfigMu.Unlock()
+	unlock, err := conf.LockInitialization(configPath)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, utils.H{"code": 500, "msg": "Configuration initialization failed", "data": nil})
+		return
+	}
+	defer unlock()
 	var cfg config.File
-	conf.MustLoad(configPath, &cfg)
+	if err := conf.Load(configPath, &cfg); err != nil {
+		ctx.JSON(http.StatusInternalServerError, utils.H{"code": 500, "msg": "Configuration initialization failed", "data": nil})
+		return
+	}
+	if cfg.Administrator != nil && cfg.Administrator.PasswordHash != "" || cfg.JwtAuth.AccessSecret != "" && cfg.DatabaseConfig().Addr != "" {
+		ctx.JSON(http.StatusConflict, utils.H{"code": 409, "msg": "Installation already started; restart to recover", "data": nil})
+		return
+	}
 	var request struct {
 		AdminEmail    string `json:"adminEmail"`
 		AdminPassword string `json:"adminPassword"`
@@ -112,18 +131,6 @@ func handleInitConfig(_ context.Context, ctx *app.RequestContext) {
 	cfg.Redis.Host = fmt.Sprintf("%s:%s", request.RedisHost, request.RedisPort)
 	cfg.Redis.Pass = request.RedisPassword
 
-	// save config
-	fileData, err := yaml.Marshal(cfg)
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, utils.H{
-			"code": 500,
-			"msg":  "Configuration initialization failed",
-			"data": nil,
-		})
-		ctx.Abort()
-		return
-	}
-
 	// create database connection
 	dbClient := orm.Mysql{Config: dbConfig}
 	db, err := orm.ConnectDatabase(dbClient)
@@ -137,8 +144,45 @@ func handleInitConfig(_ context.Context, ctx *app.RequestContext) {
 		return
 	}
 	sqlDB, err := db.DB()
-	if err == nil {
-		defer sqlDB.Close()
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, utils.H{"code": 500, "msg": "Database connection failed", "data": nil})
+		return
+	}
+	defer sqlDB.Close()
+	conn, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, utils.H{"code": 500, "msg": "Database connection failed", "data": nil})
+		return
+	}
+	defer conn.Close()
+	release, err := lockSetupDatabase(context.Background(), conn, dbConfig)
+	if err != nil {
+		ctx.JSON(http.StatusConflict, utils.H{"code": 409, "msg": "Another installation is in progress", "data": nil})
+		return
+	}
+	defer release()
+	// The optional connectivity-test endpoint is not an authorization gate:
+	// every submission independently proves the target database is empty.
+	// Existing installations must use the normal 02179 cutover path.
+	if err := schema.RequireNoBusinessObjects(context.Background(), db, false); err != nil {
+		ctx.JSON(http.StatusConflict, utils.H{"code": 409, "msg": "Database is not provably empty; existing installations require the normal upgrade path", "data": nil})
+		ctx.Abort()
+		return
+	}
+	email := identifier.CanonicalEmail(request.AdminEmail)
+	if email == "" || request.AdminPassword == "" {
+		ctx.JSON(http.StatusBadRequest, utils.H{"code": 400, "msg": "Administrator email and password are required", "data": nil})
+		ctx.Abort()
+		return
+	}
+	// Persist only a one-way recovery hash, never the supplied plaintext.
+	// If setup dies after schema.Up, normal startup can finish the admin seed.
+	cfg.Administrator = &config.AdministratorConfig{Email: email, PasswordHash: password.EncodePassWord(request.AdminPassword)}
+	fileData, err := yaml.Marshal(cfg)
+	if err != nil || writeConfigAtomic(configPath, fileData) != nil {
+		ctx.JSON(http.StatusInternalServerError, utils.H{"code": 500, "msg": "Configuration initialization failed", "data": nil})
+		ctx.Abort()
+		return
 	}
 	// migrate database
 	if err = schema.Up(dbClient.Driver(), dbClient.MigrationDsn()); err != nil {
@@ -164,13 +208,11 @@ func handleInitConfig(_ context.Context, ctx *app.RequestContext) {
 		return
 	}
 
-	// write to file
-	if err = os.WriteFile(configPath, fileData, 0644); err != nil {
-		ctx.JSON(http.StatusInternalServerError, utils.H{
-			"code": 500,
-			"msg":  "Configuration initialization failed",
-			"data": nil,
-		})
+	// The account is durable; discard its staged hash from the runtime file.
+	cfg.Administrator = nil
+	fileData, err = yaml.Marshal(cfg)
+	if err != nil || writeConfigAtomic(configPath, fileData) != nil {
+		ctx.JSON(http.StatusInternalServerError, utils.H{"code": 500, "msg": "Configuration initialization failed", "data": nil})
 		ctx.Abort()
 		return
 	}
@@ -181,6 +223,69 @@ func handleInitConfig(_ context.Context, ctx *app.RequestContext) {
 		"status": true,
 	})
 	initStatus <- true
+}
+
+// Hold a session-scoped database lock from emptiness proof through final
+// config write. This protects separate setup processes targeting the same DB.
+func lockSetupDatabase(ctx context.Context, conn *sql.Conn, cfg orm.Config) (func(), error) {
+	switch orm.NormalizeDriver(cfg.Driver) {
+	case orm.DriverMySQL:
+		sum := sha256.Sum256([]byte(cfg.Dbname))
+		name := fmt.Sprintf("ppanel-init-%x", sum[:16])
+		var acquired sql.NullInt64
+		if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&acquired); err != nil {
+			return nil, err
+		}
+		if !acquired.Valid || acquired.Int64 != 1 {
+			return nil, fmt.Errorf("setup lock unavailable")
+		}
+		return func() { _, _ = conn.ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", name) }, nil
+	case orm.DriverPostgres:
+		const key int64 = 0x5050414e454c
+		var acquired bool
+		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired); err != nil {
+			return nil, err
+		}
+		if !acquired {
+			return nil, fmt.Errorf("setup lock unavailable")
+		}
+		return func() { _, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key) }, nil
+	default:
+		return nil, fmt.Errorf("unsupported driver")
+	}
+}
+
+func writeConfigAtomic(path string, data []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".ppanel-init-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if err = file.Chmod(0600); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err = file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func HandleMySQLTest(ctx context.Context, requestCtx *app.RequestContext) {
@@ -208,7 +313,6 @@ func HandleDatabaseTest(_ context.Context, ctx *app.RequestContext) {
 	var status = true
 	var message string
 	var tx *sql.DB
-	var tables []string
 	dbConfig, err := buildDatabaseConfig(request.Driver, request.Host, request.Port, request.Database, request.User, request.Password)
 	if err != nil {
 		ctx.JSON(http.StatusOK, utils.H{
@@ -225,26 +329,22 @@ func HandleDatabaseTest(_ context.Context, ctx *app.RequestContext) {
 		message = "Database connection failed"
 		goto result
 	}
-	tx, _ = db.DB()
-	if tx != nil {
-		defer tx.Close()
+	tx, err = db.DB()
+	if err != nil || tx == nil {
+		status = false
+		message = "Database connection failed"
+		goto result
 	}
+	defer tx.Close()
 	if err := tx.Ping(); err != nil {
 		logger.Errorf("ping database failed, err: %v\n", err.Error())
 		status = false
 		message = "Database connection failed"
 	}
 
-	tables, err = db.Migrator().GetTables()
-	if err != nil {
-		logger.Errorf("database table check failed, err: %v\n", err.Error())
+	if err := schema.RequireNoBusinessObjects(context.Background(), db, false); err != nil {
 		status = false
-		message = "Database table check failed"
-		goto result
-	}
-	if len(tables) > 0 {
-		status = false
-		message = "The database contains existing data. Please clear it before proceeding with the installation."
+		message = "Database is not provably empty; existing installations require the normal upgrade path."
 		goto result
 	}
 

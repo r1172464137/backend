@@ -1,6 +1,13 @@
 package dto
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/perfect-panel/server/internal/config"
+)
 
 // Cross-domain view types are module-owned snapshots. They deliberately
 // duplicate JSON shapes instead of coupling one module's API to another.
@@ -95,24 +102,24 @@ type NodeConfig struct {
 	TrafficReportThreshold int64                     `json:"traffic_report_threshold"`
 	IPStrategy             string                    `json:"ip_strategy"`
 	DNS                    []PlatformNodeDNSSnapshot `json:"dns"`
-	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	Block []string `json:"block"`
-	// IP rules: strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	BlockIPs []string `json:"block_ips"`
-	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.
-	BlockProtocols []string `json:"block_protocols"`
-	// Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.
-	Outbound          []PlatformNodeOutboundSnapshot `json:"outbound"`
-	RequestFields     map[string]struct{}            `json:"-" swaggerignore:"true"`
-	OutboundFieldSets []map[string]struct{}          `json:"-" swaggerignore:"true"`
+	Routing                *config.NodeRouting       `json:"routing"`
+	RoutingRevision        int64                     `json:"routing_revision"`
+	RoutingMode            string                    `json:"routing_mode"`
+	RoutingCapabilities    []int                     `json:"routing_capabilities"`
+	RequestFields          map[string]struct{}       `json:"-" swaggerignore:"true"`
 }
 
 // UnmarshalJSON records field presence so an old admin client that does not
 // know the additive route-rule fields cannot erase them during a PUT.
 func (n *NodeConfig) UnmarshalJSON(data []byte) error {
+	if err := config.ValidateUniqueJSON(data); err != nil {
+		return err
+	}
 	type alias NodeConfig
 	var decoded alias
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
 		return err
 	}
 	*n = NodeConfig(decoded)
@@ -121,23 +128,34 @@ func (n *NodeConfig) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
+	for _, name := range []string{"routing_revision", "node_pull_interval", "node_push_interval"} {
+		if raw, ok := fields[name]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("%s must not be null", name)
+		}
+	}
 	n.RequestFields = make(map[string]struct{}, len(fields))
 	for field := range fields {
+		if field != strings.ToLower(field) {
+			return fmt.Errorf("invalid JSON field %q", field)
+		}
 		n.RequestFields[field] = struct{}{}
 	}
-	if raw, ok := fields["outbound"]; ok && string(raw) != "null" {
-		var outbound []map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &outbound); err != nil {
+	if raw, ok := fields["dns"]; ok {
+		items, err := config.ParseNodeDNSJSON(raw)
+		if err != nil {
 			return err
 		}
-		n.OutboundFieldSets = make([]map[string]struct{}, len(outbound))
-		for index, item := range outbound {
-			set := make(map[string]struct{}, len(item))
-			for field := range item {
-				set[field] = struct{}{}
-			}
-			n.OutboundFieldSets[index] = set
+		n.DNS = make([]PlatformNodeDNSSnapshot, 0, len(items))
+		for _, d := range items {
+			n.DNS = append(n.DNS, PlatformNodeDNSSnapshot{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
 		}
+	}
+	if raw, ok := fields["routing"]; ok && string(bytes.TrimSpace(raw)) != "null" {
+		policy, err := config.ParseNodeRouting(raw)
+		if err != nil {
+			return err
+		}
+		n.Routing = policy
 	}
 	return nil
 }
@@ -148,55 +166,6 @@ type PlatformNodeDNSSnapshot struct {
 	ServerName string   `json:"server_name,omitempty"`
 	Domains    []string `json:"domains"`
 } // @name dto.NodeDNS
-
-type PlatformNodeOutboundSnapshot struct {
-	Name                 string   `json:"name"`
-	Protocol             string   `json:"protocol"`
-	Address              string   `json:"address"`
-	Port                 int64    `json:"port"`
-	User                 string   `json:"user,omitempty"`
-	Password             string   `json:"password"`
-	UUID                 string   `json:"uuid,omitempty"`
-	Cipher               string   `json:"cipher,omitempty"`
-	Plugin               string   `json:"plugin,omitempty"`
-	PluginOptions        any      `json:"plugin_opts,omitempty"`
-	Security             string   `json:"security,omitempty"`
-	SNI                  string   `json:"sni,omitempty"`
-	ALPN                 []string `json:"alpn,omitempty"`
-	AllowInsecure        bool     `json:"allow_insecure,omitempty"`
-	Fingerprint          string   `json:"fingerprint,omitempty"`
-	Transport            string   `json:"transport,omitempty"`
-	Host                 string   `json:"host,omitempty"`
-	Path                 string   `json:"path,omitempty"`
-	ServiceName          string   `json:"service_name,omitempty"`
-	XHTTPMode            string   `json:"xhttp_mode,omitempty"`
-	XHTTPExtra           string   `json:"xhttp_extra,omitempty"`
-	Flow                 string   `json:"flow,omitempty"`
-	Encryption           string   `json:"encryption,omitempty"`
-	EncryptionMode       string   `json:"encryption_mode,omitempty"`
-	EncryptionRTT        string   `json:"encryption_rtt,omitempty"`
-	EncryptionTicket     string   `json:"encryption_ticket,omitempty"`
-	EncryptionPadding    string   `json:"encryption_client_padding,omitempty"`
-	EncryptionPassword   string   `json:"encryption_password,omitempty"`
-	Multiplex            string   `json:"multiplex,omitempty"`
-	UoT                  bool     `json:"uot,omitempty"`
-	UoTVersion           int      `json:"uot_version,omitempty"`
-	CongestionController string   `json:"congestion_controller,omitempty"`
-	UDPStream            bool     `json:"udp_stream,omitempty"`
-	ReduceRtt            bool     `json:"reduce_rtt,omitempty"`
-	Heartbeat            int      `json:"heartbeat,omitempty"`
-	RealityPublicKey     string   `json:"reality_public_key,omitempty"`
-	RealityShortId       string   `json:"reality_short_id,omitempty"`
-	SpiderX              string   `json:"spider_x,omitempty"`
-	Settings             string   `json:"settings,omitempty"`
-	StreamSettings       string   `json:"stream_settings,omitempty"`
-	// Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
-	Rules []string `json:"rules"`
-	// Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
-	IPRules []string `json:"ip_rules"`
-	// Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.
-	ProtocolRules []string `json:"protocol_rules"`
-} // @name dto.NodeOutbound
 
 type OrdersStatistics struct {
 	Date               string             `json:"date,omitempty"`

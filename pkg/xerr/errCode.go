@@ -57,6 +57,14 @@ const (
 	NodeGroupNotEmpty uint32 = 30005
 )
 
+// Node routing capability negotiation (network domain).
+const NodeRoutingUpgradeRequired uint32 = 140001
+const NetworkRoutingRevisionConflict uint32 = 140002
+const PlatformRoutingRevisionConflict uint32 = 160001
+const PlatformLegacyRoutingRemoved uint32 = 160003
+const NetworkLegacyRoutingRemoved uint32 = 140003
+const NetworkNodeProtocolInvalid uint32 = 140004
+
 // Request error
 const (
 	InvalidParams     uint32 = 400

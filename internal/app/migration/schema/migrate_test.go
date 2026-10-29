@@ -50,6 +50,7 @@ func runMigration(t *testing.T, driver, dsn string) {
 		defer sqlDB.Close()
 	}
 	assertStructuredRouteRuleSchema(t, db)
+	assertOrderedNodeRoutingSchema(t, db, driver)
 	if err := CreateAdminUser(fmt.Sprintf("admin-%s@example.com", driver), "password", db); err != nil {
 		t.Fatalf("%s create admin failed: %v", driver, err)
 	}
@@ -89,6 +90,61 @@ func assertStructuredRouteRuleSchema(t *testing.T, db *gorm.DB) {
 	}
 	if count != 2 {
 		t.Fatalf("structured route global config key count = %d, want 2", count)
+	}
+}
+
+func assertOrderedNodeRoutingSchema(t *testing.T, db *gorm.DB, driver string) {
+	t.Helper()
+	columns, err := db.Migrator().ColumnTypes("server_config_overrides")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]gorm.ColumnType, len(columns))
+	for _, column := range columns {
+		byName[strings.ToLower(column.Name())] = column
+	}
+	routing, ok := byName["routing"]
+	if !ok {
+		t.Fatal("server_config_overrides.routing is missing")
+	}
+	wantType := "TEXT"
+	if driver == orm.DriverMySQL {
+		wantType = "MEDIUMTEXT"
+	}
+	if got := strings.ToUpper(routing.DatabaseTypeName()); got != wantType {
+		t.Errorf("routing type = %s, want %s", got, wantType)
+	}
+	if nullable, known := routing.Nullable(); !known || !nullable {
+		t.Errorf("routing must be nullable: nullable=%v known=%v", nullable, known)
+	}
+	revision, ok := byName["routing_revision"]
+	if !ok {
+		t.Fatal("routing_revision is missing")
+	}
+	revisionType := strings.ToUpper(revision.DatabaseTypeName())
+	if revisionType != "BIGINT" && !(driver == orm.DriverPostgres && revisionType == "INT8") {
+		t.Fatalf("routing_revision type = %s, want BIGINT", revisionType)
+	}
+	if nullable, known := revision.Nullable(); !known || nullable {
+		t.Errorf("routing_revision must be non-null: nullable=%v known=%v", nullable, known)
+	}
+	var rows []struct{ Key, Value string }
+	if err := db.Table("system").Where(map[string]any{"category": "server", "key": []string{"Routing", "RoutingRevision", "RoutingCutover"}}).Find(&rows).Error; err != nil {
+		t.Fatalf("query ordered global keys: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("ordered global key count = %d, want 3", len(rows))
+	}
+	if driver == orm.DriverMySQL {
+		systemColumns, err := db.Migrator().ColumnTypes("system")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, col := range systemColumns {
+			if strings.EqualFold(col.Name(), "value") && strings.ToUpper(col.DatabaseTypeName()) != "MEDIUMTEXT" {
+				t.Errorf("system.value type = %s, want MEDIUMTEXT", col.DatabaseTypeName())
+			}
+		}
 	}
 }
 

@@ -106,6 +106,15 @@ func getServers() *lifecycle.Group {
 		Notification:             ctx.Notification,
 		SetTelegramBot:           ctx.Runtime.SetTelegramBot,
 		SetNodeMultiplierManager: ctx.Runtime.SetNodeMultiplierManager,
+		FinalizeStagedAdmin:      func(hash string) error { return conf.ClearStagedAdminHash(startConfigPath, hash) },
+	}
+	// The offline routing cutover must finish before HTTP, queue consumers or
+	// schedulers can perform any writes. ServiceGroup starts members in parallel.
+	bootstrap.Start(bootstrapDeps)
+	// Recover cache invalidations lost when the previous backend died before
+	// its in-process retry succeeded. Fail closed before serving node data.
+	if err := network.ReconcileServerCaches(context.Background(), ctx.Redis); err != nil {
+		panic(fmt.Errorf("reconcile server caches: %w", err))
 	}
 	routeDeps := func() routes.Dependencies {
 		return routes.Dependencies{
@@ -172,9 +181,10 @@ func getServers() *lifecycle.Group {
 
 	services := lifecycle.NewServiceGroup()
 	services.Add(app.NewService(app.Dependencies{
-		Config:    runtimeConfig,
-		Store:     ctx.Store,
-		Bootstrap: bootstrapDeps,
+		Config:               runtimeConfig,
+		Store:                ctx.Store,
+		Bootstrap:            bootstrapDeps,
+		BootstrapInitialized: true,
 		HTTP: func() httpserver.Dependencies {
 			return httpserver.Dependencies{
 				Routes:           routeDeps(),

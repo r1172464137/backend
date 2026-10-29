@@ -25,6 +25,7 @@ type Dependencies struct {
 	Config                 func() config.Config
 	Store                  repository.Store
 	Bootstrap              *bootstrap.Dependencies
+	BootstrapInitialized   bool
 	HTTP                   func() httpserver.Dependencies
 	SetRestart             func(func() error)
 	SetReinitializeHandler func(func(string))
@@ -64,7 +65,9 @@ func (m *Service) Start() {
 
 	runtimeConfig := m.deps.Config()
 	serverAddr := fmt.Sprintf("%v:%d", runtimeConfig.Host, runtimeConfig.Port)
-	bootstrap.Start(m.deps.Bootstrap)
+	if !m.deps.BootstrapInitialized {
+		bootstrap.Start(m.deps.Bootstrap)
+	}
 	if err := m.deps.Store.UserAuth().ValidateEmailIdentityUniqueness(context.Background()); err != nil {
 		panic(err.Error())
 	}

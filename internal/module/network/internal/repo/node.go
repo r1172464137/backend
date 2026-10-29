@@ -201,7 +201,9 @@ func (m *nodeRepo) DeleteServer(ctx context.Context, id int64, tx ...*gorm.DB) e
 func (m *nodeRepo) FindServerConfigOverride(ctx context.Context, serverId int64) (*node.ServerConfigOverride, error) {
 	var data []node.ServerConfigOverride
 
-	err := m.WithContext(ctx).Model(&node.ServerConfigOverride{}).Where("server_id = ?", serverId).Limit(1).Find(&data).Error
+	err := m.WithContext(ctx).Model(&node.ServerConfigOverride{}).
+		Select("id", "server_id", "ip_strategy", "dns", "block", "block_ips", "block_protocols", "outbound", "created_at", "updated_at").
+		Where("server_id = ?", serverId).Limit(1).Find(&data).Error
 	if err != nil {
 		return nil, err
 	}
@@ -213,23 +215,24 @@ func (m *nodeRepo) FindServerConfigOverride(ctx context.Context, serverId int64)
 	return &data[0], nil
 }
 
-func (m *nodeRepo) SaveServerConfigOverride(ctx context.Context, data *node.ServerConfigOverride, tx ...*gorm.DB) error {
-	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
+// FindServerRoutingOverride never reads dormant legacy route columns.
+func (m *nodeRepo) FindServerRoutingOverride(ctx context.Context, serverId int64) (*node.ServerConfigOverride, error) {
+	var rows []node.ServerConfigOverride
+	err := m.WithContext(ctx).Model(&node.ServerConfigOverride{}).
+		Select("id", "server_id", "ip_strategy", "dns", "routing", "routing_revision", "created_at", "updated_at").
+		Where("server_id = ?", serverId).Limit(1).Find(&rows).Error
+	if err != nil || len(rows) == 0 {
+		return nil, err
 	}
+	return &rows[0], nil
+}
 
-	var old node.ServerConfigOverride
-	err := db.WithContext(ctx).Model(&node.ServerConfigOverride{}).Where("server_id = ?", data.ServerId).First(&old).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	if err == nil {
-		data.Id = old.Id
-		data.CreatedAt = old.CreatedAt
-	}
-
-	return db.WithContext(ctx).Save(data).Error
+// SaveServerRoutingOverride updates only active routing and non-routing fields;
+// legacy columns remain unchanged as rollback material.
+func (m *nodeRepo) SaveServerRoutingOverride(ctx context.Context, data *node.ServerConfigOverride) error {
+	return m.WithContext(ctx).Select("server_id", "ip_strategy", "dns", "routing", "routing_revision", "created_at", "updated_at").
+		Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "server_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"ip_strategy", "dns", "routing", "routing_revision", "updated_at"})}).Create(data).Error
 }
 
 func (m *nodeRepo) DeleteServerConfigOverride(ctx context.Context, serverId int64, tx ...*gorm.DB) error {

@@ -3677,7 +3677,25 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/result.ResponseSuccessBean"
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/result.ResponseSuccessBean"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/dto.CreateServerResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "422": {
+                        "description": "Enabled node protocol is invalid or unsupported",
+                        "schema": {
+                            "$ref": "#/definitions/result.ResponseErrorBean"
                         }
                     }
                 }
@@ -4072,6 +4090,7 @@
                         "BearerAuth": []
                     }
                 ],
+                "description": "Returns desired routing and independently reported routing_status. Unknown or pending does not prevent configuration saves; only a node-reported matching applied identity confirms application.",
                 "consumes": [
                     "application/json"
                 ],
@@ -4119,6 +4138,7 @@
                         "BearerAuth": []
                     }
                 ],
+                "description": "Saves desired routing for new or offline servers without requiring a routing status report. Success does not mean applied; inspect routing_status and compare its applied identity with the desired identity. A routing change requires the current routing_revision.",
                 "consumes": [
                     "application/json"
                 ],
@@ -4145,6 +4165,18 @@
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/result.ResponseSuccessBean"
+                        }
+                    },
+                    "409": {
+                        "description": "Stale routing revision",
+                        "schema": {
+                            "$ref": "#/definitions/result.ResponseErrorBean"
+                        }
+                    },
+                    "422": {
+                        "description": "Legacy routing fields removed",
+                        "schema": {
+                            "$ref": "#/definitions/result.ResponseErrorBean"
                         }
                     }
                 }
@@ -4267,6 +4299,12 @@
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/result.ResponseSuccessBean"
+                        }
+                    },
+                    "422": {
+                        "description": "Enabled node protocol is invalid or unsupported",
+                        "schema": {
+                            "$ref": "#/definitions/result.ResponseErrorBean"
                         }
                     }
                 }
@@ -5036,6 +5074,18 @@
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/result.ResponseSuccessBean"
+                        }
+                    },
+                    "409": {
+                        "description": "Stale routing revision",
+                        "schema": {
+                            "$ref": "#/definitions/result.ResponseErrorBean"
+                        }
+                    },
+                    "422": {
+                        "description": "Legacy routing fields removed",
+                        "schema": {
+                            "$ref": "#/definitions/result.ResponseErrorBean"
                         }
                     }
                 }
@@ -10811,9 +10861,6 @@
                         "NodeSecret": []
                     }
                 ],
-                "consumes": [
-                    "application/json"
-                ],
                 "produces": [
                     "application/json",
                     "application/protobuf"
@@ -10821,29 +10868,12 @@
                 "tags": [
                     "node"
                 ],
-                "summary": "Get server config",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "name": "protocol",
-                        "in": "query"
-                    },
-                    {
-                        "type": "string",
-                        "name": "secret_key",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "name": "server_id",
-                        "in": "query"
-                    }
-                ],
+                "summary": "Legacy node config removed; use /v2/server/{server_id}",
                 "responses": {
-                    "200": {
-                        "description": "OK",
+                    "426": {
+                        "description": "Node routing upgrade required",
                         "schema": {
-                            "$ref": "#/definitions/dto.GetServerConfigResponse"
+                            "$ref": "#/definitions/result.ResponseErrorBean"
                         }
                     }
                 }
@@ -11442,6 +11472,13 @@
                         "description": "Protocols to include",
                         "name": "protocols",
                         "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Must be 1",
+                        "name": "X-PPanel-Routing-Version",
+                        "in": "header",
+                        "required": true
                     }
                 ],
                 "responses": {
@@ -11462,12 +11499,227 @@
                                 }
                             ]
                         }
+                    },
+                    "426": {
+                        "description": "Node routing upgrade required",
+                        "schema": {
+                            "$ref": "#/definitions/result.ResponseErrorBean"
+                        }
                     }
                 }
             }
         }
     },
     "definitions": {
+        "config.NodeOutbound": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "allow_insecure": {
+                    "type": "boolean"
+                },
+                "alpn": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "cipher": {
+                    "type": "string"
+                },
+                "congestion_controller": {
+                    "type": "string"
+                },
+                "encryption": {
+                    "type": "string"
+                },
+                "encryption_client_padding": {
+                    "type": "string"
+                },
+                "encryption_mode": {
+                    "type": "string"
+                },
+                "encryption_password": {
+                    "type": "string"
+                },
+                "encryption_rtt": {
+                    "type": "string"
+                },
+                "encryption_ticket": {
+                    "type": "string"
+                },
+                "fingerprint": {
+                    "type": "string"
+                },
+                "flow": {
+                    "type": "string"
+                },
+                "heartbeat": {
+                    "type": "integer"
+                },
+                "host": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "ip_rules": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "multiplex": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "password": {
+                    "type": "string"
+                },
+                "path": {
+                    "type": "string"
+                },
+                "plugin": {
+                    "type": "string"
+                },
+                "plugin_opts": {},
+                "port": {
+                    "type": "integer"
+                },
+                "protocol": {
+                    "type": "string"
+                },
+                "protocol_rules": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "reality_public_key": {
+                    "type": "string"
+                },
+                "reality_short_id": {
+                    "type": "string"
+                },
+                "reduce_rtt": {
+                    "type": "boolean"
+                },
+                "rules": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "security": {
+                    "type": "string"
+                },
+                "service_name": {
+                    "type": "string"
+                },
+                "settings": {
+                    "type": "string"
+                },
+                "sni": {
+                    "type": "string"
+                },
+                "spider_x": {
+                    "type": "string"
+                },
+                "stream_settings": {
+                    "type": "string"
+                },
+                "transport": {
+                    "type": "string"
+                },
+                "udp_stream": {
+                    "type": "boolean"
+                },
+                "uot": {
+                    "type": "boolean"
+                },
+                "uot_version": {
+                    "type": "integer"
+                },
+                "user": {
+                    "type": "string"
+                },
+                "uuid": {
+                    "type": "string"
+                },
+                "xhttp_extra": {
+                    "type": "string"
+                },
+                "xhttp_mode": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.NodeRoute": {
+            "type": "object",
+            "required": [
+                "enabled",
+                "id",
+                "kind",
+                "outbound_id",
+                "values"
+            ],
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "outbound_id": {
+                    "type": "string"
+                },
+                "remark": {
+                    "type": "string"
+                },
+                "values": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "config.NodeRouting": {
+            "type": "object",
+            "required": [
+                "default_outbound_id",
+                "outbounds",
+                "rules",
+                "version"
+            ],
+            "properties": {
+                "default_outbound_id": {
+                    "type": "string"
+                },
+                "outbounds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.NodeOutbound"
+                    }
+                },
+                "rules": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.NodeRoute"
+                    }
+                },
+                "version": {
+                    "type": "integer"
+                }
+            }
+        },
         "dto.Ads": {
             "type": "object",
             "properties": {
@@ -12373,6 +12625,17 @@
                     }
                 },
                 "sort": {
+                    "type": "integer"
+                }
+            }
+        },
+        "dto.CreateServerResponse": {
+            "type": "object",
+            "required": [
+                "id"
+            ],
+            "properties": {
+                "id": {
                     "type": "integer"
                 }
             }
@@ -13573,18 +13836,6 @@
                 }
             }
         },
-        "dto.GetServerConfigResponse": {
-            "type": "object",
-            "properties": {
-                "basic": {
-                    "$ref": "#/definitions/dto.ServerBasic"
-                },
-                "config": {},
-                "protocol": {
-                    "type": "string"
-                }
-            }
-        },
         "dto.GetServerNodeConfigResponse": {
             "type": "object",
             "properties": {
@@ -13596,6 +13847,9 @@
                 },
                 "override": {
                     "$ref": "#/definitions/dto.ServerNodeConfigOverride"
+                },
+                "routing_status": {
+                    "$ref": "#/definitions/dto.RoutingStatusView"
                 }
             }
         },
@@ -14166,27 +14420,6 @@
         "dto.NodeConfig": {
             "type": "object",
             "properties": {
-                "block": {
-                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_ips": {
-                    "description": "IP rules: strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_protocols": {
-                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
                 "dns": {
                     "type": "array",
                     "items": {
@@ -14205,12 +14438,20 @@
                 "node_secret": {
                     "type": "string"
                 },
-                "outbound": {
-                    "description": "Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.",
+                "routing": {
+                    "$ref": "#/definitions/config.NodeRouting"
+                },
+                "routing_capabilities": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/dto.NodeOutbound"
+                        "type": "integer"
                     }
+                },
+                "routing_mode": {
+                    "type": "string"
+                },
+                "routing_revision": {
+                    "type": "integer"
                 },
                 "traffic_report_threshold": {
                     "type": "integer"
@@ -14288,8 +14529,11 @@
                 "host": {
                     "type": "string"
                 },
+                "id": {
+                    "type": "string"
+                },
                 "ip_rules": {
-                    "description": "Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.",
+                    "description": "Must be empty in v1.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -14318,7 +14562,7 @@
                     "type": "string"
                 },
                 "protocol_rules": {
-                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.",
+                    "description": "Must be empty in v1.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -14334,7 +14578,7 @@
                     "type": "boolean"
                 },
                 "rules": {
-                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules and 4096 bytes each.",
+                    "description": "Legacy match arrays are retained for protobuf compatibility and must be empty in v1.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -14381,6 +14625,88 @@
                 },
                 "xhttp_mode": {
                     "type": "string"
+                }
+            }
+        },
+        "dto.NodeRoutingPolicy": {
+            "type": "object",
+            "required": [
+                "default_outbound_id",
+                "local_transition_revision",
+                "mode",
+                "outbounds",
+                "rules",
+                "source",
+                "source_revision",
+                "source_server_id",
+                "version"
+            ],
+            "properties": {
+                "default_outbound_id": {
+                    "type": "string"
+                },
+                "local_transition_revision": {
+                    "type": "integer"
+                },
+                "mode": {
+                    "type": "string"
+                },
+                "outbounds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/dto.NodeOutbound"
+                    }
+                },
+                "rules": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/dto.NodeRoutingRule"
+                    }
+                },
+                "source": {
+                    "type": "string"
+                },
+                "source_revision": {
+                    "type": "integer"
+                },
+                "source_server_id": {
+                    "type": "integer"
+                },
+                "version": {
+                    "type": "integer"
+                }
+            }
+        },
+        "dto.NodeRoutingRule": {
+            "type": "object",
+            "required": [
+                "enabled",
+                "id",
+                "kind",
+                "outbound_id",
+                "values"
+            ],
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "outbound_id": {
+                    "type": "string"
+                },
+                "remark": {
+                    "type": "string"
+                },
+                "values": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -15494,27 +15820,6 @@
         "dto.QueryServerConfigResponse": {
             "type": "object",
             "properties": {
-                "block": {
-                    "description": "Canonical domain rules (full, non-whitespace keyword, no-root-dot domain, regexp or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$); limits apply to 1024 canonical unique rules and 4096 bytes each.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_ips": {
-                    "description": "Canonical netip/GeoIP rules with labels matching ^[A-Za-z0-9][A-Za-z0-9_-]*$; limits apply to 1024 canonical unique rules and 4096 bytes each.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_protocols": {
-                    "description": "Canonical protocol rules; only bittorrent; limits apply to 1024 canonical unique rules and 4096 bytes each.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
                 "dns": {
                     "type": "array",
                     "items": {
@@ -15523,12 +15828,6 @@
                 },
                 "ip_strategy": {
                     "type": "string"
-                },
-                "outbound": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeOutbound"
-                    }
                 },
                 "protocols": {
                     "type": "array",
@@ -15541,6 +15840,9 @@
                 },
                 "push_interval": {
                     "type": "integer"
+                },
+                "routing": {
+                    "$ref": "#/definitions/dto.NodeRoutingPolicy"
                 },
                 "total": {
                     "type": "integer"
@@ -16048,6 +16350,91 @@
                 }
             }
         },
+        "dto.RoutingCandidateIdentity": {
+            "type": "object",
+            "properties": {
+                "local_transition_revision": {
+                    "type": "integer"
+                },
+                "mode": {
+                    "type": "string"
+                },
+                "source": {
+                    "type": "string"
+                },
+                "source_revision": {
+                    "type": "integer"
+                },
+                "source_server_id": {
+                    "type": "integer"
+                }
+            }
+        },
+        "dto.RoutingReportError": {
+            "type": "object",
+            "properties": {
+                "identity": {
+                    "$ref": "#/definitions/dto.RoutingCandidateIdentity"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "stage": {
+                    "type": "string"
+                }
+            }
+        },
+        "dto.RoutingStatusReport": {
+            "type": "object",
+            "properties": {
+                "conflict": {
+                    "type": "boolean"
+                },
+                "instance_id": {
+                    "type": "string"
+                },
+                "liveness_at": {
+                    "description": "LivenessAt may be newer when stale or duplicate reports arrive.",
+                    "type": "integer"
+                },
+                "received_at": {
+                    "description": "ReceivedAt is the Redis receive time of the last accepted sequence.",
+                    "type": "integer"
+                },
+                "routing_applied": {
+                    "$ref": "#/definitions/dto.RoutingCandidateIdentity"
+                },
+                "routing_error": {
+                    "$ref": "#/definitions/dto.RoutingReportError"
+                },
+                "routing_pending": {
+                    "$ref": "#/definitions/dto.RoutingCandidateIdentity"
+                },
+                "routing_sequence": {
+                    "type": "integer"
+                },
+                "routing_version": {
+                    "type": "integer"
+                },
+                "updated_at": {
+                    "type": "integer"
+                }
+            }
+        },
+        "dto.RoutingStatusView": {
+            "type": "object",
+            "properties": {
+                "known": {
+                    "type": "boolean"
+                },
+                "report": {
+                    "$ref": "#/definitions/dto.RoutingStatusReport"
+                },
+                "reporter_verified": {
+                    "type": "boolean"
+                }
+            }
+        },
         "dto.SendCodeRequest": {
             "type": "object",
             "required": [
@@ -16142,49 +16529,14 @@
                 }
             }
         },
-        "dto.ServerBasic": {
-            "type": "object",
-            "properties": {
-                "pull_interval": {
-                    "type": "integer"
-                },
-                "push_interval": {
-                    "type": "integer"
-                }
-            }
-        },
         "dto.ServerNodeConfigOverride": {
             "type": "object",
             "properties": {
-                "block": {
-                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_ips": {
-                    "description": "Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_protocols": {
-                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
                 "dns": {
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/dto.NodeDNS"
                     }
-                },
-                "inherit_block": {
-                    "type": "boolean"
                 },
                 "inherit_dns": {
                     "type": "boolean"
@@ -16192,45 +16544,23 @@
                 "inherit_ip_strategy": {
                     "type": "boolean"
                 },
-                "inherit_outbound": {
+                "inherit_routing": {
                     "type": "boolean"
                 },
                 "ip_strategy": {
                     "type": "string"
                 },
-                "outbound": {
-                    "description": "Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.",
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeOutbound"
-                    }
+                "routing": {
+                    "$ref": "#/definitions/config.NodeRouting"
+                },
+                "routing_revision": {
+                    "type": "integer"
                 }
             }
         },
         "dto.ServerNodeConfigValues": {
             "type": "object",
             "properties": {
-                "block": {
-                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_ips": {
-                    "description": "Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_protocols": {
-                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
                 "dns": {
                     "type": "array",
                     "items": {
@@ -16240,12 +16570,14 @@
                 "ip_strategy": {
                     "type": "string"
                 },
-                "outbound": {
-                    "description": "Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.",
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeOutbound"
-                    }
+                "routing": {
+                    "$ref": "#/definitions/dto.NodeRoutingPolicy"
+                },
+                "routing_mode": {
+                    "type": "string"
+                },
+                "routing_revision": {
+                    "type": "integer"
                 }
             }
         },
@@ -16295,11 +16627,29 @@
                 "disk": {
                     "type": "number"
                 },
+                "instance_id": {
+                    "type": "string"
+                },
                 "mem": {
                     "type": "number"
                 },
                 "protocol": {
                     "type": "string"
+                },
+                "routing_applied": {
+                    "$ref": "#/definitions/dto.RoutingCandidateIdentity"
+                },
+                "routing_error": {
+                    "$ref": "#/definitions/dto.RoutingReportError"
+                },
+                "routing_pending": {
+                    "$ref": "#/definitions/dto.RoutingCandidateIdentity"
+                },
+                "routing_sequence": {
+                    "type": "integer"
+                },
+                "routing_version": {
+                    "type": "integer"
                 },
                 "secret_key": {
                     "type": "string"
@@ -16352,6 +16702,9 @@
                 },
                 "protocol": {
                     "type": "string"
+                },
+                "routing": {
+                    "$ref": "#/definitions/dto.RoutingStatusView"
                 },
                 "status": {
                     "type": "string"
@@ -17492,35 +17845,11 @@
                 "server_id"
             ],
             "properties": {
-                "block": {
-                    "description": "Domain rules: bare/full, keyword, suffix/domain, RE2 regex/regexp, or GeoSite matching ^[A-Za-z0-9][A-Za-z0-9_.!-]*(?:@[A-Za-z0-9_!-]+)*$. Hostnames remove one terminal root dot; keyword is nonempty without whitespace/control. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_ips": {
-                    "description": "Strict netip address/prefix or GeoIP label matching ^[A-Za-z0-9][A-Za-z0-9_-]*$. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "block_protocols": {
-                    "description": "Protocol rules; only bittorrent is accepted. Limits apply to canonical unique values: 1024 rules, 4096 bytes each and below 60 KiB serialized JSON.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
                 "dns": {
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/dto.NodeDNS"
                     }
-                },
-                "inherit_block": {
-                    "type": "boolean"
                 },
                 "inherit_dns": {
                     "type": "boolean"
@@ -17528,18 +17857,17 @@
                 "inherit_ip_strategy": {
                     "type": "boolean"
                 },
-                "inherit_outbound": {
+                "inherit_routing": {
                     "type": "boolean"
                 },
                 "ip_strategy": {
                     "type": "string"
                 },
-                "outbound": {
-                    "description": "Maximum 128 structured outbounds, 4096 aggregate canonical route rules, 48 KiB aggregate canonical route text and below 60 KiB serialized JSON; DNS rules are excluded.",
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeOutbound"
-                    }
+                "routing": {
+                    "$ref": "#/definitions/config.NodeRouting"
+                },
+                "routing_revision": {
+                    "type": "integer"
                 },
                 "server_id": {
                     "type": "integer"

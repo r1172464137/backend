@@ -20,7 +20,8 @@ type NodeRepo interface {
 	BatchUpdateServerLastReportedAt(ctx context.Context, reports map[int64]time.Time, tx ...*gorm.DB) error
 	DeleteServer(ctx context.Context, id int64, tx ...*gorm.DB) error
 	FindServerConfigOverride(ctx context.Context, serverId int64) (*node.ServerConfigOverride, error)
-	SaveServerConfigOverride(ctx context.Context, data *node.ServerConfigOverride, tx ...*gorm.DB) error
+	FindServerRoutingOverride(ctx context.Context, serverId int64) (*node.ServerConfigOverride, error)
+	SaveServerRoutingOverride(ctx context.Context, data *node.ServerConfigOverride) error
 	DeleteServerConfigOverride(ctx context.Context, serverId int64, tx ...*gorm.DB) error
 	QueryServerList(ctx context.Context, ids []int64) (servers []*node.Server, err error)
 	// node

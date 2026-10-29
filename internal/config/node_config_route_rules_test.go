@@ -9,47 +9,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestNodeConfigStructuredRouteRulesJSONAndYAMLRoundTrip(t *testing.T) {
-	original := NodeConfig{
-		Block:          []string{"geosite:ads"},
-		BlockIPs:       []string{"geoip:private", "10.0.0.0/8"},
-		BlockProtocols: []string{"bittorrent"},
-		Outbound: []NodeOutbound{{
-			Name: "cn", Protocol: "direct", Rules: []string{"geosite:cn"}, IPRules: []string{"geoip:cn"}, ProtocolRules: []string{"bittorrent"},
-		}},
-	}
-
-	jsonData, err := json.Marshal(&original)
+func TestNodeConfigOrderedRoutingJSONAndYAMLRoundTrip(t *testing.T) {
+	enabled := false
+	original := NodeConfig{RoutingRevision: 7, Routing: &NodeRouting{Version: 1, Outbounds: []NodeOutbound{}, Rules: []NodeRoute{{ID: "rr_11111111-1111-4111-8111-111111111111", Enabled: &enabled, Kind: "domain", Values: []string{"geosite:cn"}, OutboundID: "block"}}, DefaultOutboundID: "direct"}}
+	body, err := json.Marshal(&original)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"block_ips"`, `"block_protocols"`, `"ip_rules"`, `"protocol_rules"`} {
-		if !strings.Contains(string(jsonData), field) {
-			t.Fatalf("JSON %s does not contain %s", jsonData, field)
+	for _, removed := range []string{`"Block"`, `"block_ips"`, `"block_protocols"`, `"Outbound"`} {
+		if strings.Contains(string(body), removed) {
+			t.Fatalf("runtime exposed legacy %s", body)
 		}
 	}
-	var fromJSON NodeConfig
-	if err := json.Unmarshal(jsonData, &fromJSON); err != nil {
+	var decoded NodeConfig
+	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(fromJSON.BlockIPs, original.BlockIPs) || !reflect.DeepEqual(fromJSON.Outbound[0].IPRules, original.Outbound[0].IPRules) {
-		t.Fatalf("JSON round trip = %#v", fromJSON)
+	if !reflect.DeepEqual(decoded.Routing, original.Routing) || decoded.Routing.Rules[0].Enabled == nil || *decoded.Routing.Rules[0].Enabled {
+		t.Fatalf("JSON %#v", decoded)
 	}
-
-	yamlData, err := yaml.Marshal(&original)
+	yamlBody, err := yaml.Marshal(&original)
 	if err != nil {
 		t.Fatal(err)
-	}
-	for _, field := range []string{"block_ips:", "block_protocols:", "ip_rules:", "protocol_rules:"} {
-		if !strings.Contains(string(yamlData), field) {
-			t.Fatalf("YAML %s does not contain %s", yamlData, field)
-		}
 	}
 	var fromYAML NodeConfig
-	if err := yaml.Unmarshal(yamlData, &fromYAML); err != nil {
+	if err := yaml.Unmarshal(yamlBody, &fromYAML); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(fromYAML.BlockProtocols, original.BlockProtocols) || !reflect.DeepEqual(fromYAML.Outbound[0].ProtocolRules, original.Outbound[0].ProtocolRules) {
-		t.Fatalf("YAML round trip = %#v", fromYAML)
+	if !reflect.DeepEqual(fromYAML.Routing, original.Routing) {
+		t.Fatalf("YAML %#v", fromYAML)
 	}
 }

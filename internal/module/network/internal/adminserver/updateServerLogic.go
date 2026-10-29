@@ -62,7 +62,11 @@ func (l *UpdateServerLogic) UpdateServer(req *dto.UpdateServerRequest) error {
 	protocols := make([]node.Protocol, 0)
 	for index, item := range req.Protocols {
 		if item.Type == "" {
-			return errors.Wrapf(xerr.NewErrCodeMsg(xerr.InvalidParams, "protocols type is empty"), "protocols type is empty")
+			code := xerr.InvalidParams
+			if item.Enable {
+				code = xerr.NetworkNodeProtocolInvalid
+			}
+			return errors.Wrapf(xerr.NewErrCodeMsg(code, "protocols type is empty"), "protocols type is empty")
 		}
 		var protocol node.Protocol
 		mapping.DeepCopy(&protocol, item)
@@ -79,11 +83,21 @@ func (l *UpdateServerLogic) UpdateServer(req *dto.UpdateServerRequest) error {
 			return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "generate reality key error: %v", err)
 		}
 		ensureRealityProtocolDefaults(&protocol)
-		protocol, err := node.NormalizeProtocolForStorage(protocol)
-		if err != nil {
-			return errors.Wrapf(xerr.NewErrCodeMsg(xerr.InvalidParams, err.Error()), "protocols normalize error: %v", err)
-		}
 		protocols = append(protocols, protocol)
+	}
+	if err := validateEnabledNodeProtocols(protocols); err != nil {
+		return err
+	}
+	for i := range protocols {
+		protocol, err := node.NormalizeProtocolForStorage(protocols[i])
+		if err != nil {
+			code := xerr.InvalidParams
+			if protocols[i].Enable {
+				code = xerr.NetworkNodeProtocolInvalid
+			}
+			return errors.Wrapf(xerr.NewErrCodeMsg(code, err.Error()), "protocols normalize error: %v", err)
+		}
+		protocols[i] = protocol
 	}
 	err = data.MarshalProtocols(protocols)
 	if err != nil {
@@ -97,5 +111,9 @@ func (l *UpdateServerLogic) UpdateServer(req *dto.UpdateServerRequest) error {
 		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update server error: %v", err.Error())
 	}
 
-	return nodeStore.ClearServerCache(l.ctx, req.Id)
+	// The server-user cache depends on node/plan/user rows, not server
+	// listener, name, address or override fields. Node configuration is read
+	// from the authoritative DB, so no post-commit cache invalidation is
+	// needed for this write.
+	return nil
 }

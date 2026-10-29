@@ -2,6 +2,7 @@ package serverapi
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
@@ -33,6 +34,11 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 		return nil, err
 	}
 
+	// Never sanitize an enabled invalid listener into an apparently valid
+	// zero-protocol response; only explicitly disabled entries may disappear.
+	if err := node.ValidateNodeProtocols(data); err != nil {
+		return nil, err
+	}
 	// handler protocols
 	var protocols []dto.Protocol
 	dst, err := data.UnmarshalProtocols()
@@ -44,7 +50,7 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 	mapping.DeepCopy(&protocols, dst)
 
 	// only return enabled protocols for node distribution
-	var enabledProtocols []dto.Protocol
+	enabledProtocols := make([]dto.Protocol, 0, len(protocols))
 	for _, p := range protocols {
 		if p.Enable {
 			enabledProtocols = append(enabledProtocols, p)
@@ -55,7 +61,7 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 	// filter by req.Protocols
 
 	if len(req.Protocols) > 0 {
-		var filtered []dto.Protocol
+		filtered := make([]dto.Protocol, 0, len(protocols))
 		protocolSet := make(map[string]struct{})
 		for _, p := range req.Protocols {
 			protocol, err := node.NormalizeProtocolForStorage(node.Protocol{Type: p})
@@ -70,16 +76,18 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 				filtered = append(filtered, p)
 			}
 		}
+		if len(filtered) == 0 && len(protocols) > 0 {
+			return nil, fmt.Errorf("protocol filter excludes all enabled listeners")
+		}
 		protocols = filtered
 	}
 
-	nodeSnapshot := l.deps.Config().Node
-	nodeValues := nodeconfig.GlobalValues(nodeSnapshot)
-	override, err := l.deps.Store.Node().FindServerConfigOverride(l.ctx, req.ServerID)
+	nodeSnapshot, override, err := nodeconfig.ResolveSnapshot(l.ctx, l.deps.ReadGlobalNodeConfig, l.deps.Store.Node(), req.ServerID)
 	if err != nil {
-		l.Errorf("[GetServerProtocols] FindServerConfigOverride Error: %s", err.Error())
+		l.Errorf("[GetServerProtocols] authoritative snapshot error: %s", err.Error())
 		return nil, err
 	}
+	nodeValues := nodeconfig.GlobalValues(nodeSnapshot)
 	if override != nil {
 		if err = nodeconfig.ApplyOverride(&nodeValues, override); err != nil {
 			l.Errorf("[GetServerProtocols] ApplyOverride Error: %s", err.Error())
@@ -87,17 +95,18 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 		}
 	}
 
+	routing, err := nodeconfig.DeliveryPolicy(nodeSnapshot, override, req.ServerID)
+	if err != nil {
+		return nil, err
+	}
 	return &dto.QueryServerConfigResponse{
 		TrafficReportThreshold: nodeSnapshot.TrafficReportThreshold,
 		PushInterval:           nodeSnapshot.NodePushInterval,
 		PullInterval:           nodeSnapshot.NodePullInterval,
 		IPStrategy:             nodeValues.IPStrategy,
 		DNS:                    nodeValues.DNS,
-		Block:                  nodeValues.Block,
-		BlockIPs:               nodeValues.BlockIPs,
-		BlockProtocols:         nodeValues.BlockProtocols,
-		Outbound:               nodeValues.Outbound,
 		Protocols:              protocols,
 		Total:                  int64(len(protocols)),
+		Routing:                routing,
 	}, nil
 }
