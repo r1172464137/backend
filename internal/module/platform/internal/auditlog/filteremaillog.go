@@ -5,74 +5,39 @@ import (
 
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/internal/module/platform/entity/log"
-	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type FilterEmailLogLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// NewFilterEmailLogLogic Filter email log
-func newFilterEmailLogLogic(ctx context.Context, deps Deps) *FilterEmailLogLogic {
-	return &FilterEmailLogLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *FilterEmailLogLogic) FilterEmailLog(req *dto.FilterLogParams) (resp *dto.FilterEmailLogResponse, err error) {
-	data, total, err := l.deps.Logs.FilterSystemLog(l.ctx, &log.FilterParams{
-		Page:      req.Page,
-		Size:      req.Size,
-		Type:      log.TypeEmailMessage.Uint8(),
-		Data:      req.Date,
-		StartDate: req.StartDate,
-		EndDate:   req.EndDate,
-		Search:    req.Search,
-	})
-
+// FilterEmailLog pages the emails sent.
+func (s *Service) FilterEmailLog(ctx context.Context, req *dto.FilterLogParams) (*dto.FilterEmailLogResponse, error) {
+	total, list, err := messageLogPage(ctx, s.deps.Logs, "email", log.TypeEmailMessage, req)
 	if err != nil {
-		l.Errorf("[FilterEmailLog] failed to filter system log: %v", err.Error())
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "failed to filter system log: %v", err.Error())
+		return nil, err
 	}
+	return &dto.FilterEmailLogResponse{Total: total, List: list}, nil
+}
 
-	var list []dto.MessageLog
-
-	for _, datum := range data {
-		var content log.Message
-		err = content.Unmarshal([]byte(datum.Content))
-		if err != nil {
-			l.Errorf("[FilterEmailLog] failed to unmarshal content: %v", err.Error())
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "corrupt email log %d: %v", datum.Id, err)
-		}
-		list = append(list, dto.MessageLog{
-			Id:               datum.Id,
-			Type:             datum.Type,
-			Platform:         content.Platform,
-			To:               content.To,
-			Subject:          content.Subject,
-			Content:          content.Content,
-			Status:           content.Status,
-			CreatedAt:        datum.CreatedAt.UnixMilli(),
-			ClientIP:         content.ClientIP,
-			UserAgent:        content.UserAgent,
-			ActorID:          content.ActorID,
-			IPCountryCode:    content.IPCountryCode,
-			IPCountry:        content.IPCountry,
-			IPRegion:         content.IPRegion,
-			IPCity:           content.IPCity,
-			IPASN:            content.IPASN,
-			IPASOrganization: content.IPASOrganization,
-		})
+// FilterMobileLog pages the text messages sent.
+func (s *Service) FilterMobileLog(ctx context.Context, req *dto.FilterLogParams) (*dto.FilterMobileLogResponse, error) {
+	total, list, err := messageLogPage(ctx, s.deps.Logs, "mobile", log.TypeMobileMessage, req)
+	if err != nil {
+		return nil, err
 	}
+	return &dto.FilterMobileLogResponse{Total: total, List: list}, nil
+}
 
-	return &dto.FilterEmailLogResponse{
-		Total: total,
-		List:  list,
-	}, nil
+// messageLogPage pages the message log of kind, the emails or the text
+// messages sent.
+func messageLogPage(ctx context.Context, logs logFilter, name string, kind log.Type, req *dto.FilterLogParams) (int64, []dto.MessageLog, error) {
+	return logPage(ctx, logs, name, filterParams(kind, 0, *req), func(row *log.SystemLog, content *log.Message) dto.MessageLog {
+		return withRequestMetadata(&dto.MessageLog{
+			Id:        row.Id,
+			Type:      row.Type,
+			Platform:  content.Platform,
+			To:        content.To,
+			Subject:   content.Subject,
+			Content:   content.Content,
+			Status:    content.Status,
+			CreatedAt: row.CreatedAt.UnixMilli(),
+		}, content.Metadata)
+	})
 }

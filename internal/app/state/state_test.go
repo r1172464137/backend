@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
@@ -8,7 +9,9 @@ import (
 )
 
 func TestStatePublishesConcurrentConfigUpdates(t *testing.T) {
-	state := New(config.Config{})
+	var initial config.Config
+	initial.Port = 8080
+	state := New(initial)
 	const updates = 64
 
 	var writers sync.WaitGroup
@@ -16,8 +19,8 @@ func TestStatePublishesConcurrentConfigUpdates(t *testing.T) {
 		writers.Add(1)
 		go func() {
 			defer writers.Done()
-			state.UpdateConfig(func(current *config.Config) {
-				current.Port++
+			state.UpdateRuntime(func(current *config.Runtime) {
+				current.Node.NodePullInterval++
 			})
 		}()
 	}
@@ -33,7 +36,7 @@ func TestStatePublishesConcurrentConfigUpdates(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_ = state.Config().Port
+					_ = state.Config().Node.NodePullInterval
 				}
 			}
 		}()
@@ -42,8 +45,12 @@ func TestStatePublishesConcurrentConfigUpdates(t *testing.T) {
 	writers.Wait()
 	close(stop)
 	readers.Wait()
-	if got := state.Config().Port; got != updates {
+	if got := state.Config().Node.NodePullInterval; got != updates {
 		t.Fatalf("lost concurrent updates: got %d, want %d", got, updates)
+	}
+	// Runtime updates leave the boot settings alone.
+	if got := state.Config().Port; got != 8080 {
+		t.Fatalf("port = %d after runtime updates, want 8080", got)
 	}
 }
 
@@ -59,10 +66,13 @@ func TestStateLifecycleHandlers(t *testing.T) {
 		t.Fatalf("restart handler was not invoked: restarted=%v err=%v", restarted, err)
 	}
 
+	if err := state.Reinitialize("node"); err != nil {
+		t.Fatalf("reinitialize without a handler = %v, want nothing to reload", err)
+	}
 	var subsystem string
-	state.SetReinitialize(func(value string) { subsystem = value })
-	state.Reinitialize("node")
-	if subsystem != "node" {
-		t.Fatalf("unexpected subsystem: %q", subsystem)
+	failure := errors.New("reload failed")
+	state.SetReinitialize(func(value string) error { subsystem = value; return failure })
+	if err := state.Reinitialize("node"); !errors.Is(err, failure) || subsystem != "node" {
+		t.Fatalf("reinitialize = %v for %q, want the handler's failure for node", err, subsystem)
 	}
 }

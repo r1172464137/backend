@@ -10,12 +10,20 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// GormLogger is GORM's logger for the database connections. It writes only
+// failed and slow queries, and of a query only its operation and row count:
+// the statement text can carry the values of personal columns.
 type GormLogger struct {
+	// SlowThreshold is the duration from which a query is logged as slow;
+	// zero means one second.
 	SlowThreshold time.Duration
 }
 
+// TAG prefixes the messages GormLogger writes.
 const TAG = "[GORM]"
 
+// LogMode keeps the process log level: GORM's level is ignored, and the
+// process level in force is logged instead.
 func (l *GormLogger) LogMode(logger.LogLevel) logger.Interface {
 	var sysLevel string
 	switch logLevel {
@@ -34,18 +42,22 @@ func (l *GormLogger) LogMode(logger.LogLevel) logger.Interface {
 	return l
 }
 
-func (l *GormLogger) Info(ctx context.Context, str string, args ...interface{}) {
+// Info, Warn and Error log that GORM reported something, without the
+// message, which can carry query values.
+func (l *GormLogger) Info(ctx context.Context, str string, args ...any) {
 	WithContext(ctx).WithCallerSkip(2).Infof("%s Info", TAG)
 }
 
-func (l *GormLogger) Warn(ctx context.Context, str string, args ...interface{}) {
+func (l *GormLogger) Warn(ctx context.Context, str string, args ...any) {
 	WithContext(ctx).WithCallerSkip(2).Infof("%s Warn", TAG)
 }
 
-func (l *GormLogger) Error(ctx context.Context, str string, args ...interface{}) {
+func (l *GormLogger) Error(ctx context.Context, str string, args ...any) {
 	WithContext(ctx).WithCallerSkip(2).Errorf("%s Error", TAG)
 }
 
+// Trace logs a query that failed or took SlowThreshold or longer; a missed
+// lookup (gorm.ErrRecordNotFound) is logged only when it was slow.
 func (l *GormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql string, rowsAffected int64), err error) {
 	duration := time.Since(begin)
 	threshold := l.SlowThreshold

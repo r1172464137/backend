@@ -5,20 +5,20 @@ import (
 	"errors"
 	"time"
 
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 
 	"github.com/perfect-panel/server/internal/module/platform/entity/inbox"
 	"gorm.io/gorm"
 )
 
-var _ repository.InboxRepo = (*inboxRepo)(nil)
+var _ kernel.InboxRepo = (*inboxRepo)(nil)
 
 type inboxRepo struct {
 	db *gorm.DB
 }
 
 // NewInboxRepo builds the module-owned implementation.
-func NewInboxRepo(db *gorm.DB) repository.InboxRepo {
+func NewInboxRepo(db *gorm.DB) kernel.InboxRepo {
 	return &inboxRepo{db: db}
 }
 

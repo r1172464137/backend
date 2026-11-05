@@ -7,40 +7,31 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetUserSubscribeByIdLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get user subcribe by id
-func newGetUserSubscribeByIdLogic(ctx context.Context, deps Deps) *GetUserSubscribeByIdLogic {
-	return &GetUserSubscribeByIdLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetUserSubscribeByIdLogic) GetUserSubscribeById(req *dto.GetUserSubscribeByIdRequest) (resp *dto.UserSubscribeDetail, err error) {
-	sub, err := l.deps.UserSubs.FindOneSubscribeDetailsById(l.ctx, req.Id)
+// GetUserSubscribeById returns a subscription with its plan and its owner's
+// account.
+func (s *Service) GetUserSubscribeById(ctx context.Context, req *dto.GetUserSubscribeByIdRequest) (*dto.UserSubscribeDetail, error) {
+	log := logger.WithContext(ctx)
+	sub, err := s.deps.UserSubs.FindOneSubscribeDetailsById(ctx, req.Id)
 	if err != nil {
-		l.Errorw("[GetUserSubscribeByIdLogic] FindOneSubscribeDetailsById error", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindOneSubscribeDetailsById error: %v", err.Error())
+		log.Errorw("[GetUserSubscribeByIdLogic] FindOneSubscribeDetailsById error", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "FindOneSubscribeDetailsById error: %v", err.Error())
 	}
 	var subscribeDetails dto.UserSubscribeDetail
-	mapping.DeepCopy(&subscribeDetails, sub)
+	if err := mapping.Copy(&subscribeDetails, sub); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "map subscription %d", sub.Id)
+	}
 	// The identity row is composed at the module layer instead of a
 	// cross-domain preload (ADR-001 step 5).
-	owner, err := l.deps.Users.FindOne(l.ctx, sub.UserId)
+	owner, err := s.deps.Users.FindOne(ctx, sub.UserId)
 	if err != nil {
-		l.Errorw("[GetUserSubscribeByIdLogic] load subscription owner failed",
+		log.Errorw("[GetUserSubscribeByIdLogic] load subscription owner failed",
 			logger.Field("error", err.Error()), logger.Field("user_id", sub.UserId))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "load subscription owner error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "load subscription owner error: %v", err.Error())
 	}
-	mapping.DeepCopy(&subscribeDetails.User, owner)
+	if err := mapping.Copy(&subscribeDetails.User, owner); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "map the owner of subscription %d", sub.Id)
+	}
 	return &subscribeDetails, nil
 }

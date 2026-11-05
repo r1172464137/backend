@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+
+	"github.com/perfect-panel/server/pkg/logger"
 )
 
 // ConvertValueToString converts the value to string
@@ -20,7 +22,7 @@ func ConvertValueToString(value reflect.Value) string {
 		return strconv.FormatFloat(value.Float(), 'f', -1, 64)
 	case reflect.Bool:
 		return strconv.FormatBool(value.Bool())
-	case reflect.Ptr:
+	case reflect.Pointer:
 		switch value.Type().Elem().Kind() {
 		case reflect.Bool:
 			return fmt.Sprintf("%v", value.Elem().Bool())
@@ -30,7 +32,8 @@ func ConvertValueToString(value reflect.Value) string {
 	case reflect.Struct, reflect.Map, reflect.Slice, reflect.Array:
 		bytes, err := json.Marshal(value.Interface())
 		if err != nil {
-			fmt.Println("Error marshaling struct:", err.Error())
+			logger.Errorw("[Config] setting value cannot be encoded as JSON, stored empty",
+				logger.Field("type", value.Type().String()), logger.Field("error", err.Error()))
 			return ""
 		}
 		if string(bytes) == "null" {

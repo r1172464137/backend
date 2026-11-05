@@ -45,100 +45,50 @@ type LogConf struct {
 
 ```go
 type Logger interface {
+	// Debug logs a message at debug level.
+	Debug(...any)
+	// Debugf logs a message at debug level.
+	Debugf(string, ...any)
+	// Debugw logs a message at debug level.
+	Debugw(string, ...LogField)
 	// Error logs a message at error level.
 	Error(...any)
 	// Errorf logs a message at error level.
 	Errorf(string, ...any)
-	// Errorv logs a message at error level.
-	Errorv(any)
 	// Errorw logs a message at error level.
 	Errorw(string, ...LogField)
 	// Info logs a message at info level.
 	Info(...any)
 	// Infof logs a message at info level.
 	Infof(string, ...any)
-	// Infov logs a message at info level.
-	Infov(any)
 	// Infow logs a message at info level.
 	Infow(string, ...LogField)
-	// Slow logs a message at slow level.
-	Slow(...any)
-	// Slowf logs a message at slow level.
-	Slowf(string, ...any)
-	// Slowv logs a message at slow level.
-	Slowv(any)
 	// Sloww logs a message at slow level.
 	Sloww(string, ...LogField)
-	// WithContext returns a new logger with the given context.
-	WithContext(context.Context) Logger
+	// WithCallerSkip returns a new logger with the given caller skip.
+	WithCallerSkip(skip int) Logger
 	// WithDuration returns a new logger with the given duration.
-	WithDuration(time.Duration) Logger
+	WithDuration(d time.Duration) Logger
 }
 ```
 
-- `Error`, `Info`, `Slow`: write any kind of messages into logs, with like `fmt.Sprint(…)`.
-- `Errorf`, `Infof`, `Slowf`: write messages with given format into logs.
-- `Errorv`, `Infov`, `Slowv`: write any kind of messages into logs, with json marshalling to encode them.
-- `Errorw`, `Infow`, `Sloww`: write the string message with given `key:value` fields.
-- `WithContext`: inject the given ctx into the log messages, typically used to log `trace-id` and `span-id`.
+- `logger.WithContext(ctx)`: returns a `Logger` that writes the `trace` and `span` ids of `ctx` and the fields `logger.ContextWithFields` stored in it into every entry.
+- `Debug`, `Error`, `Info`: write any kind of messages into logs, like `fmt.Sprint(…)`; `LogField` arguments become fields.
+- `Debugf`, `Errorf`, `Infof`: write messages with given format into logs.
+- `Debugw`, `Errorw`, `Infow`, `Sloww`: write the string message with given `key:value` fields.
+- `WithCallerSkip`: skip more stack frames when reporting the caller, for logging helpers.
 - `WithDuration`: write elapsed duration into the log messages, with key `duration`.
 
 ## Write the logs to specific stores
 
-`logger` defined two interfaces to let you customize `logger` to write logs into any stores.
+`logger` defines two functions to let you write logs into any store.
 
 - `logger.NewWriter(w io.Writer)`
-- `logger.SetWriter(writer logx.Writer)`
+- `logger.SetWriter(writer logger.Writer)`
 
 ## Filtering sensitive fields
 
-If we need to prevent the `password` fields from logging, we can do it like below:
-
-```go
-type (
-	Message struct {
-		Name     string
-		Password string
-		Message  string
-	}
-
-	SensitiveLogger struct {
-        logger.Writer
-	}
-)
-
-func NewSensitiveLogger(writer logger.Writer) *SensitiveLogger {
-	return &SensitiveLogger{
-		Writer: writer,
-	}
-}
-
-func (l *SensitiveLogger) Info(msg any, fields ...logx.LogField) {
-	if m, ok := msg.(Message); ok {
-		l.Writer.Info(Message{
-			Name:     m.Name,
-			Password: "******",
-			Message:  m.Message,
-		}, fields...)
-	} else {
-		l.Writer.Info(msg, fields...)
-	}
-}
-
-func main() {
-	// setup logx to make sure originalWriter not nil,
-	// the injected writer is only for filtering, like a middleware.
-
-	originalWriter := logger.Reset()
-	writer := NewSensitiveLogger(originalWriter)
-    logger.SetWriter(writer)
-
-    logger.Infov(Message{
-		Name:     "foo",
-		Password: "shouldNotAppear",
-		Message:  "bar",
-	})
-  
-	// more code
-}
-```
+Entries are redacted before they are written. A field whose key names a credential or a personal datum (for
+example `token`, `password`, `email`, `phone`) is written as `[REDACTED]`, and JWTs, bot tokens, email addresses,
+bearer tokens and secret query parameters are masked inside messages and field values. `logger.RiskField` is the only
+way to log the client IP and the user agent, which the risk-control audit needs.

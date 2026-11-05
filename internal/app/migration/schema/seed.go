@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/perfect-panel/server/internal/auth/identifier"
-	password2 "github.com/perfect-panel/server/internal/auth/password"
+	"github.com/perfect-panel/server/internal/auth/password"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/perfect-panel/server/pkg/logger"
 	"gorm.io/gorm"
@@ -21,11 +21,11 @@ func canonicalAdminEmail(email string) (string, error) {
 	return canonicalEmail, nil
 }
 
-// CreateAdminUser create admin user
-func CreateAdminUser(email, password string, tx *gorm.DB) error {
+// CreateAdminUser creates the first administrator, who signs in with email
+// and adminPassword, unless the database already holds an account.
+func CreateAdminUser(email, adminPassword string, tx *gorm.DB) error {
 	enable := true
 	return tx.Transaction(func(tx *gorm.DB) error {
-		// Prevent duplicate creation
 		if tx.Model(&user.User{}).Find(&user.User{}).RowsAffected != 0 {
 			logger.Info("User already exists, skip creating administrator account")
 			return nil
@@ -36,8 +36,8 @@ func CreateAdminUser(email, password string, tx *gorm.DB) error {
 		}
 
 		u := user.User{
-			Password:  password2.EncodePassWord(password),
-			Algo:      password2.PasswordAlgoArgon2id,
+			Password:  password.EncodePassWord(adminPassword),
+			Algo:      password.PasswordAlgoArgon2id,
 			IsAdmin:   &enable,
 			ReferCode: user.GenerateInviteCode(time.Now().Unix()),
 		}

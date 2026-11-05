@@ -1,3 +1,7 @@
+// Package repo holds the platform module's repository implementations: the
+// system settings, cached in Redis, the system log, the task bookkeeping and
+// the event inbox and outbox. The module facade exports them through
+// NewRepoBuilder.
 package repo
 
 import (
@@ -5,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 
 	"github.com/perfect-panel/server/internal/config"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
@@ -19,7 +23,7 @@ var (
 	cacheSystemKeyPrefix = "cache:System:key:"
 )
 
-var _ repository.SystemRepo = (*systemRepo)(nil)
+var _ kernel.SystemRepo = (*systemRepo)(nil)
 
 type systemRepo struct {
 	cache.CachedConn
@@ -28,7 +32,7 @@ type systemRepo struct {
 
 // NewSystemRepo builds the module-owned implementation over the shared
 // cached connection.
-func NewSystemRepo(conn cache.CachedConn) repository.SystemRepo {
+func NewSystemRepo(conn cache.CachedConn) kernel.SystemRepo {
 	return &systemRepo{
 		CachedConn: conn,
 		table:      "System",
@@ -80,7 +84,7 @@ func systemCategoryCacheKeys(category string) []string {
 func (m *systemRepo) FindOneByKey(ctx context.Context, key string) (*system.System, error) {
 	sys := new(system.System)
 	cacheKey := fmt.Sprintf("%s%v", cacheSystemKeyPrefix, key)
-	err := m.QueryCtx(ctx, sys, cacheKey, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryCtx(ctx, sys, cacheKey, func(conn *gorm.DB, v any) error {
 		return conn.Model(&system.System{}).Scopes(systemWhereKey(key)).First(v).Error
 	})
 	return sys, err
@@ -96,17 +100,17 @@ func (m *systemRepo) Insert(ctx context.Context, data *system.System) error {
 func (m *systemRepo) FindOne(ctx context.Context, id int64) (*system.System, error) {
 	SystemIdKey := fmt.Sprintf("%s%v", cacheSystemIdPrefix, id)
 	var resp system.System
-	err := m.QueryCtx(ctx, &resp, SystemIdKey, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryCtx(ctx, &resp, SystemIdKey, func(conn *gorm.DB, v any) error {
 		return conn.Model(&system.System{}).Where("id = ?", id).First(&resp).Error
 	})
-	switch {
-	case err == nil:
-		return &resp, nil
-	default:
+	if err != nil {
 		return nil, err
 	}
+	return &resp, nil
 }
 
+// Update rewrites the setting's mutable columns from data. It never inserts
+// a row and never touches the creation time, which a whole-row save would.
 func (m *systemRepo) Update(ctx context.Context, data *system.System) error {
 	old, err := m.FindOne(ctx, data.Id)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -114,8 +118,8 @@ func (m *systemRepo) Update(ctx context.Context, data *system.System) error {
 	}
 	keys := append(m.getCacheKeys(old), m.getCacheKeys(data)...)
 	err = m.ExecCtx(ctx, func(conn *gorm.DB) error {
-		db := conn
-		return db.Save(data).Error
+		return conn.Model(&system.System{}).Where("id = ?", data.Id).
+			Select("category", "key", "value", "type", "desc").Updates(data).Error
 	}, keys...)
 	return err
 }
@@ -137,56 +141,32 @@ func (m *systemRepo) Delete(ctx context.Context, id int64) error {
 
 // GetSmsConfig returns the sms config.
 func (m *systemRepo) GetSmsConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.SmsConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "sms").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "sms", config.SmsConfigKey)
 }
 
 // GetSiteConfig returns the site config.
 func (m *systemRepo) GetSiteConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.SiteConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "site").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "site", config.SiteConfigKey)
 }
 
 // GetEmailConfig returns the email config.
 func (m *systemRepo) GetEmailConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.EmailSmtpConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "email").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "email", config.EmailSmtpConfigKey)
 }
 
 // GetSubscribeConfig returns the subscribe config.
 func (m *systemRepo) GetSubscribeConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.SubscribeConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "subscribe").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "subscribe", config.SubscribeConfigKey)
 }
 
 // GetRegisterConfig returns the register config.
 func (m *systemRepo) GetRegisterConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.RegisterConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "register").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "register", config.RegisterConfigKey)
 }
 
 // GetVerifyConfig returns the verify config.
 func (m *systemRepo) GetVerifyConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.VerifyConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "verify").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "verify", config.VerifyConfigKey)
 }
 
 // GetNodeConfigUncached reads the authoritative database, never Redis.
@@ -219,40 +199,29 @@ func (m *systemRepo) GetNodeConfigForUpdate(ctx context.Context) ([]*system.Syst
 	return configs, err
 }
 
+// GetNodeConfig returns the server config.
+func (m *systemRepo) GetNodeConfig(ctx context.Context) ([]*system.System, error) {
+	return m.categoryConfig(ctx, "server", config.NodeConfigKey)
+}
+
 // GetInviteConfig returns the invite config.
 func (m *systemRepo) GetInviteConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.InviteConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "invite").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "invite", config.InviteConfigKey)
 }
 
 // GetTelegramConfig returns the telegram config.
 func (m *systemRepo) GetTelegramConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.TelegramConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "telegram").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "telegram", config.TelegramConfigKey)
 }
 
 // GetTosConfig returns the tos config.
 func (m *systemRepo) GetTosConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.TosConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "tos").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "tos", config.TosConfigKey)
 }
 
 // GetCurrencyConfig returns the currency config.
 func (m *systemRepo) GetCurrencyConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.CurrencyConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "currency").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "currency", config.CurrencyConfigKey)
 }
 
 func (m *systemRepo) UpdateValueByCategoryKey(ctx context.Context, category, key, value string, valueType ...string) error {
@@ -296,7 +265,7 @@ func (m *systemRepo) UpdateNodeMultiplierConfig(ctx context.Context, config stri
 
 func (m *systemRepo) FindNodeMultiplierConfig(ctx context.Context) (*system.System, error) {
 	var data system.System
-	err := m.QueryNoCacheCtx(ctx, &data, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryNoCacheCtx(ctx, &data, func(conn *gorm.DB, v any) error {
 		return conn.Scopes(systemWhereCategoryKey("server", "NodeMultiplierConfig")).Find(v).Error
 	})
 	return &data, err
@@ -304,19 +273,27 @@ func (m *systemRepo) FindNodeMultiplierConfig(ctx context.Context) (*system.Syst
 
 // GetVerifyCodeConfig returns the verify code config.
 func (m *systemRepo) GetVerifyCodeConfig(ctx context.Context) ([]*system.System, error) {
-	var configs []*system.System
-	err := m.QueryCtx(ctx, &configs, config.VerifyCodeConfigKey, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "verify_code").Find(v).Error
-	})
-	return configs, err
+	return m.categoryConfig(ctx, "verify_code", config.VerifyCodeConfigKey)
 }
 
-// GetLogConfig returns the log config.
+// GetLogConfig returns the log config; it is read uncached.
 func (m *systemRepo) GetLogConfig(ctx context.Context) ([]*system.System, error) {
+	return m.categoryConfig(ctx, "log", "")
+}
+
+// categoryConfig returns the settings rows of category, cached under
+// cacheKey; an empty cacheKey reads the database every time.
+func (m *systemRepo) categoryConfig(ctx context.Context, category, cacheKey string) ([]*system.System, error) {
 	var configs []*system.System
-	err := m.QueryNoCacheCtx(ctx, &configs, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("category = ?", "log").Find(v).Error
-	})
+	query := func(conn *gorm.DB, v any) error {
+		return conn.Where("category = ?", category).Find(v).Error
+	}
+	var err error
+	if cacheKey == "" {
+		err = m.QueryNoCacheCtx(ctx, &configs, query)
+	} else {
+		err = m.QueryCtx(ctx, &configs, cacheKey, query)
+	}
 	return configs, err
 }
 
@@ -330,8 +307,6 @@ func (m *systemRepo) GetInterfaceConfig(ctx context.Context) ([]*system.System, 
 }
 
 // systemWhereKey returns a GORM scope filtering by the "key" column.
-// Migrated from internal/model/entity/system/scope.go (renamed with the system prefix
-// to avoid colliding with other domain scopes inside the flat repository package).
 func systemWhereKey(key string) func(db *gorm.DB) *gorm.DB {
 	return func(db *gorm.DB) *gorm.DB {
 		return db.Where(clause.Eq{
@@ -342,8 +317,6 @@ func systemWhereKey(key string) func(db *gorm.DB) *gorm.DB {
 }
 
 // systemWhereCategoryKey returns a GORM scope filtering by both "category" and "key".
-// Migrated from internal/model/entity/system/scope.go (renamed with the system prefix
-// to avoid colliding with other domain scopes inside the flat repository package).
 func systemWhereCategoryKey(category, key string) func(db *gorm.DB) *gorm.DB {
 	return func(db *gorm.DB) *gorm.DB {
 		return db.Where(clause.Eq{

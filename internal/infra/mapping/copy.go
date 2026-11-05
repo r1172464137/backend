@@ -1,71 +1,42 @@
+// Package mapping copies between the entity, contract and DTO structs of the
+// same data by field name, with the conversions the API needs: a time.Time
+// becomes int64 Unix milliseconds, the form the JSON responses carry. It
+// exists so that every copy applies the same policy.
 package mapping
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/jinzhu/copier"
-	"github.com/pkg/errors"
 )
 
-// CopyOption 定义复制选项的函数类型
-type CopyOption func(*copier.Option)
-
-// CopyWithIgnoreEmpty 设置是否忽略空值
-func CopyWithIgnoreEmpty(ignoreEmpty bool) CopyOption {
-	return func(o *copier.Option) {
-		o.IgnoreEmpty = ignoreEmpty
-	}
-}
-
-func DeepCopy[T, K any](destStruct T, srcStruct K, opts ...CopyOption) T {
-	var dst = destStruct
-	var src = srcStruct
-
-	option := copier.Option{
-		DeepCopy:    true,
-		IgnoreEmpty: false,
-		Converters: []copier.TypeConverter{
-			{
-				SrcType: time.Time{},
-				DstType: int64(0),
-				Fn: func(src any) (any, error) {
-					s, ok := src.(time.Time)
-					if !ok {
-						return nil, errors.New("src type not matching")
-					}
-					return s.UnixMilli(), nil
-				},
-			},
-		},
-	}
-
-	for _, opt := range opts {
-		opt(&option)
-	}
-
-	_ = copier.CopyWithOption(dst, src, option)
-	return dst
-}
-
-func CloneMapToStruct(input any, output interface{}) error {
-	// 确保 output 是一个指针，并且指向一个结构体
-	val := reflect.ValueOf(output)
-	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Struct {
-		return fmt.Errorf("output must be a pointer to a struct")
-	}
-
-	// 使用 JSON 编解码将 map 转换为结构体
-	data, err := json.Marshal(input)
-	if err != nil {
-		return fmt.Errorf("failed to marshal input: %w", err)
-	}
-
-	err = json.Unmarshal(data, output)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal data to struct: %w", err)
+// Copy deep-copies the fields of src into dst, a pointer, by name; a
+// time.Time source field fills an int64 destination with its Unix
+// milliseconds, and zero source fields are copied too. A failure (mismatched
+// types) leaves dst partly filled and is returned.
+func Copy(dst, src any) error {
+	if err := copier.CopyWithOption(dst, src, copyOption); err != nil {
+		return fmt.Errorf("copy %T into %T: %w", src, dst, err)
 	}
 	return nil
+}
+
+// copyOption is the copy policy every mapping shares.
+var copyOption = copier.Option{
+	DeepCopy: true,
+	Converters: []copier.TypeConverter{
+		{
+			SrcType: time.Time{},
+			DstType: int64(0),
+			Fn: func(src any) (any, error) {
+				s, ok := src.(time.Time)
+				if !ok {
+					return nil, errors.New("src type not matching")
+				}
+				return s.UnixMilli(), nil
+			},
+		},
+	},
 }

@@ -6,40 +6,31 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type UpdateSubscribeConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-func newUpdateSubscribeConfigLogic(ctx context.Context, deps Deps) *UpdateSubscribeConfigLogic {
-	return &UpdateSubscribeConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
+// UpdateSubscribeConfig stores the subscription settings. A new subscribe
+// path needs the HTTP routes rebuilt, so the server restarts in the
+// background instead of reloading the subscribe subsystem; a failed restart
+// is only logged, the settings being stored.
+func (s *Service) UpdateSubscribeConfig(ctx context.Context, req *dto.SubscribeConfig) error {
+	log := logger.WithContext(ctx)
+	change := settingsChange{
+		category: "subscribe",
+		next:     convertedConfigFields(*req),
+		previous: previousFields(ctx, "subscribe", s.GetSubscribeConfig, convertedConfigFields),
 	}
-}
-
-func (l *UpdateSubscribeConfigLogic) UpdateSubscribeConfig(req *dto.SubscribeConfig) error {
-	err := updateConfigFields(l.ctx, l.deps, "subscribe", convertedConfigFields(*req))
-
-	if err != nil {
-		l.Errorw("[UpdateSubscribeConfigLogic] update subscribe config error: ", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update subscribe config error: %v", err)
+	if err := updateConfigFields(ctx, s.deps, change); err != nil {
+		log.Errorw("[UpdateSubscribeConfig] update subscribe config error", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update subscribe config error: %v", err)
 	}
 
-	if l.deps.subscribePath() != req.SubscribePath {
+	if s.deps.subscribePath() != req.SubscribePath {
 		go func() {
-			if err := l.deps.restart(); err != nil {
-				l.Errorw("[UpdateSubscribeConfigLogic] restart error: ", logger.Field("error", err.Error()))
+			if err := s.deps.restart(); err != nil {
+				log.Errorw("[UpdateSubscribeConfig] restart error", logger.Field("error", err.Error()))
 			}
 		}()
 		return nil
 	}
-
-	l.deps.reinit("subscribe")
-	return nil
+	return s.deps.reinit("subscribe")
 }

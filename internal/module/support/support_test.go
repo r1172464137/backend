@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/perfect-panel/server/internal/module/support"
 	dto "github.com/perfect-panel/server/internal/module/support/contract"
@@ -118,8 +119,10 @@ func TestDeleteAnnouncementPassesID(t *testing.T) {
 }
 
 func TestGetAnnouncementMapsEntity(t *testing.T) {
+	created := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	repo := &fakeAnnouncementRepo{findOne: &entity.Announcement{
-		Id: 3, Title: "t", Content: "c", Show: ptr(true),
+		Id: 3, Title: "t", Content: "c", Show: ptr(true), Pinned: ptr(false),
+		CreatedAt: created, UpdatedAt: created.Add(time.Minute),
 	}}
 	svc := newService(repo)
 
@@ -129,6 +132,12 @@ func TestGetAnnouncementMapsEntity(t *testing.T) {
 	}
 	if got.Id != 3 || got.Title != "t" || got.Content != "c" || got.Show == nil || !*got.Show {
 		t.Fatalf("unexpected dto: %+v", got)
+	}
+	if got.Pinned == nil || *got.Pinned || got.Popup != nil {
+		t.Fatalf("flags = pinned %v, popup %v; want the stored ones", got.Pinned, got.Popup)
+	}
+	if got.CreatedAt != created.UnixMilli() || got.UpdatedAt != created.Add(time.Minute).UnixMilli() {
+		t.Fatalf("times = %d/%d, want the stored ones in Unix milliseconds", got.CreatedAt, got.UpdatedAt)
 	}
 }
 

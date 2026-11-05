@@ -40,7 +40,7 @@ func TestOrderedAuthoritativeSnapshotMySQL(t *testing.T) {
 func TestOrderedAuthoritativeSnapshotPostgres(t *testing.T) {
 	routingIntegration(t, "postgres", os.Getenv("PPANEL_TEST_ORDERED_ROUTING_POSTGRES_DSN"))
 }
-func routingIntegration(t *testing.T, dialect, dsn string) {
+func requireRoutingTestDatabase(t *testing.T, dialect, dsn string) {
 	t.Helper()
 	if dsn == "" {
 		t.Skip("set dedicated loopback ordered-routing test DSN")
@@ -72,9 +72,23 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if !strings.HasSuffix(name, "_test") {
 		t.Fatal("dedicated _test database required")
 	}
+}
+
+func closeRoutingTestResource(t *testing.T, resource interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := resource.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+func routingIntegration(t *testing.T, dialect, dsn string) {
+	t.Helper()
+	requireRoutingTestDatabase(t, dialect, dsn)
 	mini := miniredis.RunT(t)
 	rds := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	defer rds.Close()
+	closeRoutingTestResource(t, rds)
 	open := func(rds *redis.Client) *repository.GormStore {
 		var dialector gorm.Dialector
 		if dialect == "mysql" {
@@ -86,8 +100,11 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pool, _ := db.DB()
-		t.Cleanup(func() { pool.Close() })
+		pool, err := db.DB()
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeRoutingTestResource(t, pool)
 		return NewStore(db, rds)
 	}
 	a, b := open(rds), open(rds)
@@ -121,6 +138,15 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 		return network.New(network.Deps{Store: store, Redis: rds, ReadGlobalNodeConfig: p.ReadNodeConfigSnapshot, Config: func() network.Snapshot { panic("routing used process config") }})
 	}
 	n1, n2 := makeNetwork(a, p1), makeNetwork(b, p2)
+	checkOfflineServerCopy(t, ctx, a, n1, rds, policy)
+	checkMalformedRoutingRequests(t, ctx, a, n1, p1, server)
+	checkGlobalRoutingCAS(t, ctx, p1, p2, n1, n2, server)
+	checkLocalRoutingCAS(t, ctx, n1, n2, server, policy)
+	checkRoutingCacheOutage(t, ctx, open, p1, server)
+}
+
+func checkOfflineServerCopy(t *testing.T, ctx context.Context, a *repository.GormStore, n1 network.Service, rds *redis.Client, policy string) {
+	t.Helper()
 	// Real handler -> module -> database: return the committed ID, then
 	// verify it can be used immediately for the copy workflow.
 	create := func(body string) *app.RequestContext {
@@ -149,6 +175,14 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if err != nil || stored.Id != createdID {
 		t.Fatalf("committed server missing: %#v %v", stored, err)
 	}
+	checkCreatedServerProtocols(t, ctx, a, n1, createdID, create)
+	checkServerOnlyUpdateCache(t, ctx, rds, n1, createdID)
+	checkOfflineCopyAndInheritance(t, ctx, a, n1, createdID, policy)
+	checkRejectedServerCreates(t, ctx, a, create)
+}
+
+func checkCreatedServerProtocols(t *testing.T, ctx context.Context, a *repository.GormStore, n1 network.Service, createdID int64, create func(string) *app.RequestContext) {
+	t.Helper()
 	// Actual handler -> service -> DB: no enabled invalid listener may be
 	// created, updated, or distributed as a fake zero-protocol candidate.
 	invalidProtocols := []string{`{"type":"vless","enable":true,"port":0,"transport":"tcp"}`, `{"type":"naive","enable":true,"port":443}`, `{"type":"shadowsocks","enable":true,"port":443,"cipher":"aes-128-gcm","plugin":"obfs"}`, `{"type":"vless","enable":true,"port":443,"transport":"xhttp","xhttp_mode":"bogus"}`, `{"type":"vless","enable":true,"port":443,"transport":"xhttp","xhttp_extra":"{\"xmux\":\"oops\"}"}`}
@@ -204,6 +238,10 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if err := a.Node().UpdateServer(ctx, disabled); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func checkServerOnlyUpdateCache(t *testing.T, ctx context.Context, rds *redis.Client, n1 network.Service, createdID int64) {
+	t.Helper()
 	cacheKey := fmt.Sprintf("%s%d:vless", node.ServerUserListCacheKey, createdID)
 	if err := rds.Set(ctx, cacheKey, "authorization-cache", node.ServerCacheTTL).Err(); err != nil {
 		t.Fatal(err)
@@ -221,6 +259,10 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if ttl, err := rds.TTL(ctx, cacheKey).Result(); err != nil || ttl <= 0 || ttl > node.ServerCacheTTL {
 		t.Fatalf("cache TTL %v %v", ttl, err)
 	}
+}
+
+func checkOfflineCopyAndInheritance(t *testing.T, ctx context.Context, a *repository.GormStore, n1 network.Service, createdID int64, policy string) {
+	t.Helper()
 	initial, err := n1.GetServerNodeConfig(ctx, &netdto.GetServerNodeConfigRequest{ServerID: createdID})
 	if err != nil || initial.RoutingStatus.Known || initial.RoutingStatus.Report != nil {
 		t.Fatalf("new server must have unknown status: %#v %v", initial, err)
@@ -290,6 +332,10 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if err != nil || !inherited.Override.InheritRouting || inherited.Override.RoutingRevision != 2 || inherited.Effective.RoutingMode != "global-v1" || inherited.Effective.Routing.LocalTransitionRevision != 2 || inherited.Override.IPStrategy != "prefer_ipv4" || len(inherited.Override.DNS) != 1 || inherited.RoutingStatus.Known || inherited.RoutingStatus.Report != nil {
 		t.Fatalf("offline inheritance readback: %#v %v", inherited, err)
 	}
+}
+
+func checkRejectedServerCreates(t *testing.T, ctx context.Context, a *repository.GormStore, create func(string) *app.RequestContext) {
+	t.Helper()
 	before, err := a.Node().QueryServerSorts(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -309,6 +355,10 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if err != nil || len(after) != len(before) {
 		t.Fatalf("repeated failed create changed DB: %d -> %d %v", len(before), len(after), err)
 	}
+}
+
+func checkMalformedRoutingRequests(t *testing.T, ctx context.Context, a *repository.GormStore, n1 network.Service, p1 platform.Service, server *node.Server) {
+	t.Helper()
 	dnsOverride := `[{"proto":"udp","address":"8.8.8.8","domains":[]}]`
 	if err := a.Node().SaveServerRoutingOverride(ctx, &node.ServerConfigOverride{ServerId: server.Id, DNS: &dnsOverride}); err != nil {
 		t.Fatal(err)
@@ -346,6 +396,10 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if err != nil || localAfter == nil || localAfter.DNS == nil || *localAfter.DNS != dnsOverride || localAfter.RoutingRevision != 0 {
 		t.Fatalf("invalid request changed server settings %#v %v", localAfter, err)
 	}
+}
+
+func checkGlobalRoutingCAS(t *testing.T, ctx context.Context, p1, p2 platform.Service, n1, n2 network.Service, server *node.Server) {
+	t.Helper()
 	update := func(p platform.Service, def string) error {
 		var req platformdto.NodeConfig
 		if err := json.Unmarshal([]byte(fmt.Sprintf(`{"routing_revision":1,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"%s"}}`, def)), &req); err != nil {
@@ -393,6 +447,10 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 			t.Fatalf("snapshot %#v", got)
 		}
 	}
+}
+
+func checkLocalRoutingCAS(t *testing.T, ctx context.Context, n1, n2 network.Service, server *node.Server, policy string) {
+	t.Helper()
 	// No node status is reported; revision CAS must still authorize the save.
 	var req netdto.UpdateServerNodeConfigRequest
 	body := fmt.Sprintf(`{"server_id":%d,"routing_revision":0,"routing":%s}`, server.Id, policy)
@@ -418,7 +476,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	// Competing local writes use the network owner's row lock and revision;
 	// they do not need a platform/network transaction or advisory lock.
 	localErrs := make(chan error, 2)
-	wg = sync.WaitGroup{}
+	var wg sync.WaitGroup
 	for i, svc := range []network.Service{n1, n2} {
 		wg.Add(1)
 		go func(svc network.Service, i int) {
@@ -438,7 +496,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	}
 	wg.Wait()
 	close(localErrs)
-	ok, conflict = 0, 0
+	ok, conflict := 0, 0
 	for err := range localErrs {
 		if err == nil {
 			ok++
@@ -463,11 +521,15 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 			t.Fatalf("local revision %#v", got)
 		}
 	}
+}
+
+func checkRoutingCacheOutage(t *testing.T, ctx context.Context, open func(*redis.Client) *repository.GormStore, p1 platform.Service, server *node.Server) {
+	t.Helper()
 	// Override writes have no dependency on the node user-list cache. Redis
 	// loss cannot turn this authoritative DB write into a post-commit failure.
 	transient := miniredis.RunT(t)
 	unstable := redis.NewClient(&redis.Options{Addr: transient.Addr(), MaxRetries: -1, DialTimeout: 100 * time.Millisecond, ReadTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond})
-	defer unstable.Close()
+	closeRoutingTestResource(t, unstable)
 	txStore := open(unstable)
 	outageSvc := network.New(network.Deps{Store: txStore, Redis: unstable, ReadGlobalNodeConfig: p1.ReadNodeConfigSnapshot})
 	userCacheKey := fmt.Sprintf("%s%d:vless", node.ServerUserListCacheKey, server.Id)

@@ -7,31 +7,28 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetCurrencyConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get Currency Config
-func newGetCurrencyConfigLogic(ctx context.Context, deps Deps) *GetCurrencyConfigLogic {
-	return &GetCurrencyConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetCurrencyConfigLogic) GetCurrencyConfig() (resp *dto.CurrencyConfig, err error) {
-	configs, err := l.deps.System.GetCurrencyConfig(l.ctx)
+// GetCurrencyConfig returns the stored currency settings, the exchange-rate
+// provider's access key masked.
+func (s *Service) GetCurrencyConfig(ctx context.Context) (*dto.CurrencyConfig, error) {
+	resp, err := s.storedCurrencyConfig(ctx)
 	if err != nil {
-		l.Errorw("[GetCurrencyConfigLogic] GetCurrencyConfig error: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetCurrencyConfig error: %v", err.Error())
+		return nil, err
 	}
-	resp = &dto.CurrencyConfig{}
+	maskCurrencySecrets(resp)
+	return resp, nil
+}
+
+// storedCurrencyConfig reads the currency settings as stored, the access key
+// in clear.
+func (s *Service) storedCurrencyConfig(ctx context.Context) (*dto.CurrencyConfig, error) {
+	configs, err := s.deps.System.GetCurrencyConfig(ctx)
+	if err != nil {
+		logger.WithContext(ctx).Errorw("[GetCurrencyConfig] query the currency config failed", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "GetCurrencyConfig error: %v", err.Error())
+	}
+	resp := &dto.CurrencyConfig{}
 	config.SystemConfigSliceReflectToStruct(configs, resp)
-	return
+	return resp, nil
 }

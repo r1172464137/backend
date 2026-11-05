@@ -1,3 +1,6 @@
+// Package apple is the Sign in with Apple client of the Apple sign-in
+// method: it signs the client secret from the configured private key and
+// exchanges authorization codes for the identity token.
 package apple
 
 import (
@@ -13,7 +16,9 @@ type Config struct {
 	RedirectURI  string
 }
 
-// New creates a Client object with the default URLs and a default http client
+// New creates a Client for the Apple validation endpoint. It signs the
+// client secret from the configured private key, so it fails for a key that
+// does not parse.
 func New(c Config) (*Client, error) {
 	secret, err := GenerateClientSecret(c.ClientSecret, c.TeamID, c.ClientID, c.KeyID)
 	if err != nil {
@@ -22,7 +27,6 @@ func New(c Config) (*Client, error) {
 	return &Client{
 		config:        c,
 		validationURL: ValidationURL,
-		revokeURL:     RevokeURL,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},

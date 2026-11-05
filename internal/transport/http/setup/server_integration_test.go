@@ -59,50 +59,16 @@ func directSetupEmpty(t *testing.T, driver, dsn string) {
 	if !strings.HasSuffix(name, "_test") {
 		t.Fatal("dedicated _test DB required")
 	}
-	cfgLock := orm.ParseDSN(dsn)
-	if cfgLock == nil {
-		t.Fatal("invalid DSN")
-	}
-	cfgLock.Driver = driver
-	lockDB, err := orm.ConnectDatabase(orm.Mysql{Config: *cfgLock})
-	if err != nil {
-		t.Fatal(err)
-	}
-	lockPool, _ := lockDB.DB()
-	conn1, err := lockPool.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn2, err := lockPool.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	release, err := lockSetupDatabase(context.Background(), conn1, *cfgLock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := lockSetupDatabase(context.Background(), conn2, *cfgLock); err == nil {
-		t.Fatal("second installation acquired same DB lock")
-	}
-	release()
-	release2, err := lockSetupDatabase(context.Background(), conn2, *cfgLock)
-	if err != nil {
-		t.Fatalf("setup lock did not release: %v", err)
-	}
-	release2()
-	conn1.Close()
-	conn2.Close()
-	lockPool.Close()
-	oldPath := configPath
-	configPath = filepath.Join(t.TempDir(), "config.yaml")
-	t.Cleanup(func() { configPath = oldPath })
+	checkDatabaseSetupLock(t, driver, dsn)
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	w := newWizard(configPath)
 	if err := os.WriteFile(configPath, []byte(""), 0600); err != nil {
 		t.Fatal(err)
 	}
 	request := map[string]string{"adminEmail": "setup@example.invalid", "adminPassword": "temporary-setup-password", "databaseDriver": driver, "mysqlHost": host, "mysqlPort": port, "mysqlDatabase": name, "mysqlUser": user, "mysqlPassword": password, "redisHost": "127.0.0.1", "redisPort": "6379"}
 	body, _ := json.Marshal(request)
-	done := make(chan bool, 1)
-	go func() { done <- <-initStatus }()
+	done := w.done
 	start := make(chan struct{})
 	responses := make(chan *app.RequestContext, 2)
 	var wg sync.WaitGroup
@@ -114,7 +80,7 @@ func directSetupEmpty(t *testing.T, driver, dsn string) {
 			ctx.Request.Header.SetContentTypeBytes([]byte("application/json"))
 			ctx.Request.SetBody(body)
 			<-start
-			handleInitConfig(context.Background(), ctx)
+			w.handleInitConfig(context.Background(), ctx)
 			responses <- ctx
 		}()
 	}
@@ -135,7 +101,7 @@ func directSetupEmpty(t *testing.T, driver, dsn string) {
 	if success != 1 || conflict != 1 {
 		t.Fatalf("concurrent setup success=%d conflict=%d", success, conflict)
 	}
-	if !<-done {
+	if err := <-done; err != nil {
 		t.Fatal("setup did not signal completion")
 	}
 	content, err := os.ReadFile(configPath)
@@ -156,7 +122,11 @@ func directSetupEmpty(t *testing.T, driver, dsn string) {
 		t.Fatal(err)
 	}
 	pool, _ := db.DB()
-	defer pool.Close()
+	defer func() {
+		if err := pool.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var count int64
 	if err := db.Table("user").Where("is_admin = ?", true).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("admin count %d: %v", count, err)
@@ -215,15 +185,18 @@ func directSetupRejectsExisting(t *testing.T, driver, dsn string) {
 		t.Fatal(err)
 	}
 	pool, _ := db.DB()
-	defer pool.Close()
+	defer func() {
+		if err := pool.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var version int64
 	var dirty bool
 	if err := db.Raw("SELECT version,dirty FROM schema_migrations").Row().Scan(&version, &dirty); err != nil || dirty || version != 2179 {
 		t.Fatalf("expected 02179 fixture: version=%d dirty=%v err=%v", version, dirty, err)
 	}
-	oldPath := configPath
-	configPath = filepath.Join(t.TempDir(), "config.yaml")
-	t.Cleanup(func() { configPath = oldPath })
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	w := newWizard(configPath)
 	if err := os.WriteFile(configPath, []byte(""), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +209,7 @@ func directSetupRejectsExisting(t *testing.T, driver, dsn string) {
 	ctx.Request.Header.SetContentTypeBytes([]byte("application/json"))
 	ctx.Request.SetBody(body)
 	// Intentionally do not call /init/database/test.
-	handleInitConfig(context.Background(), ctx)
+	w.handleInitConfig(context.Background(), ctx)
 	if ctx.Response.StatusCode() != 409 {
 		t.Fatalf("direct submission status=%d body=%s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
@@ -249,5 +222,53 @@ func directSetupRejectsExisting(t *testing.T, driver, dsn string) {
 	content, err := os.ReadFile(configPath)
 	if err != nil || len(content) != 0 {
 		t.Fatal("setup changed config file")
+	}
+}
+
+func checkDatabaseSetupLock(t *testing.T, driver, dsn string) {
+	t.Helper()
+	cfgLock := orm.ParseDSN(dsn)
+	if cfgLock == nil {
+		t.Fatal("invalid DSN")
+	}
+	cfgLock.Driver = driver
+	lockDB, err := orm.ConnectDatabase(orm.Mysql{Config: *cfgLock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPool, _ := lockDB.DB()
+	conn1, err := lockPool.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn2, err := lockPool.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := lockSetupDatabase(context.Background(), conn1, *cfgLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockSetupDatabase(context.Background(), conn2, *cfgLock); err == nil {
+		t.Fatal("second installation acquired same DB lock")
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	release2, err := lockSetupDatabase(context.Background(), conn2, *cfgLock)
+	if err != nil {
+		t.Fatalf("setup lock did not release: %v", err)
+	}
+	if err := release2(); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockPool.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

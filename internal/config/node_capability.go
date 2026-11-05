@@ -155,36 +155,8 @@ func ValidateNodeStreamSpiderJSON(raw string) error {
 		switch v := value.(type) {
 		case map[string]any:
 			for key, child := range v {
-				if strings.EqualFold(key, "security") {
-					security, ok := child.(string)
-					if !ok {
-						return fmt.Errorf("stream security must be a string")
-					}
-					switch strings.ToLower(security) {
-					case "", "none", "tls", "reality":
-					default:
-						return fmt.Errorf("unsupported stream security")
-					}
-				}
-				if strings.EqualFold(key, "realitySettings") || strings.EqualFold(key, "reality_settings") {
-					if child != nil {
-						object, ok := child.(map[string]any)
-						if !ok {
-							return fmt.Errorf("realitySettings must be an object")
-						}
-						for name, spider := range object {
-							if !strings.EqualFold(name, "spiderX") && !strings.EqualFold(name, "spider_x") {
-								continue
-							}
-							path, ok := spider.(string)
-							if !ok {
-								return fmt.Errorf("realitySettings.spiderX must be a string")
-							}
-							if err := ValidateNodeURI("realitySettings.spiderX", path, true); err != nil {
-								return err
-							}
-						}
-					}
+				if err := validateStreamField(key, child); err != nil {
+					return err
 				}
 				// Headers are a string map, not nested transport settings.
 				if strings.EqualFold(key, "headers") {
@@ -204,6 +176,41 @@ func ValidateNodeStreamSpiderJSON(raw string) error {
 		return nil
 	}
 	return walk(value, 0)
+}
+
+func validateStreamField(key string, child any) error {
+	if strings.EqualFold(key, "security") {
+		security, ok := child.(string)
+		if !ok {
+			return fmt.Errorf("stream security must be a string")
+		}
+		switch strings.ToLower(security) {
+		case "", "none", "tls", "reality":
+		default:
+			return fmt.Errorf("unsupported stream security")
+		}
+	}
+	if strings.EqualFold(key, "realitySettings") || strings.EqualFold(key, "reality_settings") {
+		if child != nil {
+			object, ok := child.(map[string]any)
+			if !ok {
+				return fmt.Errorf("realitySettings must be an object")
+			}
+			for name, spider := range object {
+				if !strings.EqualFold(name, "spiderX") && !strings.EqualFold(name, "spider_x") {
+					continue
+				}
+				path, ok := spider.(string)
+				if !ok {
+					return fmt.Errorf("realitySettings.spiderX must be a string")
+				}
+				if err := ValidateNodeURI("realitySettings.spiderX", path, true); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func HasNodePluginOptions(value any) bool {

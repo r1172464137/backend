@@ -1,3 +1,6 @@
+// Package dto holds the identity module's contract: the request and
+// response types of its facade and HTTP handlers. Their JSON and Swagger
+// names are the public API.
 package dto
 
 type GetDetailRequest struct {
@@ -14,7 +17,7 @@ type User struct {
 	Avatar                string           `json:"avatar"`
 	Balance               int64            `json:"balance"`
 	Commission            int64            `json:"commission"`
-	ReferralPercentage    uint8            `json:"referral_percentage"`
+	ReferralPercentage    uint8            `json:"referral_percentage" validate:"lte=100"`
 	OnlyFirstPurchase     bool             `json:"only_first_purchase"`
 	GiftAmount            int64            `json:"gift_amount"`
 	Telegram              int64            `json:"telegram"`

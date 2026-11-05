@@ -35,84 +35,86 @@ func (s badStatusStore) Node() repository.NodeRepo { return s.nodes }
 func TestNodeFailureStagesJSONAndProtobuf(t *testing.T) {
 	for _, stage := range []string{"config", "monitor"} {
 		for _, wire := range []string{"json", "protobuf"} {
-			t.Run(stage+"/"+wire, func(t *testing.T) {
-				mini := miniredis.RunT(t)
-				client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-				t.Cleanup(func() { _ = client.Close() })
-				svc := network.New(network.Deps{Store: badStatusStore{nodes: badStatusRepo{}}, Redis: client, Config: func() network.Snapshot { return network.Snapshot{Node: config.NodeConfig{}} }})
-				engine := hertzserver.Default(hertzserver.WithDisablePrintRoute(true))
-				engine.Use(ServerMiddleware(func() string { return "test-secret" }))
-				engine.POST("/v1/server/status", ServerPushStatusHandler(svc))
-				msg := &serverv1.PushServerStatusRequest{RoutingVersion: 1, RoutingSequence: 1, InstanceId: "11111111-1111-4111-8111-111111111111", RoutingError: &serverv1.RoutingError{Stage: stage, Message: "password=do-not-store"}}
-				var body []byte
-				var err error
-				if wire == "protobuf" {
-					body, err = proto.Marshal(msg)
-				} else {
-					body, err = json.Marshal(map[string]any{"routing_version": 1, "routing_sequence": 1, "instance_id": msg.InstanceId, "routing_error": map[string]any{"stage": stage, "message": "password=do-not-store"}})
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				request := engine.NewContext()
-				request.Request.SetRequestURI("/v1/server/status?server_id=7&secret_key=test-secret")
-				request.Request.Header.SetMethod("POST")
-				if wire == "protobuf" {
-					request.Request.Header.SetContentTypeBytes([]byte(protobufContentType))
-					request.Request.Header.Set("Accept", protobufContentType)
-				} else {
-					request.Request.Header.SetContentTypeBytes([]byte("application/json"))
-				}
-				request.Request.SetBody(body)
-				engine.ServeHTTP(context.Background(), request)
-				if request.Response.StatusCode() != 200 {
-					t.Fatalf("status %d", request.Response.StatusCode())
-				}
-				if wire == "protobuf" {
-					var result serverv1.Result
-					if err := proto.Unmarshal(request.Response.Body(), &result); err != nil || result.Code != 200 {
-						t.Fatalf("protobuf result: %v %#v", err, result)
-					}
-				} else {
-					var result struct {
-						Code int `json:"code"`
-					}
-					if err := json.Unmarshal(request.Response.Body(), &result); err != nil || result.Code != 200 {
-						t.Fatalf("JSON result: %v %s", err, request.Response.Body())
-					}
-				}
-				view, err := routingstatus.Read(context.Background(), client, 7)
-				if err != nil || !view.Known || view.Report == nil || view.Report.Applied != nil || view.Report.Error == nil || view.Report.Error.Stage != stage || view.Report.Error.Message != "candidate failed during "+stage {
-					t.Fatalf("stage report: %#v %v", view, err)
-				}
-				// An unknown stage must still fail closed on both wire formats.
-				msg.RoutingSequence = 2
-				msg.RoutingError.Stage = "untrusted-stage"
-				if wire == "protobuf" {
-					body, err = proto.Marshal(msg)
-				} else {
-					body, err = json.Marshal(map[string]any{"routing_version": 1, "routing_sequence": 2, "instance_id": msg.InstanceId, "routing_error": map[string]any{"stage": "untrusted-stage", "message": "password=do-not-store"}})
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				bad := engine.NewContext()
-				bad.Request.SetRequestURI("/v1/server/status?server_id=7&secret_key=test-secret")
-				bad.Request.Header.SetMethod("POST")
-				if wire == "protobuf" {
-					bad.Request.Header.SetContentTypeBytes([]byte(protobufContentType))
-					bad.Request.Header.Set("Accept", protobufContentType)
-				} else {
-					bad.Request.Header.SetContentTypeBytes([]byte("application/json"))
-				}
-				bad.Request.SetBody(body)
-				engine.ServeHTTP(context.Background(), bad)
-				view, err = routingstatus.Read(context.Background(), client, 7)
-				if err != nil || view.Known || strings.Contains(string(bad.Response.Body()), "password=do-not-store") {
-					t.Fatalf("unknown stage not sanitized/unknown: %#v %v", view, err)
-				}
-			})
+			t.Run(stage+"/"+wire, func(t *testing.T) { checkNodeFailureStage(t, stage, wire) })
 		}
+	}
+}
+
+func statusFailureBody(t *testing.T, wire, stage string, sequence uint64) []byte {
+	t.Helper()
+	msg := &serverv1.PushServerStatusRequest{RoutingVersion: 1, RoutingSequence: sequence, InstanceId: "11111111-1111-4111-8111-111111111111", RoutingError: &serverv1.RoutingError{Stage: stage, Message: "password=do-not-store"}}
+	var body []byte
+	var err error
+	if wire == "protobuf" {
+		body, err = proto.Marshal(msg)
+	} else {
+		body, err = json.Marshal(map[string]any{"routing_version": 1, "routing_sequence": sequence, "instance_id": msg.InstanceId, "routing_error": map[string]any{"stage": stage, "message": "password=do-not-store"}})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func stageStatusRequest(wire string, body []byte) *app.RequestContext {
+	request := app.NewContext(0)
+	request.Request.SetRequestURI("/v1/server/status?server_id=7&secret_key=test-secret")
+	request.Request.Header.SetMethod("POST")
+	if wire == "protobuf" {
+		request.Request.Header.SetContentTypeBytes([]byte(protobufContentType))
+		request.Request.Header.Set("Accept", protobufContentType)
+	} else {
+		request.Request.Header.SetContentTypeBytes([]byte("application/json"))
+	}
+	request.Request.SetBody(body)
+	return request
+}
+
+func checkNodeFailureStage(t *testing.T, stage, wire string) {
+	t.Helper()
+	mini := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close redis: %v", err)
+		}
+	})
+	svc := network.New(network.Deps{Store: badStatusStore{nodes: badStatusRepo{}}, Redis: client, Config: func() network.Snapshot { return network.Snapshot{Node: config.NodeConfig{}} }})
+	engine := hertzserver.Default(hertzserver.WithDisablePrintRoute(true))
+	engine.Use(ServerMiddleware(func() string { return "test-secret" }))
+	engine.POST("/v1/server/status", ServerPushStatusHandler(svc))
+	request := stageStatusRequest(wire, statusFailureBody(t, wire, stage, 1))
+	engine.ServeHTTP(context.Background(), request)
+	if request.Response.StatusCode() != 200 {
+		t.Fatalf("status %d", request.Response.StatusCode())
+	}
+	assertStageSuccess(t, wire, request.Response.Body())
+	view, err := routingstatus.Read(context.Background(), client, 7)
+	if err != nil || !view.Known || view.Report == nil || view.Report.Applied != nil || view.Report.Error == nil || view.Report.Error.Stage != stage || view.Report.Error.Message != "candidate failed during "+stage {
+		t.Fatalf("stage report: %#v %v", view, err)
+	}
+	bad := stageStatusRequest(wire, statusFailureBody(t, wire, "untrusted-stage", 2))
+	engine.ServeHTTP(context.Background(), bad)
+	view, err = routingstatus.Read(context.Background(), client, 7)
+	if err != nil || view.Known || strings.Contains(string(bad.Response.Body()), "password=do-not-store") {
+		t.Fatalf("unknown stage not sanitized/unknown: %#v %v", view, err)
+	}
+}
+
+func assertStageSuccess(t *testing.T, wire string, body []byte) {
+	t.Helper()
+	if wire == "protobuf" {
+		var result serverv1.Result
+		if err := proto.Unmarshal(body, &result); err != nil || result.Code != 200 {
+			t.Fatalf("protobuf result: %v %#v", err, &result)
+		}
+		return
+	}
+	var result struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil || result.Code != 200 {
+		t.Fatalf("JSON result: %v %s", err, body)
 	}
 }
 
@@ -133,7 +135,11 @@ func TestMalformedStatusInvalidatesAuthenticatedServerState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server := miniredis.RunT(t)
 			client := redis.NewClient(&redis.Options{Addr: server.Addr()})
-			t.Cleanup(func() { client.Close() })
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Errorf("close redis: %v", err)
+				}
+			})
 			svc := network.New(network.Deps{Store: badStatusStore{nodes: badStatusRepo{}}, Redis: client, Config: func() network.Snapshot { return network.Snapshot{Node: config.NodeConfig{}} }})
 			engine := hertzserver.Default(hertzserver.WithDisablePrintRoute(true))
 			engine.Use(ServerMiddleware(func() string { return "test-secret" }))

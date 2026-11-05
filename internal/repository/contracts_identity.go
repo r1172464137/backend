@@ -6,7 +6,8 @@ import (
 	"github.com/perfect-panel/server/internal/module/identity/entity/auth"
 )
 
-// AuthRepo auth 数据访问接口
+// AuthRepo manages the auth_method rows: the settings of each sign-in method
+// (email, mobile, device and the OAuth providers) administrators configure.
 type AuthRepo interface {
 	Insert(ctx context.Context, data *auth.Auth) error
 	FindOne(ctx context.Context, id int64) (*auth.Auth, error)

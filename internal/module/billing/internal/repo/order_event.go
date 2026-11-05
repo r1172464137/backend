@@ -110,8 +110,8 @@ func insertOrderEvent(conn *gorm.DB, data *order.Order, eventType string) error 
 	payload, err := json.Marshal(orderEventPayload{
 		OrderNo:           data.OrderNo,
 		StateVersion:      data.StateVersion,
-		PaymentStatus:     orderPaymentStatus(data.Status),
-		FulfillmentStatus: orderFulfillmentStatus(data.Status),
+		PaymentStatus:     order.PaymentStatusName(data.Status),
+		FulfillmentStatus: order.FulfillmentStatusName(data.Status),
 	})
 	if err != nil {
 		return err
@@ -126,39 +126,13 @@ func insertOrderEvent(conn *gorm.DB, data *order.Order, eventType string) error 
 
 func orderEventTypeForStatus(status uint8) string {
 	switch status {
-	case 2:
+	case order.StatusPaid:
 		return orderEventPaymentPaid
-	case 3:
+	case order.StatusClosed:
 		return orderEventClosed
-	case 5:
+	case order.StatusFinished:
 		return orderEventFulfilled
 	default:
 		return orderEventStateChange
-	}
-}
-
-func orderPaymentStatus(status uint8) string {
-	switch status {
-	case 2, 5:
-		return "paid"
-	case 3:
-		return "closed"
-	case 4:
-		return "failed"
-	default:
-		return "pending"
-	}
-}
-
-func orderFulfillmentStatus(status uint8) string {
-	switch status {
-	case 5:
-		return "finished"
-	case 2:
-		return "pending"
-	case 3, 4:
-		return "not_started"
-	default:
-		return "not_started"
 	}
 }

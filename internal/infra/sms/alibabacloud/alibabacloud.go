@@ -1,16 +1,29 @@
+// Package alibabacloud sends text messages through Alibaba Cloud SMS,
+// which fills a template approved on the provider's side.
 package alibabacloud
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-
-	"github.com/perfect-panel/server/pkg/logger"
+	"time"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/client"
 	dysmsapi "github.com/alibabacloud-go/dysmsapi-20170525/v2/client"
+	util "github.com/alibabacloud-go/tea-utils/service"
 	"github.com/alibabacloud-go/tea/tea"
+	"github.com/perfect-panel/server/internal/infra/integration"
 )
 
+// defaultEndpoint serves accounts whose configuration names no endpoint.
+const defaultEndpoint = "dysmsapi.ap-southeast-1.aliyuncs.com"
+
+// requestTimeout bounds the connect and the read of one call when the
+// caller's context sets no earlier deadline.
+const requestTimeout = 10 * time.Second
+
+// Config is the stored provider configuration.
 type Config struct {
 	Access       string `json:"access"`
 	Secret       string `json:"secret"`
@@ -19,58 +32,72 @@ type Config struct {
 	TemplateCode string `json:"template_code"`
 }
 
+// Client sends through one Alibaba Cloud account.
 type Client struct {
-	config *Config
+	config Config
 	client *dysmsapi.Client
 }
 
-func NewClient(config Config) *Client {
-	client, err := initApiClient(config)
-	if err != nil {
-		logger.Error("NewClient: init Alibaba Cloud Api Client failed", logger.Field("error", err.Error()))
-	}
-	return &Client{
-		config: &config,
-		client: client,
-	}
+// NewClient builds the SDK client for the account. A configuration the SDK
+// rejects is an error rather than a client that fails every send.
+func NewClient(config Config) (*Client, error) {
+	return newClient(config, "")
 }
 
-func (c *Client) SendCode(area, mobile, code string) error {
-	if c.client == nil {
-		return fmt.Errorf("alibaba cloud api client is nil")
-	}
-	jsonCode, _ := json.Marshal(map[string]interface{}{
-		"code": code,
-	})
-	sendSmsRequest := &dysmsapi.SendSmsRequest{
-		PhoneNumbers:  tea.String(fmt.Sprintf("%s%s", area, mobile)),
-		TemplateCode:  tea.String(c.config.TemplateCode),
-		SignName:      tea.String(c.config.SignName),
-		TemplateParam: tea.String(string(jsonCode)),
-	}
-	sendSmsResponse, err := c.client.SendSms(sendSmsRequest)
-	if err != nil {
-		return err
-	}
-	if *sendSmsResponse.Body.Code != "OK" {
-		return fmt.Errorf("alibaba cloud send sms failed, code: %s, message: %s", *sendSmsResponse.Body.Code, *sendSmsResponse.Body.Message)
-	}
-	return nil
-}
-
-func initApiClient(config Config) (*dysmsapi.Client, error) {
+// newClient lets tests talk plain HTTP to a local server; an empty protocol
+// keeps the SDK's HTTPS.
+func newClient(config Config, protocol string) (*Client, error) {
 	cfg := &openapi.Config{
 		AccessKeyId:     tea.String(config.Access),
 		AccessKeySecret: tea.String(config.Secret),
 		Endpoint:        tea.String(config.Endpoint),
 	}
 	if config.Endpoint == "" {
-		cfg.Endpoint = tea.String("dysmsapi.ap-southeast-1.aliyuncs.com")
+		cfg.Endpoint = tea.String(defaultEndpoint)
 	}
-	result, err := dysmsapi.NewClient(cfg)
-	return result, err
+	if protocol != "" {
+		cfg.Protocol = tea.String(protocol)
+	}
+	client, err := dysmsapi.NewClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("init Alibaba Cloud SMS client: %w", err)
+	}
+	return &Client{config: config, client: client}, nil
 }
 
-func (c *Client) GetSendCodeContent(code string) string {
-	return fmt.Sprintf("TemplateId: %s, SignName:%s, Code: %s", c.config.TemplateCode, c.config.SignName, code)
+// SendTemplate sends the template approved for the account, filled with
+// params, to the number. The SDK takes no context: a cancelled ctx stops the
+// send before it starts, and ctx's deadline caps the call's timeouts.
+func (c *Client) SendTemplate(ctx context.Context, area, mobile string, params map[string]string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	templateParam, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	timeout := requestTimeout
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < timeout {
+		timeout = time.Until(deadline)
+	}
+	milliseconds := tea.Int(int(max(timeout.Milliseconds(), 1)))
+	resp, err := c.client.SendSmsWithOptions(&dysmsapi.SendSmsRequest{
+		PhoneNumbers:  tea.String(area + mobile),
+		TemplateCode:  tea.String(c.config.TemplateCode),
+		SignName:      tea.String(c.config.SignName),
+		TemplateParam: tea.String(string(templateParam)),
+	}, &util.RuntimeOptions{ConnectTimeout: milliseconds, ReadTimeout: milliseconds})
+	if err != nil {
+		// The SDK sends the number and the template parameters, the code
+		// among them, in the query string and returns a failed round trip
+		// as is: integration.RequestError drops the URL.
+		return integration.RequestError("alibaba cloud sms", err)
+	}
+	if resp.Body == nil || resp.Body.Code == nil {
+		return errors.New("alibaba cloud send sms failed: empty response")
+	}
+	if code := *resp.Body.Code; code != "OK" {
+		return fmt.Errorf("alibaba cloud send sms failed, code: %s, message: %s", code, tea.StringValue(resp.Body.Message))
+	}
+	return nil
 }

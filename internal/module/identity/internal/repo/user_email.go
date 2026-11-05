@@ -4,23 +4,39 @@ import (
 	"context"
 	"errors"
 
-	identifier2 "github.com/perfect-panel/server/internal/auth/identifier"
+	"github.com/perfect-panel/server/internal/auth/identifier"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
+	"github.com/perfect-panel/server/pkg/xerr"
 	"gorm.io/gorm"
 )
 
-var ErrAmbiguousEmailIdentity = errors.New("ambiguous email identity")
-var ErrInvalidEmailIdentity = errors.New("invalid email identity")
+// The identity errors the repository reports. Each is returned with the
+// identity code a client receives for it, so a caller wrapping it under a
+// generic database code still reports the specific failure.
+var (
+	// ErrAmbiguousEmailIdentity reports an email address that folds onto
+	// more than one binding.
+	ErrAmbiguousEmailIdentity = errors.New("ambiguous email identity")
+	// ErrInvalidEmailIdentity reports an empty email address.
+	ErrInvalidEmailIdentity = errors.New("invalid email identity")
+	// ErrInvalidMobileIdentity reports a phone number that does not parse,
+	// so it has no E.164 form to be stored in.
+	ErrInvalidMobileIdentity = errors.New("invalid mobile identity")
+)
 
-func findUserAuthMethodByIdentifier(conn *gorm.DB, authType, identifier string) (*user.AuthMethods, error) {
-	canonicalIdentifier, err := canonicalAuthIdentifier(authType, identifier)
+func ambiguousEmail() error {
+	return xerr.Wrapf(ErrAmbiguousEmailIdentity, xerr.EmailIdentityAmbiguous, "resolve email identity")
+}
+
+func findUserAuthMethodByIdentifier(conn *gorm.DB, authType, authIdentifier string) (*user.AuthMethods, error) {
+	canonicalIdentifier, err := lookupIdentifier(authType, authIdentifier)
 	if err != nil {
 		return nil, err
 	}
 
 	var data user.AuthMethods
 	err = queryAuthMethodsByExactIdentifier(conn, authType, canonicalIdentifier).First(&data).Error
-	if authType != identifier2.Email || err == nil {
+	if authType != identifier.Email || err == nil {
 		return &data, err
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -34,28 +50,45 @@ func findUserAuthMethodByIdentifier(conn *gorm.DB, authType, identifier string) 
 	return resolveUniqueAuthMethod(methods)
 }
 
-func canonicalAuthIdentifier(authType, identifier string) (string, error) {
-	canonicalIdentifier := identifier2.CanonicalIdentifier(authType, identifier)
-	if authType == identifier2.Email && canonicalIdentifier == "" {
-		return "", ErrInvalidEmailIdentity
+// storedIdentifier normalizes an identifier being written: see
+// identifier.NormalizeIdentifier. An email address or phone number that
+// cannot be normalized is refused.
+func storedIdentifier(authType, authIdentifier string) (string, error) {
+	canonical, err := identifier.NormalizeIdentifier(authType, authIdentifier)
+	switch {
+	case err == nil:
+		return canonical, nil
+	case authType == identifier.Email:
+		return "", xerr.Wrapf(ErrInvalidEmailIdentity, xerr.InvalidParams, "normalize email identity: %v", err)
+	default:
+		return "", xerr.Wrapf(ErrInvalidMobileIdentity, xerr.TelephoneError, "normalize mobile identity: %v", err)
 	}
-	return canonicalIdentifier, nil
 }
 
-func queryAuthMethodsByExactIdentifier(conn *gorm.DB, authType, identifier string) *gorm.DB {
-	return conn.Model(&user.AuthMethods{}).Where("auth_type = ? AND auth_identifier = ?", authType, identifier)
+// lookupIdentifier normalizes an identifier being looked up. A phone number
+// that cannot be normalized cannot have been stored, so it is looked up as
+// given and simply matches nothing.
+func lookupIdentifier(authType, authIdentifier string) (string, error) {
+	if authType == identifier.Mobile {
+		return identifier.CanonicalIdentifier(authType, authIdentifier), nil
+	}
+	return storedIdentifier(authType, authIdentifier)
+}
+
+func queryAuthMethodsByExactIdentifier(conn *gorm.DB, authType, authIdentifier string) *gorm.DB {
+	return conn.Model(&user.AuthMethods{}).Where("auth_type = ? AND auth_identifier = ?", authType, authIdentifier)
 }
 
 func queryFoldedEmailAuthMethods(conn *gorm.DB, canonicalEmail string) *gorm.DB {
 	return conn.Model(&user.AuthMethods{}).
-		Where("auth_type = ? AND LOWER(TRIM(auth_identifier)) = ?", identifier2.Email, canonicalEmail).
+		Where("auth_type = ? AND LOWER(TRIM(auth_identifier)) = ?", identifier.Email, canonicalEmail).
 		Limit(2)
 }
 
 func emailIdentityCollisionQuery(conn *gorm.DB) *gorm.DB {
 	return conn.Model(&user.AuthMethods{}).
 		Select("LOWER(TRIM(auth_identifier)) AS auth_identifier").
-		Where("auth_type = ?", identifier2.Email).
+		Where("auth_type = ?", identifier.Email).
 		Group("LOWER(TRIM(auth_identifier))").
 		Having("COUNT(*) > 1").
 		Limit(1)
@@ -79,7 +112,7 @@ func hasConflictingEmailIdentity(currentID int64, methods []user.AuthMethods) bo
 }
 
 func guardEmailIdentityWrite(conn *gorm.DB, authMethod *user.AuthMethods) error {
-	if authMethod.AuthType != identifier2.Email {
+	if authMethod.AuthType != identifier.Email {
 		return nil
 	}
 
@@ -88,7 +121,7 @@ func guardEmailIdentityWrite(conn *gorm.DB, authMethod *user.AuthMethods) error 
 		return err
 	}
 	if hasConflictingEmailIdentity(authMethod.Id, methods) {
-		return ErrAmbiguousEmailIdentity
+		return ambiguousEmail()
 	}
 	return nil
 }
@@ -100,7 +133,7 @@ func resolveUniqueAuthMethod(methods []user.AuthMethods) (*user.AuthMethods, err
 	case 1:
 		return &methods[0], nil
 	default:
-		return nil, ErrAmbiguousEmailIdentity
+		return nil, ambiguousEmail()
 	}
 }
 
@@ -108,14 +141,14 @@ func (m *UserRepo) ValidateEmailIdentityUniqueness(ctx context.Context) error {
 	var collisions []struct {
 		AuthIdentifier string
 	}
-	err := m.QueryNoCacheCtx(ctx, &collisions, func(conn *gorm.DB, _ interface{}) error {
+	err := m.QueryNoCacheCtx(ctx, &collisions, func(conn *gorm.DB, _ any) error {
 		return emailIdentityCollisionQuery(conn).Find(&collisions).Error
 	})
 	if err != nil {
 		return err
 	}
 	if len(collisions) > 0 {
-		return ErrAmbiguousEmailIdentity
+		return ambiguousEmail()
 	}
 	return nil
 }

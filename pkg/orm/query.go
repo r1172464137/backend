@@ -1,7 +1,6 @@
 package orm
 
 import (
-	"fmt"
 	"strings"
 
 	"gorm.io/gorm"
@@ -20,13 +19,13 @@ func CommaSeparatedContains(field string, values []string) func(db *gorm.DB) *go
 
 // CommaSeparatedContainsCondition returns the dialect-aware SQL fragment used
 // when multiple CSV predicates must be combined in one surrounding OR query.
-func CommaSeparatedContainsCondition(db *gorm.DB, field string, values []string) (string, []interface{}) {
+func CommaSeparatedContainsCondition(db *gorm.DB, field string, values []string) (string, []any) {
 	values = removeEmpty(values)
 	if len(values) == 0 {
 		return "", nil
 	}
 	conds := make([]string, len(values))
-	args := make([]interface{}, len(values))
+	args := make([]any, len(values))
 	if db.Dialector.Name() == DriverMySQL {
 		for i, v := range values {
 			conds[i] = "FIND_IN_SET(?, " + field + ")"
@@ -49,11 +48,4 @@ func removeEmpty(values []string) []string {
 		}
 	}
 	return list
-}
-
-func TextColumnExpr(db *gorm.DB, field string) string {
-	if db.Dialector.Name() == DriverPostgres {
-		return fmt.Sprintf("CAST(%s AS TEXT)", field)
-	}
-	return fmt.Sprintf("CAST(%s AS CHAR)", field)
 }

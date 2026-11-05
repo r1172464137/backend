@@ -2,45 +2,33 @@ package plan
 
 import (
 	"context"
-
-	"github.com/perfect-panel/server/internal/repository"
-	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
+	"errors"
 
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
+	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
+	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
-type BatchDeleteSubscribeLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
+var errorIsExistActiveUser = errors.New("subscription ID belongs to a current user subscription")
 
-// Batch delete subscribe
-func newBatchDeleteSubscribeLogic(ctx context.Context, deps Deps) *BatchDeleteSubscribeLogic {
-	return &BatchDeleteSubscribeLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-var errorIsExistActiveUser = errors.New("subscription ID belongs to an active user subscription")
-
-func (l *BatchDeleteSubscribeLogic) BatchDeleteSubscribe(req *dto.BatchDeleteSubscribeRequest) error {
-	err := l.deps.Store.InSubscriptionTx(l.ctx, func(store repository.SubscriptionStore) error {
+// BatchDeleteSubscribe deletes the plans, all or none: one plan with a
+// current user subscription (see DeleteSubscribe) keeps every plan of the
+// batch.
+func (s *Service) BatchDeleteSubscribe(ctx context.Context, req *dto.BatchDeleteSubscribeRequest) error {
+	log := logger.WithContext(ctx)
+	err := s.deps.Store.InSubscriptionTx(ctx, func(store repository.SubscriptionStore) error {
 		for _, id := range req.Ids {
-			// Validate whether the subscription ID belongs to an active user subscription.
-			count, err := store.UserSubscription().CountUserSubscribesBySubscribeIdAndStatus(l.ctx, id, 1)
+			count, err := store.UserSubscription().CountUserSubscribesBySubscribeIdAndStatus(ctx, id, usersub.CurrentStatuses.Values()...)
 			if err != nil {
-				l.Logger.Error("[BatchDeleteSubscribe] Query Subscribe Error: ", logger.Field("error", err.Error()))
+				log.Error("[BatchDeleteSubscribe] Query Subscribe Error: ", logger.Field("error", err.Error()))
 				return err
 			}
 			if count > 0 {
 				return errorIsExistActiveUser
 			}
-			if err := store.Subscribe().Delete(l.ctx, id); err != nil {
+			if err := store.Subscribe().Delete(ctx, id); err != nil {
 				return err
 			}
 		}
@@ -48,10 +36,10 @@ func (l *BatchDeleteSubscribeLogic) BatchDeleteSubscribe(req *dto.BatchDeleteSub
 	})
 	if err != nil {
 		if errors.Is(err, errorIsExistActiveUser) {
-			return errors.Wrapf(xerr.NewErrCode(xerr.SubscribeIsUsedError), "subscription ID belongs to an active user subscription")
+			return xerr.Errorf(xerr.SubscribeIsUsedError, "subscription ID belongs to an active user subscription")
 		}
-		l.Logger.Error("[BatchDeleteSubscribe] Transaction Error: ", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseDeletedError), "delete subscribe failed: %v", err.Error())
+		log.Error("[BatchDeleteSubscribe] Transaction Error: ", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseDeletedError, "delete subscribe failed: %v", err.Error())
 	}
 	return nil
 }

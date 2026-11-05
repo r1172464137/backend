@@ -9,7 +9,7 @@ import (
 	"github.com/perfect-panel/server/internal/module/support/entity/ticket"
 )
 
-// TicketRepo ticket 数据访问接口
+// TicketRepo manages the support tickets and their follow-up messages.
 type TicketRepo interface {
 	Insert(ctx context.Context, data *ticket.Ticket) error
 	FindOne(ctx context.Context, id int64) (*ticket.Ticket, error)
@@ -22,7 +22,7 @@ type TicketRepo interface {
 	QueryWaitReplyTotal(ctx context.Context) (int64, error)
 }
 
-// AnnouncementRepo announcement 数据访问接口
+// AnnouncementRepo manages the announcements shown to users.
 type AnnouncementRepo interface {
 	Insert(ctx context.Context, data *announcement.Announcement) error
 	FindOne(ctx context.Context, id int64) (*announcement.Announcement, error)
@@ -31,7 +31,7 @@ type AnnouncementRepo interface {
 	GetAnnouncementListByPage(ctx context.Context, page, size int, filter announcement.Filter) (int64, []*announcement.Announcement, error)
 }
 
-// AdsRepo ads 数据访问接口
+// AdsRepo manages the advertisements the clients display.
 type AdsRepo interface {
 	Insert(ctx context.Context, data *ads.Ads) error
 	FindOne(ctx context.Context, id int64) (*ads.Ads, error)
@@ -40,7 +40,7 @@ type AdsRepo interface {
 	GetAdsListByPage(ctx context.Context, page, size int, filter ads.Filter) (int64, []*ads.Ads, error)
 }
 
-// DocumentRepo document 数据访问接口
+// DocumentRepo manages the help documents users browse.
 type DocumentRepo interface {
 	Insert(ctx context.Context, data *document.Document) error
 	FindOne(ctx context.Context, id int64) (*document.Document, error)

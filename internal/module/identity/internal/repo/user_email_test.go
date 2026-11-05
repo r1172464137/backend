@@ -5,8 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	identifier2 "github.com/perfect-panel/server/internal/auth/identifier"
+	authid "github.com/perfect-panel/server/internal/auth/identifier"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
+	"github.com/perfect-panel/server/pkg/xerr"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -41,7 +42,7 @@ func TestQueryAuthMethodsByExactIdentifierEmailUsesCanonicalInput(t *testing.T) 
 			}
 
 			var methods []user.AuthMethods
-			stmt := queryAuthMethodsByExactIdentifier(db, identifier2.Email, "alice@example.com").Find(&methods).Statement
+			stmt := queryAuthMethodsByExactIdentifier(db, authid.Email, "alice@example.com").Find(&methods).Statement
 			sql := stmt.SQL.String()
 			if !strings.Contains(sql, "auth_identifier =") || strings.Contains(sql, "LOWER(") || strings.Contains(sql, "TRIM(") {
 				t.Fatalf("email exact query must remain indexed:\n%s", sql)
@@ -151,18 +152,34 @@ func TestEmailIdentityCollisionQuery(t *testing.T) {
 	}
 }
 
-func TestCanonicalAuthIdentifierRejectsEmptyEmail(t *testing.T) {
-	identifier, err := canonicalAuthIdentifier(identifier2.Email, " \t ")
-	if !errors.Is(err, ErrInvalidEmailIdentity) {
-		t.Fatalf("empty email error = %v, want %v", err, ErrInvalidEmailIdentity)
+func TestStoredIdentifierRejectsEmptyEmail(t *testing.T) {
+	canonical, err := storedIdentifier(authid.Email, " \t ")
+	if !errors.Is(err, ErrInvalidEmailIdentity) || xerr.CodeOf(err) != xerr.InvalidParams {
+		t.Fatalf("empty email error = %v, want %v reported as InvalidParams", err, ErrInvalidEmailIdentity)
 	}
-	if identifier != "" {
-		t.Fatalf("empty email identifier = %q, want empty", identifier)
+	if canonical != "" {
+		t.Fatalf("empty email identifier = %q, want empty", canonical)
 	}
 
-	identifier, err = canonicalAuthIdentifier("google", " OAuth-AbC ")
-	if err != nil || identifier != " OAuth-AbC " {
-		t.Fatalf("non-email identifier = %q, %v", identifier, err)
+	canonical, err = storedIdentifier("google", " OAuth-AbC ")
+	if err != nil || canonical != " OAuth-AbC " {
+		t.Fatalf("non-email identifier = %q, %v", canonical, err)
+	}
+}
+
+// Phone numbers are stored in E.164 whatever form the caller used; a number
+// that does not parse is refused on write but merely matches nothing on
+// lookup.
+func TestMobileIdentifiersAreStoredInE164(t *testing.T) {
+	canonical, err := storedIdentifier(authid.Mobile, "86-13800138000")
+	if err != nil || canonical != "+8613800138000" {
+		t.Fatalf("stored mobile = %q, %v; want +8613800138000", canonical, err)
+	}
+	if _, err := storedIdentifier(authid.Mobile, "not a number"); !errors.Is(err, ErrInvalidMobileIdentity) || xerr.CodeOf(err) != xerr.TelephoneError {
+		t.Fatalf("unparsable mobile error = %v, want %v reported as TelephoneError", err, ErrInvalidMobileIdentity)
+	}
+	if looked, err := lookupIdentifier(authid.Mobile, "not a number"); err != nil || looked != "not a number" {
+		t.Fatalf("lookup of an unparsable mobile = %q, %v; want it as given", looked, err)
 	}
 }
 

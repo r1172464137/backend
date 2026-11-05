@@ -16,10 +16,12 @@ type InvalidationQueue struct {
 	keys map[string]struct{}
 }
 
+// NewInvalidationQueue returns an empty queue.
 func NewInvalidationQueue() *InvalidationQueue {
 	return &InvalidationQueue{keys: make(map[string]struct{})}
 }
 
+// Add queues keys; empty keys are ignored.
 func (q *InvalidationQueue) Add(keys ...string) {
 	if q == nil {
 		return
@@ -33,6 +35,8 @@ func (q *InvalidationQueue) Add(keys ...string) {
 	}
 }
 
+// Flush invalidates the queued keys through client. The keys stay queued
+// when it fails, so the caller can hand them to an InvalidationRetrier.
 func (q *InvalidationQueue) Flush(ctx context.Context, client *redis.Client) error {
 	if q == nil || client == nil {
 		return nil
@@ -84,6 +88,7 @@ type InvalidationRetrier struct {
 	running  bool
 }
 
+// NewInvalidationRetrier returns a retrier that invalidates through client.
 func NewInvalidationRetrier(client *redis.Client) *InvalidationRetrier {
 	return &InvalidationRetrier{
 		client: client,
@@ -91,6 +96,8 @@ func NewInvalidationRetrier(client *redis.Client) *InvalidationRetrier {
 	}
 }
 
+// Enqueue schedules keys for invalidation and starts the worker unless it is
+// running; it does not wait for Redis.
 func (r *InvalidationRetrier) Enqueue(keys ...string) {
 	if r == nil {
 		return
@@ -125,6 +132,9 @@ func (r *InvalidationRetrier) run() {
 			r.mu.Unlock()
 			continue
 		}
+		// The worker outlives the transactions whose keys it retries and
+		// serves many of them at once, so no caller's context applies; each
+		// attempt gets its own deadline instead.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		keys := make([]string, 0, len(pending))
 		for key := range pending {

@@ -1,13 +1,15 @@
-// Service assembly for the admin-side authentication-method subdomain of the
-// identity module: method configuration, sender platforms and test sends.
-// Only the module facade may reach it.
+// Package authmethodadmin implements the admin-side authentication-method
+// subdomain of the identity module: method configuration, sender platforms
+// and test sends. Only the module facade may reach it.
 package authmethodadmin
 
 import (
-	"context"
+	"encoding/json"
 
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
+	"github.com/perfect-panel/server/internal/module/identity/entity/auth"
 	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
 // Snapshot is the per-request view of the runtime-mutable sender platform
@@ -26,9 +28,9 @@ type Deps struct {
 	Auths repository.AuthRepo
 	// Config snapshots the runtime-mutable sender settings per request.
 	Config func() Snapshot
-	// Reinitialize re-runs a sender subsystem's initialization after its
-	// configuration changed ("email", "mobile" or "device").
-	Reinitialize func(subsystem string)
+	// Reinitialize re-runs a runtime subsystem's initialization after its
+	// configuration changed ("email", "mobile", "device" or "telegram").
+	Reinitialize func(subsystem string) error
 }
 
 // Service is the auth-method administration entry point used by the identity
@@ -37,34 +39,25 @@ type Service struct {
 	deps Deps
 }
 
+// NewService builds the subdomain over the dependencies the facade forwards.
 func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
 }
 
-func (s *Service) GetAuthMethodList(ctx context.Context) (*dto.GetAuthMethodListResponse, error) {
-	return newGetAuthMethodListLogic(ctx, s.deps).GetAuthMethodList()
-}
-
-func (s *Service) GetAuthMethodConfig(ctx context.Context, req *dto.GetAuthMethodConfigRequest) (*dto.AuthMethodConfig, error) {
-	return newGetAuthMethodConfigLogic(ctx, s.deps).GetAuthMethodConfig(req)
-}
-
-func (s *Service) UpdateAuthMethodConfig(ctx context.Context, req *dto.UpdateAuthMethodConfigRequest) (*dto.AuthMethodConfig, error) {
-	return newUpdateAuthMethodConfigLogic(ctx, s.deps).UpdateAuthMethodConfig(req)
-}
-
-func (s *Service) GetEmailPlatform(ctx context.Context) (*dto.AuthPlatformResponse, error) {
-	return newGetEmailPlatformLogic(ctx, s.deps).GetEmailPlatform()
-}
-
-func (s *Service) GetSmsPlatform(ctx context.Context) (*dto.AuthPlatformResponse, error) {
-	return newGetSmsPlatformLogic(ctx, s.deps).GetSmsPlatform()
-}
-
-func (s *Service) TestEmailSend(ctx context.Context, req *dto.TestEmailSendRequest) error {
-	return newTestEmailSendLogic(ctx, s.deps).TestEmailSend(req)
-}
-
-func (s *Service) TestSmsSend(ctx context.Context, req *dto.TestSmsSendRequest) error {
-	return newTestSmsSendLogic(ctx, s.deps).TestSmsSend(req)
+// methodConfig is the admin view of a stored method, its configuration
+// decoded from the stored JSON. A method without a stored configuration
+// shows it as the empty string.
+func methodConfig(method *auth.Auth) (*dto.AuthMethodConfig, error) {
+	view := &dto.AuthMethodConfig{
+		Id:      method.Id,
+		Method:  method.Method,
+		Config:  method.Config,
+		Enabled: method.Enabled != nil && *method.Enabled,
+	}
+	if method.Config != "" {
+		if err := json.Unmarshal([]byte(method.Config), &view.Config); err != nil {
+			return nil, xerr.Wrapf(err, xerr.ERROR, "decode stored %s config", method.Method)
+		}
+	}
+	return view, nil
 }

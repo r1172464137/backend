@@ -2,81 +2,50 @@ package adminuser
 
 import (
 	"context"
-	"strings"
 
-	"github.com/perfect-panel/server/internal/module/network/entity/node"
-	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/slicesx"
 )
 
-// clearDeletedUserAccessCaches makes account deletion effective immediately
-// for subscription tokens and the node-facing credential list. The database
-// rows remain untouched; normal account-state checks remain authoritative.
-func (l *DeleteUserLogic) clearDeletedUserAccessCaches(userIDs []int64) {
-	clearUserAccessCaches(l.ctx, l.deps, userIDs)
+// SubscriptionCaches is the subscription module's cache invalidation for
+// accounts whose access ended (the subscription facade).
+type SubscriptionCaches interface {
+	// ClearUserSubscriptionCaches drops the cached subscriptions of the
+	// users and returns the node scope of their plans.
+	ClearUserSubscriptionCaches(ctx context.Context, userIDs []int64) (nodeIDs []int64, tags []string, err error)
 }
 
-func (l *BatchDeleteUserLogic) clearDeletedUserAccessCaches(userIDs []int64) {
-	clearUserAccessCaches(l.ctx, l.deps, userIDs)
+// ServerCaches is the network module's invalidation of the node-facing
+// server caches (the network facade).
+type ServerCaches interface {
+	// ClearServerCachesByNodeScope drops the caches of every server
+	// carrying a node the scope selects.
+	ClearServerCachesByNodeScope(ctx context.Context, nodeIDs []int64, tags []string) error
 }
 
+// clearUserAccessCaches drops, best effort, the caches that keep serving the
+// accounts, so a deletion or a disabling takes effect at once for
+// subscription tokens and the node-facing credential lists: the subscription
+// module clears their subscription entries and reports the node scope of
+// their plans, and the network module then clears the server caches of that
+// whole scope at once. The database rows are left alone; the account-state
+// checks stay authoritative. Failures are logged; the caches expire on their
+// own.
 func clearUserAccessCaches(ctx context.Context, deps Deps, userIDs []int64) {
-	if deps.UserSubs == nil || deps.Cache == nil || deps.Store == nil {
+	if deps.SubscriptionCaches == nil || deps.ServerCaches == nil {
 		return
 	}
 	log := logger.WithContext(ctx)
-	serverIDs := make(map[int64]struct{})
-	for _, userID := range slicesx.RemoveDuplicateElements(userIDs...) {
-		details, err := deps.UserSubs.QueryUserSubscribe(ctx, userID)
-		if err != nil {
-			log.Errorw("query subscriptions while deleting user", logger.Field("user_id", userID), logger.Field("error", err.Error()))
-			continue
-		}
-		subs := make([]*usersub.Subscribe, 0, len(details))
-		for _, item := range details {
-			if item == nil {
-				continue
-			}
-			subs = append(subs, &usersub.Subscribe{Id: item.Id, UserId: item.UserId, Token: item.Token, SubscribeId: item.SubscribeId})
-			if item.Subscribe != nil {
-				collectPlanServerIDs(ctx, deps, item.Subscribe.Nodes, item.Subscribe.NodeTags, serverIDs)
-			}
-		}
-		if err := deps.Cache.ClearSubscribeCache(ctx, subs...); err != nil {
-			log.Errorw("clear deleted user subscription cache", logger.Field("user_id", userID), logger.Field("error", err.Error()))
-		}
+	userIDs = slicesx.RemoveDuplicateElements(userIDs...)
+	nodeIDs, tags, err := deps.SubscriptionCaches.ClearUserSubscriptionCaches(ctx, userIDs)
+	if err != nil {
+		log.Errorw("clear the subscription caches of users whose access ended", logger.Field("user_ids", userIDs), logger.Field("error", err.Error()))
+		return
 	}
-	for serverID := range serverIDs {
-		if err := deps.Store.Node().ClearServerCache(ctx, serverID); err != nil {
-			log.Errorw("clear deleted user node cache", logger.Field("server_id", serverID), logger.Field("error", err.Error()))
-		}
+	if len(nodeIDs) == 0 && len(tags) == 0 {
+		return
 	}
-}
-
-func collectPlanServerIDs(ctx context.Context, deps Deps, nodes, tags string, serverIDs map[int64]struct{}) {
-	queries := make([]*node.FilterNodeParams, 0, 2)
-	if value := strings.TrimSpace(nodes); value != "" {
-		queries = append(queries, &node.FilterNodeParams{
-			Page: 1, Size: 9999,
-			NodeId: slicesx.StringSliceToInt64Slice(strings.Split(value, ",")),
-		})
-	}
-	if value := strings.TrimSpace(tags); value != "" {
-		queries = append(queries, &node.FilterNodeParams{
-			Page: 1, Size: 9999, Tag: strings.Split(value, ","),
-		})
-	}
-	for _, filter := range queries {
-		_, list, err := deps.Store.Node().FilterNodeList(ctx, filter)
-		if err != nil {
-			logger.WithContext(ctx).Errorw("resolve node caches while deleting user", logger.Field("error", err.Error()))
-			continue
-		}
-		for _, item := range list {
-			if item != nil && item.ServerId != 0 {
-				serverIDs[item.ServerId] = struct{}{}
-			}
-		}
+	if err := deps.ServerCaches.ClearServerCachesByNodeScope(ctx, nodeIDs, tags); err != nil {
+		log.Errorw("clear the node caches of users whose access ended", logger.Field("user_ids", userIDs), logger.Field("error", err.Error()))
 	}
 }

@@ -1,7 +1,7 @@
-// Package platform is the facade of the platform module (shared-kernel
-// concerns: audit/message logs and their retention settings; system
-// configuration joins as migration proceeds). See
-// docs/design/adr-001-modular-monolith.md.
+// Package platform is the facade of the platform module, the shared kernel:
+// audit and message logs with their retention settings, the system settings,
+// the admin console dashboard and tools, and the unauthenticated site-level
+// reads of the public portal. See docs/design/adr-001-modular-monolith.md.
 package platform
 
 import (
@@ -13,10 +13,11 @@ import (
 	"github.com/perfect-panel/server/internal/module/platform/internal/auditlog"
 	"github.com/perfect-panel/server/internal/module/platform/internal/dashboard"
 	"github.com/perfect-panel/server/internal/module/platform/internal/publicinfo"
+	"github.com/perfect-panel/server/internal/module/platform/internal/readmodel"
 	"github.com/perfect-panel/server/internal/module/platform/internal/repo"
 	"github.com/perfect-panel/server/internal/module/platform/internal/systemsetting"
 	"github.com/perfect-panel/server/internal/module/platform/internal/tool"
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -40,7 +41,15 @@ type Service interface {
 	// UpdateLogSetting persists the retention settings and propagates them to
 	// the running configuration.
 	UpdateLogSetting(ctx context.Context, req *dto.LogSetting) error
+	// CleanupLogs applies the log retention settings to the system log and
+	// the network's raw traffic log.
+	CleanupLogs(ctx context.Context) error
 	GetMessageLogList(ctx context.Context, req *dto.GetMessageLogListRequest) (*dto.GetMessageLogListResponse, error)
+	// FilterAdminActionLog pages the administrators' audit trail.
+	FilterAdminActionLog(ctx context.Context, req *dto.FilterAdminActionLogRequest) (*dto.FilterAdminActionLogResponse, error)
+	// FilterUnmatchedPaymentLog pages the gateway payments that could not
+	// settle an order.
+	FilterUnmatchedPaymentLog(ctx context.Context, req *dto.FilterUnmatchedPaymentLogRequest) (*dto.FilterUnmatchedPaymentLogResponse, error)
 
 	// System configuration management; updates persist the settings and
 	// re-initialize the owning subsystem through injected callbacks.
@@ -98,32 +107,85 @@ type Service interface {
 // view of the public runtime configuration for the composition root.
 type GlobalConfigSnapshot = publicinfo.GlobalConfigSnapshot
 
+// TrafficLogPruner re-exports the audit-log subdomain's port onto the network
+// domain's raw traffic log; the composition root adapts the network facade.
+type TrafficLogPruner = auditlog.TrafficLogPruner
+
+// ClientApplication and ClientApplicationLister re-export the public-info
+// subdomain's port onto the subscription module's client applications; the
+// composition root adapts the subscription facade to it.
+type (
+	ClientApplication       = publicinfo.ClientApplication
+	ClientApplicationLister = publicinfo.ClientApplicationLister
+)
+
+// The platform's read models of the other modules' data. The shared kernel
+// depends on no module, so the composition root converts the owning modules'
+// facade results into these.
+type (
+	OrdersTotal             = readmodel.OrdersTotal
+	OrdersTotalWithDate     = readmodel.OrdersTotalWithDate
+	UserStatisticsWithDate  = readmodel.UserStatisticsWithDate
+	Server                  = readmodel.Server
+	TotalTraffic            = readmodel.TotalTraffic
+	ServerTrafficRanking    = readmodel.ServerTrafficRanking
+	UserTrafficRanking      = readmodel.UserTrafficRanking
+	TrafficLogDetailsFilter = readmodel.TrafficLogDetailsFilter
+	TrafficLog              = readmodel.TrafficLog
+	AuthMethod              = readmodel.AuthMethod
+)
+
+// The read ports onto the other domains, typed with the read models above:
+// OrderReader onto billing, UserReader onto identity, TicketReader onto
+// support, NodeReader and TrafficReader onto network. They serve the
+// dashboard, the audit views and the public statistics.
+type (
+	OrderReader  = dashboard.OrderStatsReader
+	TicketReader = dashboard.TicketStatsReader
+
+	UserReader interface {
+		dashboard.UserStatsReader
+		publicinfo.AccountStats
+	}
+	NodeReader interface {
+		dashboard.NodeStatsReader
+		publicinfo.NodeStats
+	}
+	TrafficReader interface {
+		dashboard.TrafficStatsReader
+		auditlog.TrafficReader
+	}
+)
+
 // Deps declares everything the module needs; the composition root
 // (internal/app) provides them.
 type Deps struct {
-	Logs    repository.LogRepo
-	System  repository.SystemRepo
-	Traffic auditlog.TrafficReader
+	Logs    kernel.LogRepo
+	System  kernel.SystemRepo
+	Traffic TrafficReader
 	Store   auditlog.PlatformTransactor
 	// OnLogSettingChanged propagates a committed retention change to the
 	// running configuration.
 	OnLogSettingChanged func(autoClear bool, clearDays int64)
 	// LogRetention reads the current (mutable) retention configuration.
 	LogRetention func() (autoClear bool, clearDays int64)
+	// TrafficRetention prunes the network's raw traffic log with the system
+	// log when the retention settings ask for it.
+	TrafficRetention TrafficLogPruner
 
 	// System-setting dependencies (see internal/systemsetting).
-	Reinitialize      func(subsystem string)
-	Restart           func() error
-	SubscribePath     func() string
-	ApplyVerifyConfig func(req *dto.VerifyConfig)
-	Multiplier        systemsetting.MultiplierFunc
-	RoutingUsers      repository.UserRepo
+	Reinitialize  func(subsystem string) error
+	Restart       func() error
+	SubscribePath func() string
+	Multiplier    systemsetting.MultiplierFunc
+	RoutingUsers  config.RoutingAccountLookup
 
-	// Dashboard read ports and cache.
-	Orders  dashboard.OrderStatsReader
-	Users   dashboard.UserStatsReader
-	Tickets dashboard.TicketStatsReader
-	Nodes   dashboard.NodeStatsReader
+	// Dashboard and public-info read ports onto the other domains, and the
+	// dashboard's cache.
+	Orders  OrderReader
+	Users   UserReader
+	Tickets TicketReader
+	Nodes   NodeReader
 	Cache   dashboard.Cache
 
 	// Public-info dependencies: the full read surface, the shared Redis
@@ -131,39 +193,42 @@ type Deps struct {
 	PublicStore  Store
 	Redis        *redis.Client
 	PublicConfig func() GlobalConfigSnapshot
+	// Clients lists the client applications of the public download page
+	// (the subscription facade).
+	Clients ClientApplicationLister
 
-	// Tool dependencies: the logger output path and the GeoIP reader.
+	// Tool dependencies: the logger output path and the GeoIP reader, which
+	// the public statistics also locate the nodes with.
 	LogPath string
 	GeoIP   func() *geoip2.Reader
 }
 
 // NewRepoBuilder exports the module-owned repository implementations for
 // store assembly (ADR-001 step-6 preparation).
-func NewRepoBuilder() repository.PlatformBuilder {
-	return func(c repository.ModuleConn) repository.PlatformRepos {
+func NewRepoBuilder() kernel.PlatformBuilder {
+	return func(c kernel.ModuleConn) kernel.PlatformRepos {
 		conn := c.Conn()
-		return repository.PlatformRepos{
+		return kernel.PlatformRepos{
 			System: repo.NewSystemRepo(conn),
 			Logs:   repo.NewLogRepo(c.DB),
 			Tasks:  repo.NewTaskRepo(c.DB),
-			Client: repo.NewClientRepo(conn),
 			Inbox:  repo.NewInboxRepo(c.DB),
 			Outbox: repo.NewOutboxRepo(c.DB),
 		}
 	}
 }
 
+// New builds the platform module from its dependencies.
 func New(deps Deps) Service {
 	return &service{
 		settings: systemsetting.NewService(systemsetting.Deps{
-			System:            deps.System,
-			Store:             deps.Store,
-			Reinitialize:      deps.Reinitialize,
-			Restart:           deps.Restart,
-			SubscribePath:     deps.SubscribePath,
-			ApplyVerifyConfig: deps.ApplyVerifyConfig,
-			Multiplier:        deps.Multiplier,
-			RoutingUsers:      deps.RoutingUsers,
+			System:        deps.System,
+			Store:         systemsetting.NewSettingsTransactor(deps.Store),
+			Reinitialize:  deps.Reinitialize,
+			Restart:       deps.Restart,
+			SubscribePath: deps.SubscribePath,
+			Multiplier:    deps.Multiplier,
+			RoutingUsers:  deps.RoutingUsers,
 		}),
 		dashboard: dashboard.NewService(dashboard.Deps{
 			Orders:  deps.Orders,
@@ -180,9 +245,14 @@ func New(deps Deps) Service {
 			Restart: deps.Restart,
 		}),
 		public: publicinfo.NewService(publicinfo.Deps{
-			Store:  deps.PublicStore,
-			Redis:  deps.Redis,
-			Config: deps.PublicConfig,
+			Settings: publicSettings(deps.PublicStore),
+			Accounts: deps.Users,
+			Nodes:    deps.Nodes,
+			Redis:    deps.Redis,
+			Config:   deps.PublicConfig,
+			GeoIP:    deps.GeoIP,
+			// The subscription module's client applications.
+			Clients: deps.Clients,
 		}),
 		logs: auditlog.NewService(auditlog.Deps{
 			Logs:                deps.Logs,
@@ -191,6 +261,7 @@ func New(deps Deps) Service {
 			Store:               deps.Store,
 			OnLogSettingChanged: deps.OnLogSettingChanged,
 			LogRetention:        deps.LogRetention,
+			TrafficRetention:    deps.TrafficRetention,
 		}),
 	}
 }
@@ -275,6 +346,14 @@ func (s *service) UpdateInterfaceConfig(ctx context.Context, req *dto.InterfaceC
 	return s.settings.UpdateInterfaceConfig(ctx, req)
 }
 
+func (s *service) FilterAdminActionLog(ctx context.Context, req *dto.FilterAdminActionLogRequest) (*dto.FilterAdminActionLogResponse, error) {
+	return s.logs.FilterAdminActionLog(ctx, req)
+}
+
+func (s *service) FilterUnmatchedPaymentLog(ctx context.Context, req *dto.FilterUnmatchedPaymentLogRequest) (*dto.FilterUnmatchedPaymentLogResponse, error) {
+	return s.logs.FilterUnmatchedPaymentLog(ctx, req)
+}
+
 func (s *service) GetCurrencyConfig(ctx context.Context) (*dto.CurrencyConfig, error) {
 	return s.settings.GetCurrencyConfig(ctx)
 }
@@ -292,7 +371,7 @@ func (s *service) ReadNodeConfigSnapshot(ctx context.Context) (config.NodeConfig
 }
 
 // ReadNodeConfigSnapshotFromRepo reads through the caller's transaction.
-func ReadNodeConfigSnapshotFromRepo(ctx context.Context, repo repository.SystemRepo) (config.NodeConfig, error) {
+func ReadNodeConfigSnapshotFromRepo(ctx context.Context, repo kernel.SystemRepo) (config.NodeConfig, error) {
 	return systemsetting.ReadNodeConfigSnapshotFromRepo(ctx, repo)
 }
 
@@ -436,8 +515,21 @@ func (s *service) RestartSystem(ctx context.Context) error {
 	return s.tools.RestartSystem(ctx)
 }
 
-// Store is the persistence capability required by this package. It excludes
-// unrelated repositories and application-wide transactions.
+// Store is the persistence the public-info reads need: the system settings.
+// It excludes unrelated repositories and application-wide transactions.
 type Store interface {
-	publicinfo.Store
+	System() kernel.SystemRepo
+}
+
+// publicSettings reads the public settings from the store's system settings.
+// A facade built without a store, as the route tests build it, has none.
+func publicSettings(store Store) publicinfo.SettingsReader {
+	if store == nil {
+		return nil
+	}
+	return store.System()
+}
+
+func (s *service) CleanupLogs(ctx context.Context) error {
+	return s.logs.CleanupLogs(ctx)
 }

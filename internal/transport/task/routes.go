@@ -16,6 +16,8 @@ import (
 	"github.com/perfect-panel/server/internal/transport/task/traffic"
 )
 
+// Dependencies are what the task handlers are built from; the composition
+// root provides them.
 type Dependencies struct {
 	Email        email.Dependencies
 	SMS          sms.Dependencies
@@ -23,66 +25,49 @@ type Dependencies struct {
 	EventBus     *eventbus.Bus
 	Traffic      traffic.Dependencies
 	Subscription moduleSubscription.Service
-	Store        repository.Store
+	// Tasks and System are the platform kernel's scheduled-task bookkeeping
+	// and system settings.
+	Tasks        repository.TaskRepo
+	System       repository.SystemRepo
 	ExchangeRate *billing.CurrencyRateCache
+	// Bootstrapped fires once the runtime settings the handlers read are
+	// loaded; the worker consumes only after it.
+	Bootstrapped Readiness
 }
 
+// RegisterHandlers binds every task type to its handler.
 func RegisterHandlers(mux *asynq.ServeMux, deps Dependencies) {
-	var taskRepo repository.TaskRepo
-	if deps.Store != nil {
-		taskRepo = deps.Store.Task()
-	}
-	// Send email task
-	mux.Handle(taskqueue.ForthwithSendEmail, email.NewSendEmailLogic(deps.Email))
-	// Send sms task
-	mux.Handle(taskqueue.ForthwithSendSms, sms.NewSendSmsLogic(deps.SMS))
-	// Defer close order task
-	mux.Handle(taskqueue.DeferCloseOrder, order.NewDeferCloseOrderLogic(deps.Order))
-	// Forthwith activate order task
-	mux.Handle(taskqueue.ForthwithActivateOrder, order.NewActivateOrderLogic(deps.Order.Billing))
+	mux.Handle(taskqueue.ForthwithSendEmail, email.NewSendEmailHandler(deps.Email))
+	mux.Handle(taskqueue.ForthwithSendSms, sms.NewSendSmsHandler(deps.SMS))
+	mux.Handle(taskqueue.DeferCloseOrder, order.NewDeferCloseOrderHandler(deps.Order))
+	mux.Handle(taskqueue.ForthwithActivateOrder, order.NewActivateOrderHandler(deps.Order.Billing))
 	// Recover paid orders whose activation enqueue was interrupted.
-	mux.Handle(taskqueue.SchedulerReconcilePaidOrders, order.NewReconcilePaidOrdersLogic(deps.Order))
+	mux.Handle(taskqueue.SchedulerReconcilePaidOrders, order.NewReconcilePaidOrdersHandler(deps.Order))
 	// Close stale pending orders even when their one-shot deferred task was
 	// lost during a Redis outage or exhausted its retries.
-	mux.Handle(taskqueue.SchedulerReconcilePendingOrders, order.NewReconcilePendingOrdersLogic(deps.Order))
+	mux.Handle(taskqueue.SchedulerReconcilePendingOrders, order.NewReconcilePendingOrdersHandler(deps.Order))
 	// Deliver durable order events to Redis Pub/Sub. The database remains the
 	// source of truth for SSE replay when publication is delayed or duplicated.
-	mux.Handle(taskqueue.SchedulerPublishOrderEvents, order.NewPublishOrderEventsLogic(deps.Order))
+	mux.Handle(taskqueue.SchedulerPublishOrderEvents, order.NewPublishOrderEventsHandler(deps.Order))
 	// Domain events: the pump publishes outbox rows onto the queue; the
 	// delivery worker runs the topic's subscribers per event.
-	mux.Handle(taskqueue.SchedulerDispatchDomainEvents, events.NewDispatchDomainEventsLogic(deps.EventBus))
-	mux.Handle(taskqueue.EventDeliver, events.NewDeliverDomainEventLogic(deps.EventBus))
-	mux.Handle(taskqueue.SchedulerCleanupOrderEvents, order.NewCleanupOrderEventsLogic(deps.Order))
+	mux.Handle(taskqueue.SchedulerDispatchDomainEvents, events.NewDispatchDomainEventsHandler(deps.EventBus))
+	mux.Handle(taskqueue.EventDeliver, events.NewDeliverDomainEventHandler(deps.EventBus))
+	mux.Handle(taskqueue.SchedulerCleanupOrderEvents, order.NewCleanupOrderEventsHandler(deps.Order))
 	// Daily settlement summary for administrators bound on Telegram.
-	mux.Handle(taskqueue.SchedulerDailyOrderReport, order.NewDailyOrderReportLogic(deps.Order))
+	mux.Handle(taskqueue.SchedulerDailyOrderReport, order.NewDailyOrderReportHandler(deps.Order))
 
-	// Forthwith traffic statistics
-	mux.Handle(taskqueue.ForthwithTrafficStatistics, traffic.NewTrafficStatisticsLogic(deps.Traffic))
-	// Flush aggregated traffic
-	mux.Handle(taskqueue.SchedulerFlushTraffic, traffic.NewFlushTrafficLogic(deps.Traffic))
-
-	// Schedule check subscription
-	mux.Handle(taskqueue.SchedulerCheckSubscription, subscription.NewCheckSubscriptionLogic(deps.Subscription))
+	mux.Handle(taskqueue.SchedulerFlushTraffic, traffic.NewFlushTrafficHandler(deps.Traffic))
+	mux.Handle(taskqueue.SchedulerCheckSubscription, subscription.NewCheckSubscriptionHandler(deps.Subscription, deps.Traffic.Redis))
 	// Warn owners before their subscription expires.
-	mux.Handle(taskqueue.SchedulerRemindExpiringSubscriptions, subscription.NewRemindExpiringLogic(deps.Subscription))
+	mux.Handle(taskqueue.SchedulerRemindExpiringSubscriptions, subscription.NewRemindExpiringHandler(deps.Subscription))
+	mux.Handle(taskqueue.SchedulerResetTraffic, traffic.NewResetTrafficHandler(deps.Subscription, deps.Traffic.Redis))
+	mux.Handle(taskqueue.ScheduledBatchSendEmail, email.NewBatchEmailHandler(deps.Email))
+	mux.Handle(taskqueue.SchedulerTrafficStat, traffic.NewStatHandler(deps.Traffic.Statistics))
+	// The log cleanup is independent from traffic aggregation so either task
+	// can retry without suppressing the other.
+	mux.Handle(taskqueue.SchedulerLogCleanup, traffic.NewLogCleanupHandler(deps.Traffic.Logs))
 
-	// Schedule total server data
-	mux.Handle(taskqueue.SchedulerTotalServerData, traffic.NewServerDataLogic(deps.Traffic))
-
-	// Schedule reset traffic
-	mux.Handle(taskqueue.SchedulerResetTraffic, traffic.NewResetTrafficLogic(deps.Traffic))
-
-	// ScheduledBatchSendEmail
-	mux.Handle(taskqueue.ScheduledBatchSendEmail, email.NewBatchEmailLogic(deps.Email))
-
-	// ScheduledTrafficStat
-	mux.Handle(taskqueue.SchedulerTrafficStat, traffic.NewStatLogic(deps.Traffic))
-	// ScheduledLogCleanup is independent from traffic aggregation so either
-	// task can retry without suppressing the other.
-	mux.Handle(taskqueue.SchedulerLogCleanup, traffic.NewLogCleanupLogic(deps.Traffic.Store, deps.Traffic.Log))
-
-	// ForthwithQuotaTask
-	mux.Handle(taskqueue.ForthwithQuotaTask, maintenance.NewQuotaTaskLogic(deps.Subscription, taskRepo))
-	// SchedulerExchangeRate
-	mux.Handle(taskqueue.SchedulerExchangeRate, maintenance.NewRateLogic(maintenance.RateDependencies{Store: deps.Store, ExchangeRate: deps.ExchangeRate}))
+	mux.Handle(taskqueue.ForthwithQuotaTask, maintenance.NewQuotaTaskHandler(deps.Subscription, deps.Tasks))
+	mux.Handle(taskqueue.SchedulerExchangeRate, maintenance.NewRateHandler(maintenance.RateDependencies{System: deps.System, ExchangeRate: deps.ExchangeRate}))
 }

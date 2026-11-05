@@ -3,7 +3,9 @@ package verifycode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -18,114 +20,103 @@ import (
 	"github.com/perfect-panel/server/pkg/random"
 	"github.com/perfect-panel/server/pkg/requestmeta"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 	"gorm.io/gorm"
 )
 
-type SmsSendCount struct {
-	Count    int64 `json:"count"`
-	CreateAt int64 `json:"create_at"`
-}
-
-type SendSmsCodeLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps SendSmsCodeDependencies
-}
-
-// NewSendSmsCodeLogic Get sms verification code
-func NewSendSmsCodeLogic(ctx context.Context, deps SendSmsCodeDependencies) *SendSmsCodeLogic {
-	return &SendSmsCodeLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *SendSmsCodeLogic) SendSmsCode(req *dto.SendSmsCodeRequest) (resp *dto.SendCodeResponse, err error) {
+// SendSmsCode sends a verification code to a phone number: a register code
+// to a number no account has, a security code to one an account has. The
+// code is stored under the number's E.164 form, the one every checker uses.
+func (s *Service) SendSmsCode(ctx context.Context, req *dto.SendSmsCodeRequest) (*dto.SendCodeResponse, error) {
+	cfg := s.deps.Config()
 	verifyType := auth.ParseVerifyType(req.Type)
-	if verifyType == auth.Register {
-		if err := l.deps.Policy.EnsureRegistrationOpen(l.ctx, identifier.Mobile); err != nil {
-			return nil, err
-		}
-	} else if err := l.deps.Policy.EnsureMethodEnabled(l.ctx, identifier.Mobile); err != nil {
+	if err := s.ensureCodeAllowed(ctx, verifyType, identifier.Mobile); err != nil {
 		return nil, err
+	}
+	if err := s.verifyHuman(ctx, verifyType, req.CfToken); err != nil {
+		return nil, err
+	}
+	// Each code costs the operator money; outside the configured countries a
+	// script could pump premium-rate numbers.
+	if cfg.MobileWhitelistEnabled && !areaCodeAllowed(req.TelephoneAreaCode, cfg.MobileWhitelist) {
+		return nil, xerr.Errorf(xerr.TelephoneError, "area code %q is not allowed", req.TelephoneAreaCode)
 	}
 	phoneNumber, err := identifier.FormatToE164(req.TelephoneAreaCode, req.Telephone)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.TelephoneError), "Invalid phone number")
+		return nil, xerr.Wrapf(err, xerr.TelephoneError, "invalid phone number")
+	}
+	if err := s.takeIPPermit(ctx); err != nil {
+		return nil, err
 	}
 
-	cacheKey := fmt.Sprintf("%s:%s:%s", config.AuthCodeTelephoneCacheKey, verifyType, phoneNumber)
-	// Check if the limit is exceeded of current request
-	interval := l.deps.Config.VerifyCodeInterval
+	cacheKey := verification.MobileCodeKey(verifyType, phoneNumber)
+	interval := cfg.VerifyCodeInterval
 	if interval <= 0 {
 		interval = 60
 	}
-	limiter := ratelimit.NewPeriodLimit(int(interval), 1, l.deps.Redis, fmt.Sprintf("%smobile:%s:", config.SendIntervalKeyPrefix, verifyType))
-	permit, err := limiter.Take(phoneNumber)
+	limiter := ratelimit.NewPeriodLimit(int(interval), 1, s.deps.Redis, fmt.Sprintf("%smobile:%s:", config.SendIntervalKeyPrefix, verifyType))
+	permit, err := limiter.Take(ctx, phoneNumber)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "Failed to take limit")
+		return nil, xerr.Wrapf(err, xerr.ERROR, "take the send interval permit")
 	}
 	if !limiter.ParsePermitState(permit) {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.TooManyRequests), "send sms too many requests")
+		return nil, xerr.Errorf(xerr.TooManyRequests, "send sms too many requests")
 	}
-	// Check if the limit is exceeded of the today
-	dailyLimit := l.deps.Config.VerifyCodeLimit
+	dailyLimit := cfg.VerifyCodeLimit
 	if dailyLimit <= 0 {
 		dailyLimit = 15
 	}
-	dailyLimiter := ratelimit.NewPeriodLimit(86400, int(dailyLimit), l.deps.Redis, config.SendCountLimitKeyPrefix, ratelimit.Align())
-	permit, err = dailyLimiter.Take(fmt.Sprintf("%s:%s:%s", "mobile", verifyType, phoneNumber))
+	dailyLimiter := ratelimit.NewPeriodLimit(86400, int(dailyLimit), s.deps.Redis, config.SendCountLimitKeyPrefix, ratelimit.Align())
+	permit, err = dailyLimiter.Take(ctx, fmt.Sprintf("%s:%s:%s", "mobile", verifyType, phoneNumber))
 	if err != nil {
-		return nil, err
+		return nil, xerr.Wrapf(err, xerr.ERROR, "take the daily send permit")
 	}
 	if !dailyLimiter.ParsePermitState(permit) {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.TodaySendCountExceedsLimit), "This account has reached the limit of sending times today")
+		return nil, xerr.Errorf(xerr.TodaySendCountExceedsLimit, "this account has reached the limit of sending times today")
 	}
-	m, err := l.deps.Store.UserAuth().FindUserAuthMethodByOpenID(l.ctx, identifier.Mobile, phoneNumber)
+	m, err := s.deps.Store.UserAuth().FindUserAuthMethodByOpenID(ctx, identifier.Mobile, phoneNumber)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindUserAuthMethodByOpenID error")
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find mobile identity")
 	}
 	if verifyType == auth.Register && m.Id > 0 {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.UserExist), "mobile already bind")
+		return nil, xerr.Errorf(xerr.UserExist, "mobile already bound")
 	} else if verifyType == auth.Security && m.Id == 0 {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.UserNotExist), "mobile not bind")
+		return nil, xerr.Errorf(xerr.UserNotExist, "mobile not bound")
 	}
 
-	metadata, _ := requestmeta.From(l.ctx)
+	metadata, _ := requestmeta.From(ctx)
+	code := random.Key(6, 0)
 	taskPayload := taskqueue.SendSmsPayload{
 		Metadata:      metadata,
 		Type:          req.Type,
 		Telephone:     req.Telephone,
 		TelephoneArea: req.TelephoneAreaCode,
+		Content:       code,
 	}
-	// Generate verification code
-	code := random.Key(6, 0)
-	taskPayload.Telephone = req.Telephone
-	taskPayload.Content = code
-	if err = verification.SaveVerificationCode(l.ctx, l.deps.Redis, cacheKey, code, time.Second*time.Duration(l.deps.Config.VerifyCodeExpire)); err != nil {
-		l.Errorw("[SendSmsCode]: Redis Error", logger.Field("error", err.Error()), logger.Field("cacheKey", cacheKey))
-		return nil, errors.Wrap(xerr.NewErrCode(xerr.ERROR), "Failed to set verification code")
+	if err = verification.SaveVerificationCode(ctx, s.deps.Redis, cacheKey, code, time.Second*time.Duration(cfg.VerifyCodeExpire)); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "store verification code")
 	}
 
-	// Marshal the task payload
-	payloadValue, err := json.Marshal(taskPayload)
+	payload, err := json.Marshal(taskPayload)
 	if err != nil {
-		l.Errorw("[SendSmsCode]: Marshal Error", logger.Field("error", err.Error()))
-		return nil, errors.Wrap(xerr.NewErrCode(xerr.ERROR), "Failed to marshal task payload")
+		return nil, xerr.Wrapf(err, xerr.ERROR, "marshal task payload")
 	}
-	// Create a queue task
-	task := asynq.NewTask(taskqueue.ForthwithSendSms, payloadValue)
-	// Enqueue the task
-	taskInfo, err := l.deps.Queue.EnqueueContext(l.ctx, task)
+	taskInfo, err := s.deps.Queue.EnqueueContext(ctx, asynq.NewTask(taskqueue.ForthwithSendSms, payload))
 	if err != nil {
-		_ = verification.DeleteVerificationCode(l.ctx, l.deps.Redis, cacheKey)
-		l.Errorw("[SendSmsCode]: Enqueue Error", logger.Field("error", err.Error()), logger.Field("type", taskPayload.Type))
-		return nil, errors.Wrap(xerr.NewErrCode(xerr.ERROR), "Failed to enqueue task")
+		_ = verification.DeleteVerificationCode(ctx, s.deps.Redis, cacheKey)
+		return nil, xerr.Wrapf(err, xerr.ERROR, "enqueue verification sms")
 	}
-	l.Infow("[SendSmsCode]: Enqueue Success", logger.Field("taskID", taskInfo.ID), logger.Field("type", taskPayload.Type))
-	return &dto.SendCodeResponse{
-		Status: true,
-	}, nil
+	logger.WithContext(ctx).Infow("[SendSmsCode]: Enqueue Success", logger.Field("taskID", taskInfo.ID), logger.Field("type", taskPayload.Type))
+	return &dto.SendCodeResponse{Status: true}, nil
+}
+
+// areaCodeAllowed reports whether the area code is on the whitelist; either
+// side may carry a leading plus.
+func areaCodeAllowed(areaCode string, whitelist []string) bool {
+	areaCode = strings.TrimPrefix(strings.TrimSpace(areaCode), "+")
+	for _, allowed := range whitelist {
+		if strings.TrimPrefix(strings.TrimSpace(allowed), "+") == areaCode {
+			return true
+		}
+	}
+	return false
 }

@@ -5,35 +5,29 @@ import (
 
 	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetVerifyConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-func newGetVerifyConfigLogic(ctx context.Context, deps Deps) *GetVerifyConfigLogic {
-	return &GetVerifyConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetVerifyConfigLogic) GetVerifyConfig() (*dto.VerifyConfig, error) {
-	resp := &dto.VerifyConfig{}
-	// get verify config from db
-	verifyConfigs, err := l.deps.System.GetVerifyConfig(l.ctx)
+// GetVerifyConfig returns the stored verification settings, the Turnstile
+// secret masked. It only reads: the running configuration is re-initialized
+// when the settings are updated.
+func (s *Service) GetVerifyConfig(ctx context.Context) (*dto.VerifyConfig, error) {
+	resp, err := s.storedVerifyConfig(ctx)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "get verify config failed: %v", err.Error())
+		return nil, err
 	}
-	// reflect to response
-	config.SystemConfigSliceReflectToStruct(verifyConfigs, resp)
-	// update verify config to system
-	l.deps.reinit("verify")
+	maskVerifySecrets(resp)
+	return resp, nil
+}
+
+// storedVerifyConfig reads the verification settings as stored, secrets in
+// clear.
+func (s *Service) storedVerifyConfig(ctx context.Context) (*dto.VerifyConfig, error) {
+	rows, err := s.deps.System.GetVerifyConfig(ctx)
+	if err != nil {
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "get verify config: %v", err)
+	}
+	resp := &dto.VerifyConfig{}
+	config.SystemConfigSliceReflectToStruct(rows, resp)
 	return resp, nil
 }

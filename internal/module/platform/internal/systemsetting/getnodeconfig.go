@@ -3,121 +3,38 @@ package systemsetting
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetNodeConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-func newGetNodeConfigLogic(ctx context.Context, deps Deps) *GetNodeConfigLogic {
-	return &GetNodeConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetNodeConfigLogic) GetNodeConfig() (*dto.NodeConfig, error) {
-	// get server config from db
-	configs, err := l.deps.System.GetNodeConfigUncached(l.ctx)
+// GetNodeConfig reads the authoritative active settings for authorized administrators.
+func (s *Service) GetNodeConfig(ctx context.Context) (*dto.NodeConfig, error) {
+	rows, err := s.deps.System.GetNodeConfigUncached(ctx)
 	if err != nil {
-		l.Errorw("[GetNodeConfigLogic] GetNodeConfig get server config error: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetNodeConfig get server config error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "get node config: %v", err)
 	}
-	c, err := nodeConfigFromSystemEntries(configs)
+	view, err := nodeConfigFromSystemEntries(rows)
 	if err != nil {
-		l.Errorw("[GetNodeConfigLogic] parse node config error", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "parse node config error: %v", err)
+		return nil, xerr.Wrapf(err, xerr.ERROR, "parse node config: %v", err)
 	}
-	if c.Routing == nil || c.RoutingRevision <= 0 || !cutoverComplete(configs) {
-		return nil, errors.New("ordered routing cutover is incomplete")
-	}
-	return c, nil
+	return view, nil
 }
 
-func cutoverComplete(entries []*system.System) bool {
-	for _, entry := range entries {
-		if entry.Key == "RoutingCutover" {
-			return entry.Value == "complete"
-		}
+func nodeConfigFromSystemEntries(rows []*system.System) (*dto.NodeConfig, error) {
+	parsed, err := system.ParseNodeConfig(rows)
+	if err != nil {
+		return nil, err
 	}
-	return false
+	return nodeConfigView(parsed), nil
 }
 
-func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, error) {
-	var dbConfig config.NodeDBConfig
-	config.SystemConfigSliceReflectToStruct(configs, &dbConfig)
-	c := &dto.NodeConfig{
-		NodeSecret:             dbConfig.NodeSecret,
-		NodePullInterval:       dbConfig.NodePullInterval,
-		NodePushInterval:       dbConfig.NodePushInterval,
-		IPStrategy:             dbConfig.IPStrategy,
-		TrafficReportThreshold: dbConfig.TrafficReportThreshold,
-		DNS:                    []dto.PlatformNodeDNSSnapshot{},
-		RoutingCapabilities:    []int{1, 2},
+func nodeConfigView(c config.NodeConfig) *dto.NodeConfig {
+	view := &dto.NodeConfig{NodeSecret: c.NodeSecret, NodePullInterval: c.NodePullInterval, NodePushInterval: c.NodePushInterval, TrafficReportThreshold: c.TrafficReportThreshold, IPStrategy: c.IPStrategy, Routing: c.Routing, RoutingRevision: c.RoutingRevision, RoutingMode: fmt.Sprintf("global-v%d", c.Routing.Version), RoutingCapabilities: []int{1, 2}, DNS: make([]dto.PlatformNodeDNSSnapshot, 0, len(c.DNS))}
+	for _, dns := range c.DNS {
+		view.DNS = append(view.DNS, dto.PlatformNodeDNSSnapshot(dns))
 	}
-
-	normal := []config.NodeDNS{}
-	if dbConfig.DNS != "" {
-		var err error
-		normal, err = config.ParseNodeDNSJSON([]byte(dbConfig.DNS))
-		if err != nil {
-			return nil, errors.Wrap(err, "invalid DNS config")
-		}
-	}
-	c.DNS = make([]dto.PlatformNodeDNSSnapshot, 0, len(normal))
-	for _, d := range normal {
-		c.DNS = append(c.DNS, dto.PlatformNodeDNSSnapshot{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
-	}
-	seen := map[string]bool{}
-	for _, item := range configs {
-		switch item.Key {
-		case "NodePullInterval", "NodePushInterval":
-			if seen[item.Key] {
-				return nil, errors.Errorf("duplicate %s setting", item.Key)
-			}
-			seen[item.Key] = true
-			seconds, err := strconv.ParseInt(item.Value, 10, 64)
-			if err != nil || (item.Type != "int" && item.Type != "int64") {
-				return nil, errors.Errorf("invalid %s setting", item.Key)
-			}
-			if err := config.ValidateNodeInterval(item.Key, seconds); err != nil {
-				return nil, err
-			}
-		case "Routing", "RoutingRevision":
-			if seen[item.Key] {
-				return nil, errors.Errorf("duplicate %s setting", item.Key)
-			}
-			seen[item.Key] = true
-			if item.Key == "Routing" && item.Value != "" {
-				policy, err := config.ParseNodeRouting([]byte(item.Value))
-				if err != nil {
-					return nil, errors.Wrap(err, "invalid global routing")
-				}
-				c.Routing = policy
-			}
-			if item.Key == "RoutingRevision" {
-				revision, err := strconv.ParseInt(item.Value, 10, 64)
-				if err != nil || revision < 0 {
-					return nil, errors.Errorf("invalid global routing revision")
-				}
-				c.RoutingRevision = revision
-			}
-		}
-	}
-	c.RoutingMode = "global-v1"
-	if c.Routing != nil {
-		c.RoutingMode = fmt.Sprintf("global-v%d", c.Routing.Version)
-	}
-	return c, nil
+	return view
 }

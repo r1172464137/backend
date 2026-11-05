@@ -1,3 +1,5 @@
+// Package announcement holds the announcement row (the announcement table)
+// and its list filter.
 package announcement
 
 import "time"
@@ -17,7 +19,7 @@ func (Announcement) TableName() string {
 	return "announcement"
 }
 
-// Filter announcement 列表查询过滤条件
+// Filter selects a page of the announcement list.
 type Filter struct {
 	Show   *bool
 	Pinned *bool

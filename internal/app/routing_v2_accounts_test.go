@@ -3,21 +3,29 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"github.com/cloudwego/hertz/pkg/app"
-	adminserver "github.com/perfect-panel/server/internal/module/network/transport/http/admin/server"
-	adminsystem "github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system"
+	"errors"
 	"strconv"
 	"testing"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/perfect-panel/server/internal/module/network"
 	netdto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
+	adminserver "github.com/perfect-panel/server/internal/module/network/transport/http/admin/server"
 	"github.com/perfect-panel/server/internal/module/platform"
 	pdto "github.com/perfect-panel/server/internal/module/platform/contract"
+	platformlog "github.com/perfect-panel/server/internal/module/platform/entity/log"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
+	adminsystem "github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+type failingRoutingLookup struct{}
+
+func (failingRoutingLookup) FindExistingUserIDs(context.Context, []int64) ([]int64, error) {
+	return nil, errors.New("external lookup must not be used")
+}
 
 func TestV2AccountValidationUsesTransaction(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open("file:v2-accounts?mode=memory&cache=shared"), &gorm.Config{})
@@ -29,8 +37,12 @@ func TestV2AccountValidationUsesTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool.SetMaxOpenConns(1)
-	defer pool.Close()
-	if err = db.AutoMigrate(&system.System{}, &node.Server{}, &node.ServerConfigOverride{}); err != nil {
+	t.Cleanup(func() {
+		if err := pool.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	})
+	if err = db.AutoMigrate(&system.System{}, &platformlog.SystemLog{}, &node.Server{}, &node.ServerConfigOverride{}); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.Exec(`CREATE TABLE user (id INTEGER PRIMARY KEY, enable BOOLEAN, deleted_at DATETIME)`).Error; err != nil {
@@ -48,7 +60,7 @@ func TestV2AccountValidationUsesTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewStore(db, nil)
-	p := platform.New(platform.Deps{System: store.System(), Store: store, RoutingUsers: store.User()})
+	p := platform.New(platform.Deps{System: store.System(), Store: store, RoutingUsers: failingRoutingLookup{}})
 	ctx := context.Background()
 	var global pdto.NodeConfig
 	if err = json.Unmarshal([]byte(`{"routing_revision":1,"routing":{"version":2,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[{"user_id":42,"outbound_id":"direct"}]}}`), &global); err != nil {

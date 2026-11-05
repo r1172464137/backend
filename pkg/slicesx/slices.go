@@ -1,14 +1,15 @@
+// Package slicesx converts the lists the database stores as comma-separated
+// strings, such as plan and node id lists, to and from slices, and
+// deduplicates slices while keeping their order.
 package slicesx
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/perfect-panel/server/pkg/logger"
 )
 
+// Int64SliceToStringSlice formats each id in decimal.
 func Int64SliceToStringSlice(slice []int64) []string {
 	stringSlice := make([]string, len(slice))
 	for i, num := range slice {
@@ -16,40 +17,31 @@ func Int64SliceToStringSlice(slice []int64) []string {
 	}
 	return stringSlice
 }
-func StringSliceToInt64Slice(slice []string) []int64 {
-	int64Slice := make([]int64, len(slice))
-	for i, str := range slice {
-		num, err := strconv.ParseInt(strings.TrimSpace(str), 10, 64)
-		if err != nil {
-			fmt.Println("Error converting string to int:", err)
-			continue
-		}
-		int64Slice[i] = num
+
+// ParseInt64CSV parses a comma-separated list of integers, such as the id
+// lists Int64SliceToString stores ("1,2,3"). Blank input is an empty (nil)
+// list and space around an element is ignored. Any element that is not an
+// integer, an empty one included, fails the whole list: a damaged value is
+// never mistaken for a shorter list — for a coupon's plan list, a shorter or
+// empty list would widen what the coupon applies to.
+func ParseInt64CSV(s string) ([]int64, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
 	}
-	return int64Slice
+	elements := strings.Split(s, ",")
+	ids := make([]int64, 0, len(elements))
+	for i, element := range elements {
+		id, err := strconv.ParseInt(strings.TrimSpace(element), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("element %d of the id list %q: %w", i+1, s, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
-func StringToInt64Slice(s string) []int64 {
-
-	stringSlice := strings.Split(s, ",")
-	var intSlice []int64
-	if len(s) == 0 {
-		return intSlice
-	}
-	for _, str := range stringSlice {
-		num, err := strconv.ParseInt(strings.TrimSpace(str), 10, 64)
-		if err != nil {
-			logger.Error("[Tools] StringToInt64Slice",
-				logger.Field("error", err.Error()),
-				logger.Field("str", str),
-			)
-			continue
-		}
-		intSlice = append(intSlice, num)
-	}
-	return intSlice
-}
-
+// Int64SliceToString stores ids as a comma-separated list ("1,2,3"), the
+// form ParseInt64CSV reads.
 func Int64SliceToString(intSlice []int64) string {
 	var strSlice []string
 	for _, num := range intSlice {
@@ -58,13 +50,16 @@ func Int64SliceToString(intSlice []int64) string {
 	return strings.Join(strSlice, ",")
 }
 
-// string slice to string
+// StringSliceToString stores a list as comma-separated values, without
+// empty and repeated elements.
 func StringSliceToString(stringSlice []string) string {
 	stringSlice = RemoveDuplicateElements(stringSlice...)
 	return strings.Join(stringSlice, ",")
 }
 
-// StringMergeAndRemoveDuplicates Tool function to convert multiple comma separated strings into [] strings and deduplicate them
+// StringMergeAndRemoveDuplicates splits comma-separated lists and merges
+// them into one list without repeated elements, in order of first
+// appearance.
 func StringMergeAndRemoveDuplicates(strs ...string) []string {
 	if len(strs) == 1 && strs[0] == "" {
 		return []string{}
@@ -86,29 +81,21 @@ func StringMergeAndRemoveDuplicates(strs ...string) []string {
 	return uniqueList
 }
 
+// RemoveDuplicateElements returns input without repeated elements, in order
+// of first appearance. Empty strings are dropped too.
 func RemoveDuplicateElements[T comparable](input ...T) []T {
 	uniqueMap := make(map[T]struct{})
 	var result []T
 
 	for _, item := range input {
-		// 仅在 T 是 string 类型时跳过空字符串
+		// Skip empty strings only: the zero value of another type, such as
+		// the id 0, is an element.
 		if v, ok := any(item).(string); ok && v == "" {
 			continue
 		}
 		if _, exists := uniqueMap[item]; !exists {
 			uniqueMap[item] = struct{}{}
 			result = append(result, item)
-		}
-	}
-	return result
-}
-
-// RemoveStringElement 移除指定元素
-func RemoveStringElement(arr []string, element ...string) []string {
-	var result []string
-	for _, str := range arr {
-		if !slices.Contains(element, str) {
-			result = append(result, str)
 		}
 	}
 	return result

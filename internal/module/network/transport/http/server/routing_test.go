@@ -159,21 +159,26 @@ func TestRoutingCapabilityCheckedBefore304(t *testing.T) {
 				if old.Response.StatusCode() != 426 {
 					t.Fatalf("capability %q status %d", capability, old.Response.StatusCode())
 				}
-				if accept == protobufContentType {
-					var result serverv1.Result
-					if err := proto.Unmarshal(old.Response.Body(), &result); err != nil || result.Code != xerr.NodeRoutingUpgradeRequired {
-						t.Fatalf("protobuf error = %v, %v", &result, err)
-					}
-				} else {
-					var result struct {
-						Code uint32 `json:"code"`
-					}
-					if err := json.Unmarshal(old.Response.Body(), &result); err != nil || result.Code != xerr.NodeRoutingUpgradeRequired {
-						t.Fatalf("JSON error = %#v, %v", result, err)
-					}
-				}
+				assertRoutingUpgradeBody(t, accept, old.Response.Body())
 			}
 		})
+	}
+}
+
+func assertRoutingUpgradeBody(t *testing.T, accept string, body []byte) {
+	t.Helper()
+	if accept == protobufContentType {
+		var result serverv1.Result
+		if err := proto.Unmarshal(body, &result); err != nil || result.Code != xerr.NodeRoutingUpgradeRequired {
+			t.Fatalf("protobuf error = %v, %v", &result, err)
+		}
+		return
+	}
+	var result struct {
+		Code uint32 `json:"code"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil || result.Code != xerr.NodeRoutingUpgradeRequired {
+		t.Fatalf("JSON error = %#v, %v", result, err)
 	}
 }
 

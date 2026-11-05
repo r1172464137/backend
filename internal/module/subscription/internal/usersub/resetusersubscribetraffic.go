@@ -4,49 +4,32 @@ import (
 	"context"
 
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
+	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
+	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type ResetUserSubscribeTrafficLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// NewResetUserSubscribeTrafficLogic Reset user subscribe traffic
-func newResetUserSubscribeTrafficLogic(ctx context.Context, deps Deps) *ResetUserSubscribeTrafficLogic {
-	return &ResetUserSubscribeTrafficLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *ResetUserSubscribeTrafficLogic) ResetUserSubscribeTraffic(req *dto.ResetUserSubscribeTrafficRequest) error {
-	userSub, err := l.deps.UserSubs.FindOneSubscribe(l.ctx, req.UserSubscribeId)
+// ResetUserSubscribeTraffic clears the subscription's traffic counters like
+// every other traffic reset: an exhausted subscription inside its term is
+// active again, a hold or an expired term stays.
+func (s *Service) ResetUserSubscribeTraffic(ctx context.Context, req *dto.ResetUserSubscribeTrafficRequest) error {
+	var reset *usersub.Subscribe
+	err := s.deps.Store.InSubscriptionTx(ctx, func(store repository.SubscriptionStore) error {
+		sub, err := store.UserSubscription().FindOneSubscribeForUpdate(ctx, req.UserSubscribeId)
+		if err != nil {
+			return xerr.Wrapf(err, xerr.DatabaseQueryError, "find subscription %d", req.UserSubscribeId)
+		}
+		if err := store.UserSubscription().UpdateSubscribeColumns(ctx, sub, sub.ResetTraffic(timeutil.Now())...); err != nil {
+			return xerr.Wrapf(err, xerr.DatabaseUpdateError, "reset traffic of subscription %d", req.UserSubscribeId)
+		}
+		reset = sub
+		return nil
+	})
 	if err != nil {
-		l.Errorw("FindOneSubscribe error", logger.Field("error", err.Error()), logger.Field("userSubscribeId", req.UserSubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), " FindOneSubscribe error: %v", err.Error())
+		logger.WithContext(ctx).Errorw("[ResetUserSubscribeTraffic] Reset failed", logger.Field("error", err.Error()), logger.Field("user_subscribe_id", req.UserSubscribeId))
+		return err
 	}
-	userSub.Download = 0
-	userSub.Upload = 0
-
-	err = l.deps.UserSubs.UpdateSubscribe(l.ctx, userSub)
-	if err != nil {
-		l.Errorw("UpdateSubscribe error", logger.Field("error", err.Error()), logger.Field("userSubscribeId", req.UserSubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), " UpdateSubscribe error: %v", err.Error())
-	}
-	// Clear user subscribe cache
-	if err = l.deps.Cache.ClearSubscribeCache(l.ctx, userSub); err != nil {
-		l.Errorw("ClearSubscribeCache failed:", logger.Field("error", err.Error()), logger.Field("userSubscribeId", userSub.Id))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "ClearSubscribeCache failed: %v", err.Error())
-	}
-	// Clear subscribe cache
-	if err = l.deps.Plans.ClearCache(l.ctx, userSub.SubscribeId); err != nil {
-		l.Errorw("failed to clear subscribe cache", logger.Field("error", err.Error()), logger.Field("subscribeId", userSub.SubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "failed to clear subscribe cache: %v", err.Error())
-	}
-	return nil
+	return s.clearPlanCaches(ctx, reset.SubscribeId)
 }

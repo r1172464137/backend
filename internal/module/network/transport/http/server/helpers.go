@@ -1,3 +1,5 @@
+// Package server holds the HTTP handlers of the node-facing server API,
+// authenticated by the node secret and answering in JSON or Protobuf.
 package server
 
 import (
@@ -7,13 +9,14 @@ import (
 	"strconv"
 	"strings"
 
+	"errors"
+
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	serverv1 "github.com/perfect-panel/server/api/server/v1"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/pkg/httpx"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -78,7 +81,7 @@ func writeHeaders(ctx *app.RequestContext, headers map[string]string) {
 	}
 }
 
-func writeHTTPResult(ctx *app.RequestContext, resp interface{}, err error) {
+func writeHTTPResult(ctx *app.RequestContext, resp any, err error) {
 	res := httpx.BuildHTTPResult(resp, err)
 	ctx.JSON(res.StatusCode, res.Body)
 }
@@ -130,6 +133,7 @@ func writeServerProtobuf(ctx *app.RequestContext, statusCode int, message proto.
 }
 
 func writeServerProtobufWithETag(ctx *app.RequestContext, message proto.Message, ifNoneMatch string) error {
+	// Deterministic encoding keeps the ETag stable for protobuf map fields.
 	body, err := (proto.MarshalOptions{Deterministic: true}).Marshal(message)
 	if err != nil {
 		return err
@@ -151,7 +155,7 @@ func serverResult(err error) *serverv1.Result {
 	code := xerr.ERROR
 	message := "Internal Server Error"
 	var codeErr *xerr.CodeError
-	if errors.As(errors.Cause(err), &codeErr) {
+	if errors.As(err, &codeErr) {
 		code = codeErr.GetErrCode()
 		message = codeErr.GetErrMsg()
 	}

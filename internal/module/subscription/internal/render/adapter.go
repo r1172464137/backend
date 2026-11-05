@@ -1,3 +1,6 @@
+// Package render builds the client configurations of subscription delivery
+// and template previews: it maps nodes to the proxies a client template
+// renders and executes the template in the application's output format.
 package render
 
 import (
@@ -7,15 +10,16 @@ import (
 	"github.com/perfect-panel/server/pkg/logger"
 )
 
+// Adapter collects what a client configuration is rendered from.
 type Adapter struct {
-	Type           string            // 协议类型
-	SiteName       string            // 站点名称
-	Servers        []*node.Node      // 服务器列表
-	UserInfo       User              // 用户信息
-	ClientTemplate string            // 客户端配置模板
-	OutputFormat   string            // 输出格式，默认是 base64
-	SubscribeName  string            // 订阅名称
-	Params         map[string]string // 其他参数
+	Type           string            // Protocol type
+	SiteName       string            // Site name
+	Servers        []*node.Node      // Nodes the configuration lists
+	UserInfo       User              // Subscriber the configuration is for
+	ClientTemplate string            // Client configuration template
+	OutputFormat   string            // Output format, base64 by default
+	SubscribeName  string            // Subscription (plan) name
+	Params         map[string]string // Template parameters
 }
 
 type Option func(*Adapter)
@@ -26,35 +30,35 @@ func WithParams(params map[string]string) Option {
 	}
 }
 
-// WithServers 设置服务器列表
+// WithServers sets the nodes the configuration lists.
 func WithServers(servers []*node.Node) Option {
 	return func(opts *Adapter) {
 		opts.Servers = servers
 	}
 }
 
-// WithUserInfo 设置用户信息
+// WithUserInfo sets the subscriber the configuration is for.
 func WithUserInfo(user User) Option {
 	return func(opts *Adapter) {
 		opts.UserInfo = user
 	}
 }
 
-// WithOutputFormat 设置输出格式
+// WithOutputFormat sets the output format.
 func WithOutputFormat(format string) Option {
 	return func(opts *Adapter) {
 		opts.OutputFormat = format
 	}
 }
 
-// WithSiteName 设置站点名称
+// WithSiteName sets the site name.
 func WithSiteName(name string) Option {
 	return func(opts *Adapter) {
 		opts.SiteName = name
 	}
 }
 
-// WithSubscribeName 设置订阅名称
+// WithSubscribeName sets the subscription (plan) name.
 func WithSubscribeName(name string) Option {
 	return func(opts *Adapter) {
 		opts.SubscribeName = name
@@ -66,7 +70,7 @@ func NewAdapter(tpl string, opts ...Option) *Adapter {
 		Servers:        []*node.Node{},
 		UserInfo:       User{},
 		ClientTemplate: tpl,
-		OutputFormat:   "base64", // 默认输出格式
+		OutputFormat:   "base64",
 	}
 
 	for _, opt := range opts {
@@ -110,87 +114,93 @@ func (adapter *Adapter) Proxies(servers []*node.Node) ([]Proxy, error) {
 			continue
 		}
 		for _, protocol := range protocols {
-			protocolType := canonicalProtocolType(protocol.Type)
-			if protocolType == itemProtocol {
+			if protocolType := canonicalProtocolType(protocol.Type); protocolType == itemProtocol {
 				protocol.Type = protocolType
-				plugin, pluginOptions := clientPluginConfig(protocol, item.Address)
-				// 证书锚定与跳过验证互斥：客户端一旦跳过校验，下发的指纹便形同虚设。
-				allowInsecure := protocol.AllowInsecure && protocol.CertPinSHA256 == ""
-				proxies = append(
-					proxies,
-					Proxy{
-						Sort:                    item.Sort,
-						Name:                    item.Name,
-						Server:                  item.Address,
-						Port:                    item.Port,
-						Type:                    protocolType,
-						Tags:                    strings.Split(item.Tags, ","),
-						Version:                 protocol.Version,
-						Mode:                    protocol.Mode,
-						Network:                 protocol.Network,
-						Security:                protocol.Security,
-						SNI:                     protocol.SNI,
-						ALPN:                    protocol.ALPN,
-						AllowInsecure:           allowInsecure,
-						Fingerprint:             protocol.Fingerprint,
-						RealityServerAddr:       protocol.RealityServerAddr,
-						RealityServerPort:       protocol.RealityServerPort,
-						RealityPublicKey:        protocol.RealityPublicKey,
-						RealityShortId:          protocol.RealityShortId,
-						Transport:               protocol.Transport,
-						Host:                    protocol.Host,
-						Path:                    protocol.Path,
-						ServiceName:             protocol.ServiceName,
-						Method:                  protocol.Cipher,
-						ServerKey:               protocol.ServerKey,
-						Plugin:                  plugin,
-						PluginOptions:           pluginOptions,
-						UoT:                     protocol.UoT,
-						UoTVersion:              protocol.UoTVersion,
-						AcceptProxyProtocol:     protocol.AcceptProxyProtocol,
-						Flow:                    protocol.Flow,
-						HopPorts:                protocol.HopPorts,
-						HopInterval:             protocol.HopInterval,
-						ObfsPassword:            protocol.ObfsPassword,
-						UpMbps:                  protocol.UpMbps,
-						DownMbps:                protocol.DownMbps,
-						DisableSNI:              protocol.DisableSNI,
-						ReduceRtt:               protocol.ReduceRtt,
-						Heartbeat:               protocol.Heartbeat,
-						UDPRelayMode:            protocol.UDPRelayMode,
-						CongestionController:    protocol.CongestionController,
-						QUICCongestionControl:   protocol.QUICCongestionControl,
-						PaddingScheme:           protocol.PaddingScheme,
-						Multiplex:               protocol.Multiplex,
-						TrafficPattern:          protocol.TrafficPattern,
-						UserHintIsMandatory:     protocol.UserHintIsMandatory,
-						Obfs:                    protocol.Obfs,
-						SSRProtocol:             protocol.SSRProtocol,
-						ProtocolParam:           protocol.ProtocolParam,
-						ObfsParam:               protocol.ObfsParam,
-						ObfsHost:                protocol.ObfsHost,
-						ObfsPath:                protocol.ObfsPath,
-						XhttpMode:               protocol.XhttpMode,
-						XhttpExtra:              protocol.XhttpExtra,
-						Encryption:              protocol.Encryption,
-						EncryptionMode:          protocol.EncryptionMode,
-						EncryptionRtt:           protocol.EncryptionRtt,
-						EncryptionClientPadding: protocol.EncryptionClientPadding,
-						EncryptionPassword:      protocol.EncryptionPassword,
-						EchEnable:               protocol.EchEnable,
-						EchServerName:           protocol.EchServerName,
-						Ratio:                   protocol.Ratio,
-						CertMode:                protocol.CertMode,
-						CertDNSProvider:         protocol.CertDNSProvider,
-						CertDNSEnv:              protocol.CertDNSEnv,
-						CertPinSHA256:           protocol.CertPinSHA256,
-					},
-				)
+				proxies = append(proxies, newProxy(item, protocol))
 			}
 		}
 	}
 
 	return proxies, nil
+}
+
+// newProxy is the one mapping from a node and its server protocol to the
+// proxy a client template renders. It lists the client-facing settings one by
+// one on purpose: the protocol also holds server secrets and server-side
+// targets (the REALITY private key and handshake target, the VLESS
+// encryption ticket, padding and private key, the DNS provider and its
+// credentials for the certificate) that must never reach a subscriber. Every
+// field of the proxy is handed to the admin-authored template, toJson and
+// toYaml included, so leaving a setting out here is the only thing that keeps
+// it from every subscriber. TestNewProxyMapsEveryClientField keeps the list
+// complete and TestTemplatesCannotReachServerOnlySettings keeps it tight.
+func newProxy(item *node.Node, protocol node.Protocol) Proxy {
+	plugin, pluginOptions := clientPluginConfig(protocol, item.Address)
+	return Proxy{
+		Sort:     item.Sort,
+		Name:     item.Name,
+		Server:   item.Address,
+		Port:     item.Port,
+		Type:     protocol.Type,
+		Tags:     strings.Split(item.Tags, ","),
+		Version:  protocol.Version,
+		Mode:     protocol.Mode,
+		Network:  protocol.Network,
+		Security: protocol.Security,
+		SNI:      protocol.SNI,
+		ALPN:     protocol.ALPN,
+		// Certificate pinning and skipping verification exclude each other:
+		// a client that skips verification makes the pin meaningless.
+		AllowInsecure:           protocol.AllowInsecure && protocol.CertPinSHA256 == "",
+		Fingerprint:             protocol.Fingerprint,
+		RealityPublicKey:        protocol.RealityPublicKey,
+		RealityShortId:          protocol.RealityShortId,
+		Transport:               protocol.Transport,
+		Host:                    protocol.Host,
+		Path:                    protocol.Path,
+		ServiceName:             protocol.ServiceName,
+		Method:                  protocol.Cipher,
+		ServerKey:               protocol.ServerKey,
+		Plugin:                  plugin,
+		PluginOptions:           pluginOptions,
+		UoT:                     protocol.UoT,
+		UoTVersion:              protocol.UoTVersion,
+		AcceptProxyProtocol:     protocol.AcceptProxyProtocol,
+		Flow:                    protocol.Flow,
+		HopPorts:                protocol.HopPorts,
+		HopInterval:             protocol.HopInterval,
+		ObfsPassword:            protocol.ObfsPassword,
+		UpMbps:                  protocol.UpMbps,
+		DownMbps:                protocol.DownMbps,
+		DisableSNI:              protocol.DisableSNI,
+		ReduceRtt:               protocol.ReduceRtt,
+		Heartbeat:               protocol.Heartbeat,
+		UDPRelayMode:            protocol.UDPRelayMode,
+		CongestionController:    protocol.CongestionController,
+		QUICCongestionControl:   protocol.QUICCongestionControl,
+		PaddingScheme:           protocol.PaddingScheme,
+		Multiplex:               protocol.Multiplex,
+		TrafficPattern:          protocol.TrafficPattern,
+		UserHintIsMandatory:     protocol.UserHintIsMandatory,
+		Obfs:                    protocol.Obfs,
+		SSRProtocol:             protocol.SSRProtocol,
+		ProtocolParam:           protocol.ProtocolParam,
+		ObfsParam:               protocol.ObfsParam,
+		ObfsHost:                protocol.ObfsHost,
+		ObfsPath:                protocol.ObfsPath,
+		XhttpMode:               protocol.XhttpMode,
+		XhttpExtra:              protocol.XhttpExtra,
+		Encryption:              protocol.Encryption,
+		EncryptionMode:          protocol.EncryptionMode,
+		EncryptionRtt:           protocol.EncryptionRtt,
+		EncryptionClientPadding: protocol.EncryptionClientPadding,
+		EncryptionPassword:      protocol.EncryptionPassword,
+		EchEnable:               protocol.EchEnable,
+		EchServerName:           protocol.EchServerName,
+		Ratio:                   protocol.Ratio,
+		CertMode:                protocol.CertMode,
+		CertPinSHA256:           protocol.CertPinSHA256,
+	}
 }
 
 func canonicalProtocolType(raw string) string {

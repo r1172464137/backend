@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -21,6 +22,13 @@ import (
 )
 
 var routeHandlerName = regexp.MustCompile(`^(.*)\.func[0-9]+$`)
+
+// update rewrites testdata/routes.golden from the registered routes:
+//
+//	go test ./internal/transport/http/routes -run TestRegisterHandlers_routeInventory -update
+var update = flag.Bool("update", false, "rewrite testdata/routes.golden from the registered routes")
+
+const routesGolden = "testdata/routes.golden"
 
 func TestRegisterHandlers_routeInventory(t *testing.T) {
 	// Given
@@ -43,17 +51,22 @@ func TestRegisterHandlers_routeInventory(t *testing.T) {
 	}
 
 	// When
-	expected, err := os.ReadFile("testdata/routes.golden")
+	if *update {
+		if err := os.WriteFile(routesGolden, []byte(actual.String()), 0o644); err != nil {
+			t.Fatalf("update route golden: %v", err)
+		}
+	}
+	expected, err := os.ReadFile(routesGolden)
 	if err != nil {
 		t.Fatalf("read route golden: %v", err)
 	}
 
 	// Then
-	if len(routes) != 249 {
-		t.Fatalf("expected 249 routes, got %d", len(routes))
+	if len(routes) != 255 {
+		t.Fatalf("expected 255 routes, got %d", len(routes))
 	}
 	if !bytes.Equal([]byte(actual.String()), expected) {
-		t.Fatalf("route inventory differs from golden\nactual:\n%s", actual.String())
+		t.Fatalf("route inventory differs from %s (rerun with -update to accept the change)\nactual:\n%s", routesGolden, actual.String())
 	}
 }
 
@@ -69,6 +82,16 @@ func normalizeRouteHandler(raw string, owners map[string]string) (string, error)
 		}
 	}
 	return "", errors.New("handler owner not found for " + closureOwner)
+}
+
+// handlerOwnerImport reports whether an import path supplies route handlers:
+// the module transports, and the device WebSocket package, whose handler
+// lives with its manager outside the modules.
+func handlerOwnerImport(path string) bool {
+	if strings.Contains(path, "/internal/module/") && strings.Contains(path, "/transport/http") {
+		return true
+	}
+	return strings.HasSuffix(path, "/internal/transport/devicesocket")
 }
 
 // routeHandlerOwners derives the logical handler owner from route source
@@ -94,7 +117,7 @@ func routeHandlerOwners(t *testing.T) map[string]string {
 		imports := make(map[string]string)
 		for _, spec := range file.Imports {
 			path := strings.Trim(spec.Path.Value, `"`)
-			if !strings.Contains(path, "/internal/module/") || !strings.Contains(path, "/transport/http") {
+			if !handlerOwnerImport(path) {
 				continue
 			}
 			name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
@@ -137,9 +160,9 @@ func routeHandlerOwners(t *testing.T) map[string]string {
 func TestRegisterHandlers_edgeManifestHidesUnauthorizedRequests(t *testing.T) {
 	// Given
 	router := server.Default()
-	RegisterHandlers(router, Dependencies{Config: appconfig.Config{
+	RegisterHandlers(router, Dependencies{Config: appconfig.Config{Boot: appconfig.Boot{
 		EdgeSubscribe: appconfig.EdgeSubscribeConfig{Enabled: true},
-	}})
+	}}})
 	ctx := router.NewContext()
 	ctx.Request.SetRequestURI("/api/edge/v1/manifest?token=probe")
 	ctx.Request.Header.SetMethod(http.MethodGet)
@@ -163,7 +186,7 @@ func TestRegisterHandlers_configuredRoutes(t *testing.T) {
 	}{
 		{
 			name:           "empty-fallback",
-			wantRouteCount: 249,
+			wantRouteCount: 255,
 			present:        []string{"/v1/subscribe/config"},
 			absent:         []string{"/"},
 		},
@@ -172,7 +195,7 @@ func TestRegisterHandlers_configuredRoutes(t *testing.T) {
 			subscribe: appconfig.SubscribeConfig{
 				SubscribePath: "/custom/subscribe",
 			},
-			wantRouteCount: 249,
+			wantRouteCount: 255,
 			present:        []string{"/custom/subscribe"},
 			absent:         []string{"/v1/subscribe/config", "/"},
 		},
@@ -181,7 +204,7 @@ func TestRegisterHandlers_configuredRoutes(t *testing.T) {
 			subscribe: appconfig.SubscribeConfig{
 				PanDomain: false,
 			},
-			wantRouteCount: 249,
+			wantRouteCount: 255,
 			present:        []string{"/v1/subscribe/config"},
 			absent:         []string{"/"},
 		},
@@ -190,19 +213,19 @@ func TestRegisterHandlers_configuredRoutes(t *testing.T) {
 			subscribe: appconfig.SubscribeConfig{
 				PanDomain: true,
 			},
-			wantRouteCount: 250,
+			wantRouteCount: 256,
 			present:        []string{"/v1/subscribe/config", "/"},
 		},
 		{
 			name:           "edge-manifest-enabled",
-			wantRouteCount: 250,
+			wantRouteCount: 256,
 			present:        []string{"/v1/subscribe/config", "/api/edge/v1/manifest"},
 		},
 	}
 	for _, tc := range routeCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Given
-			config := appconfig.Config{Subscribe: tc.subscribe}
+			config := appconfig.Config{Runtime: appconfig.Runtime{Subscribe: tc.subscribe}}
 			if tc.name == "edge-manifest-enabled" {
 				config.EdgeSubscribe.Enabled = true
 			}
@@ -272,7 +295,7 @@ func TestRegisterHandlers_configuredRoutes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Given
 			router := server.Default()
-			RegisterHandlers(router, Dependencies{Config: appconfig.Config{Subscribe: tc.subscribe}})
+			RegisterHandlers(router, Dependencies{Config: appconfig.Config{Runtime: appconfig.Runtime{Subscribe: tc.subscribe}}})
 			ctx := router.NewContext()
 			ctx.Request.SetRequestURI(tc.path)
 			ctx.Request.Header.SetMethod(http.MethodGet)
@@ -300,19 +323,19 @@ func TestRegisterHandlers_middlewareContracts(t *testing.T) {
 	}{
 		{
 			name: "public-auth-before-device",
-			config: appconfig.Config{Device: appconfig.DeviceConfig{
+			config: appconfig.Config{Runtime: appconfig.Runtime{Device: appconfig.DeviceConfig{
 				Enable: true,
-			}},
+			}}},
 			paths:    []string{"/v1/public/announcement/list"},
 			wantCode: xerr.ErrorTokenEmpty,
 			wantMsg:  "User token is empty",
 		},
 		{
 			name: "device-only",
-			config: appconfig.Config{Device: appconfig.DeviceConfig{
+			config: appconfig.Config{Runtime: appconfig.Runtime{Device: appconfig.DeviceConfig{
 				Enable:         true,
 				EnableSecurity: true,
-			}},
+			}}},
 			paths:    []string{"/v1/auth/login/device"},
 			method:   http.MethodPost,
 			wantCode: xerr.SecretIsEmpty,

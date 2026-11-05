@@ -67,7 +67,7 @@ func TestHandleBucketFlushFailureMovesProcessingToDeadLetterAtThreshold(t *testi
 	deadLetterKey := deadLetterBucketKey(suffix)
 	cause := errors.New("failed to encode int4")
 
-	if err := redisClient.HSet(ctx, processingKey, map[string]interface{}{
+	if err := redisClient.HSet(ctx, processingKey, map[string]any{
 		trafficField(1, 2, trafficFieldDownload): "99",
 		trafficField(1, 2, trafficFieldUpload):   "7",
 	}).Err(); err != nil {
@@ -154,5 +154,29 @@ func TestMarkBucketProcessedAndCleanupClearsFailureCounter(t *testing.T) {
 	}
 	if _, err := redisClient.ZScore(ctx, bucketIndexKey, suffix).Result(); !errors.Is(err, redis.Nil) {
 		t.Fatalf("bucket index lookup error = %v, want redis.Nil", err)
+	}
+}
+
+// A bucket index entry that names no bucket can never flush: it is dropped
+// with its failure counter instead of being retried on every tick.
+func TestFlushBucketDropsAMalformedBucket(t *testing.T) {
+	aggregator, redisClient := newTestAggregator(t)
+	ctx := context.Background()
+	const suffix = "not-a-bucket"
+	if err := redisClient.ZAdd(ctx, bucketIndexKey, redis.Z{Score: 1, Member: suffix}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := redisClient.Set(ctx, bucketFailureKey(suffix), 3, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := aggregator.flushBucket(ctx, suffix); err != nil {
+		t.Fatalf("flushBucket: %v", err)
+	}
+	if _, err := redisClient.ZScore(ctx, bucketIndexKey, suffix).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("the malformed bucket is still indexed: %v", err)
+	}
+	if n, err := redisClient.Exists(ctx, bucketFailureKey(suffix)).Result(); err != nil || n != 0 {
+		t.Fatalf("the malformed bucket's failure counter survived: %d, %v", n, err)
 	}
 }

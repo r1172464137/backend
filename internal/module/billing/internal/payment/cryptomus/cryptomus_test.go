@@ -1,6 +1,7 @@
 package cryptomus
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
@@ -24,7 +25,7 @@ func signBody(body []byte, apiKey string) string {
 // signedNotification builds a webhook payload the way the gateway does: the
 // signature covers the JSON without the sign member, which is then appended
 // as the last top-level field.
-func signedNotification(t *testing.T, apiKey string, fields map[string]interface{}) []byte {
+func signedNotification(t *testing.T, apiKey string, fields map[string]any) []byte {
 	t.Helper()
 	unsigned, err := json.Marshal(fields)
 	if err != nil {
@@ -45,7 +46,7 @@ func TestSignPayloadMatchesDocumentedAlgorithm(t *testing.T) {
 
 func TestVerifyNotificationSign(t *testing.T) {
 	client := NewClient(Config{MerchantID: "merchant-1", APIKey: "api-key"})
-	body := signedNotification(t, "api-key", map[string]interface{}{
+	body := signedNotification(t, "api-key", map[string]any{
 		"type": "payment", "uuid": "uuid-1", "order_id": "order-1",
 		"amount": "10.00", "currency": "USD", "status": "paid", "is_final": true,
 	})
@@ -96,7 +97,7 @@ func TestVerifyNotificationSignPreservesPHPEscaping(t *testing.T) {
 	// The same payload naively decoded and re-encoded by encoding/json loses
 	// the "\/" escaping, which is exactly the mismatch the raw-byte approach
 	// avoids; the fixture must actually exercise that difference.
-	var decoded map[string]interface{}
+	var decoded map[string]any
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatalf("decode PHP-escaped payload: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestCreateInvoiceSendsSignedRequest(t *testing.T) {
 		if r.Header.Get("sign") != signBody(body, apiKey) {
 			t.Errorf("request signature mismatch")
 		}
-		var request map[string]interface{}
+		var request map[string]any
 		if err := json.Unmarshal(body, &request); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
@@ -147,12 +148,12 @@ func TestCreateInvoiceSendsSignedRequest(t *testing.T) {
 		if request["url_callback"] != "https://merchant.example/v1/notify/Cryptomus/token" {
 			t.Errorf("unexpected callback: %v", request["url_callback"])
 		}
-		fmt.Fprint(w, `{"state":0,"result":{"uuid":"uuid-1","order_id":"order-1","amount":"10.50","currency":"USD","url":"https://pay.cryptomus.com/pay/uuid-1","status":"check"}}`)
+		_, _ = fmt.Fprint(w, `{"state":0,"result":{"uuid":"uuid-1","order_id":"order-1","amount":"10.50","currency":"USD","url":"https://pay.cryptomus.com/pay/uuid-1","status":"check"}}`)
 	}))
 	defer server.Close()
 
 	client := NewClient(Config{MerchantID: "merchant-1", APIKey: apiKey, BaseURL: server.URL})
-	invoice, err := client.CreateInvoice(Order{
+	invoice, err := client.CreateInvoice(context.Background(), Order{
 		OrderNo:   "order-1",
 		Amount:    1050,
 		Currency:  "usd",
@@ -168,10 +169,10 @@ func TestCreateInvoiceSendsSignedRequest(t *testing.T) {
 
 func TestCreateInvoiceRejectsInvalidOrder(t *testing.T) {
 	client := NewClient(Config{MerchantID: "merchant-1", APIKey: "api-key"})
-	if _, err := client.CreateInvoice(Order{OrderNo: "", Amount: 100, Currency: "USD"}); err == nil {
+	if _, err := client.CreateInvoice(context.Background(), Order{OrderNo: "", Amount: 100, Currency: "USD"}); err == nil {
 		t.Fatal("empty order number must be rejected")
 	}
-	if _, err := client.CreateInvoice(Order{OrderNo: "order-1", Amount: 0, Currency: "USD"}); err == nil {
+	if _, err := client.CreateInvoice(context.Background(), Order{OrderNo: "order-1", Amount: 0, Currency: "USD"}); err == nil {
 		t.Fatal("zero amount must be rejected")
 	}
 }
@@ -188,22 +189,22 @@ func TestGetInvoiceLooksUpByUUIDOrOrderNo(t *testing.T) {
 		if request["uuid"] == "" && request["order_id"] == "" {
 			t.Error("lookup request has no identifier")
 		}
-		fmt.Fprint(w, `{"state":0,"result":{"uuid":"uuid-1","order_id":"order-1","amount":"10.50","currency":"USD","payment_status":"paid","is_final":true}}`)
+		_, _ = fmt.Fprint(w, `{"state":0,"result":{"uuid":"uuid-1","order_id":"order-1","amount":"10.50","currency":"USD","payment_status":"paid","is_final":true}}`)
 	}))
 	defer server.Close()
 
 	client := NewClient(Config{MerchantID: "merchant-1", APIKey: "api-key", BaseURL: server.URL})
-	invoice, err := client.GetInvoice("uuid-1", "")
+	invoice, err := client.GetInvoice(context.Background(), "uuid-1", "")
 	if err != nil {
 		t.Fatalf("GetInvoice by uuid: %v", err)
 	}
 	if !invoice.Paid() {
 		t.Fatal("payment_status=paid must report Paid()")
 	}
-	if _, err := client.GetInvoice("", "order-1"); err != nil {
+	if _, err := client.GetInvoice(context.Background(), "", "order-1"); err != nil {
 		t.Fatalf("GetInvoice by order number: %v", err)
 	}
-	if _, err := client.GetInvoice("", ""); err == nil {
+	if _, err := client.GetInvoice(context.Background(), "", ""); err == nil {
 		t.Fatal("lookup without identifiers must be rejected")
 	}
 }
@@ -211,12 +212,12 @@ func TestGetInvoiceLooksUpByUUIDOrOrderNo(t *testing.T) {
 func TestGatewayErrorsMapToAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprint(w, `{"state":1,"message":"Payment not found"}`)
+		_, _ = fmt.Fprint(w, `{"state":1,"message":"Payment not found"}`)
 	}))
 	defer server.Close()
 
 	client := NewClient(Config{MerchantID: "merchant-1", APIKey: "api-key", BaseURL: server.URL})
-	_, err := client.GetInvoice("uuid-unknown", "")
+	_, err := client.GetInvoice(context.Background(), "uuid-unknown", "")
 	if err == nil {
 		t.Fatal("gateway error must be returned")
 	}
@@ -256,7 +257,7 @@ func TestNonJSONNotFoundIsNotMissingInvoice(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()
 	client := NewClient(Config{MerchantID: "merchant-1", APIKey: "api-key", BaseURL: server.URL})
-	_, err := client.GetInvoice("uuid-1", "")
+	_, err := client.GetInvoice(context.Background(), "uuid-1", "")
 	if err == nil || IsNotFound(err) {
 		t.Fatalf("proxy 404 must not mean a missing invoice, got %v", err)
 	}
@@ -278,11 +279,13 @@ func TestInvoiceStatePrefersStatusOverPaymentStatus(t *testing.T) {
 	}
 }
 
-func TestFormatMoney(t *testing.T) {
-	tests := map[int64]string{0: "0.00", 5: "0.05", 100: "1.00", 1050: "10.50", 123456: "1234.56"}
-	for amount, want := range tests {
-		if got := FormatMoney(amount); got != want {
-			t.Fatalf("FormatMoney(%d)=%s, want %s", amount, got, want)
+// Every invoice must ask for exactly the payment expectation of the order.
+func TestInvoiceRequestSendsExactAmounts(t *testing.T) {
+	for amount := int64(1); amount <= 100000; amount++ {
+		request := newInvoiceRequest(Order{OrderNo: "order-1", Amount: amount, Currency: "usd"})
+		sent, err := ParseMoney(request.Amount)
+		if err != nil || sent != amount || request.Currency != "USD" {
+			t.Fatalf("amount %d was sent as %q %s", amount, request.Amount, request.Currency)
 		}
 	}
 }

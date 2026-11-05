@@ -1,3 +1,5 @@
+// Package handler serves subscription delivery over HTTP: the client
+// configuration for a subscription token or a pan-domain host.
 package handler
 
 import (
@@ -11,10 +13,21 @@ import (
 	"github.com/perfect-panel/server/internal/module/subscription"
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
+// Deliverer is the part of the subscription facade the delivery endpoints
+// use: the user-agent allowlist and the rendering of a subscription's client
+// configuration.
+type Deliverer interface {
+	IsUserAgentAllowed(ctx context.Context, userAgent string) bool
+	Deliver(ctx context.Context, meta subscription.RequestMeta, req *dto.SubscribeRequest) (*dto.SubscribeResponse, error)
+}
+
+var _ Deliverer = subscription.Service(nil)
+
 type SubscribeDeps struct {
-	Service subscription.Service
+	Service Deliverer
 	Config  func() config.SubscribeConfig
 }
 
@@ -34,9 +47,6 @@ func SubscribeHandler(deps SubscribeDeps) app.HandlerFunc {
 	return func(c context.Context, ctx *app.RequestContext) {
 		req := dto.SubscribeRequest{
 			Token:  string(ctx.GetHeader("token")),
-			UA:     string(ctx.UserAgent()),
-			Flag:   ctx.Query("flag"),
-			Type:   ctx.Query("type"),
 			Params: getQueryMap(ctx),
 		}
 		if req.Token == "" {
@@ -46,24 +56,20 @@ func SubscribeHandler(deps SubscribeDeps) app.HandlerFunc {
 		config := deps.Config()
 		if config.PanDomain {
 			domainArr := strings.Split(string(ctx.Host()), ".")
-			if len(domainArr) == 0 {
-				ctx.String(consts.StatusForbidden, "Access denied")
-				return
-			}
 			short, err := protocolkey.FixedUniqueString(req.Token, 8, "")
 			if err != nil {
 				logger.WithContext(c).Errorf("[SubscribeHandler] Generate short token failed: %v", err)
 				ctx.String(consts.StatusInternalServerError, "Internal Server")
 				return
 			}
-			if strings.ToLower(short) != strings.ToLower(domainArr[0]) {
+			if !strings.EqualFold(short, domainArr[0]) {
 				logger.WithContext(c).Debug("[SubscribeHandler] short token mismatch")
 				ctx.String(consts.StatusForbidden, "Access denied")
 				return
 			}
 		}
 
-		if config.UserAgentLimit && !deps.Service.IsUserAgentAllowed(c, req.UA) {
+		if config.UserAgentLimit && !deps.Service.IsUserAgentAllowed(c, string(ctx.UserAgent())) {
 			ctx.String(consts.StatusForbidden, "Access denied")
 			return
 		}
@@ -82,12 +88,13 @@ func SubscribeHandler(deps SubscribeDeps) app.HandlerFunc {
 func PanDomainSubscribeHandler(deps SubscribeDeps) app.HandlerFunc {
 	return func(c context.Context, ctx *app.RequestContext) {
 		config := deps.Config()
-		ua := string(ctx.UserAgent())
-		if config.UserAgentLimit && !deps.Service.IsUserAgentAllowed(c, ua) {
+		if config.UserAgentLimit && !deps.Service.IsUserAgentAllowed(c, string(ctx.UserAgent())) {
 			ctx.String(consts.StatusForbidden, "Access denied")
 			return
 		}
 
+		// A subscription host is <token>.<label>.<domain>: a host without a
+		// second label is not one.
 		domainArr := strings.Split(string(ctx.Host()), ".")
 		if len(domainArr) < 2 {
 			ctx.String(consts.StatusForbidden, "Access denied")
@@ -96,14 +103,12 @@ func PanDomainSubscribeHandler(deps SubscribeDeps) app.HandlerFunc {
 
 		writeSubscribeResponse(c, ctx, deps.Service, dto.SubscribeRequest{
 			Token:  domainArr[0],
-			Flag:   domainArr[1],
-			UA:     ua,
 			Params: getQueryMap(ctx),
 		})
 	}
 }
 
-func writeSubscribeResponse(c context.Context, ctx *app.RequestContext, service subscription.Service, req dto.SubscribeRequest) {
+func writeSubscribeResponse(c context.Context, ctx *app.RequestContext, service Deliverer, req dto.SubscribeRequest) {
 	resp, err := service.Deliver(c, subscription.RequestMeta{
 		Host:       string(ctx.Host()),
 		RequestURI: string(ctx.URI().RequestURI()),
@@ -111,14 +116,28 @@ func writeSubscribeResponse(c context.Context, ctx *app.RequestContext, service 
 		ClientIP:   ctx.ClientIP(),
 	}, &req)
 	if err != nil {
+		// A client over its fetch limit backs off on 429; every other
+		// refusal stays the one plain-text server error.
+		if xerr.CodeOf(err) == xerr.TooManyRequests {
+			ctx.String(consts.StatusTooManyRequests, "Too Many Requests")
+			return
+		}
 		ctx.String(consts.StatusInternalServerError, "Internal Server")
 		return
 	}
+	// Data sets the content type it is given over any header set before, so
+	// the type the delivery asks for (the downloadable formats are
+	// application/octet-stream) is handed to it rather than set as a header.
+	contentType := "text/plain; charset=utf-8"
 	for key, value := range resp.Headers {
+		if strings.EqualFold(key, "Content-Type") {
+			contentType = value
+			continue
+		}
 		ctx.Header(key, value)
 	}
 	ctx.Header("subscription-userinfo", resp.Header)
-	ctx.Data(consts.StatusOK, "text/plain; charset=utf-8", resp.Config)
+	ctx.Data(consts.StatusOK, contentType, resp.Config)
 }
 
 func getQueryMap(ctx *app.RequestContext) map[string]string {

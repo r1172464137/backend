@@ -7,32 +7,17 @@ import (
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type CreateSubscribeGroupLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Create subscribe group
-func newCreateSubscribeGroupLogic(ctx context.Context, deps Deps) *CreateSubscribeGroupLogic {
-	return &CreateSubscribeGroupLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *CreateSubscribeGroupLogic) CreateSubscribeGroup(req *dto.CreateSubscribeGroupRequest) error {
-	err := l.deps.Plans.CreateGroup(l.ctx, &subscribe.Group{
+// CreateSubscribeGroup stores a new plan group.
+func (s *Service) CreateSubscribeGroup(ctx context.Context, req *dto.CreateSubscribeGroupRequest) error {
+	err := s.deps.Plans.CreateGroup(ctx, &subscribe.Group{
 		Name:        req.Name,
 		Description: req.Description,
 	})
 	if err != nil {
-		l.Logger.Error("[CreateSubscribeGroupLogic] create subscribe group failed: ", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "create subscribe group failed: %v", err.Error())
+		logger.WithContext(ctx).Error("[CreateSubscribeGroupLogic] create subscribe group failed: ", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseInsertError, "create subscribe group failed: %v", err.Error())
 	}
 	return nil
 }

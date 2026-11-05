@@ -9,64 +9,57 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetGlobalConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps GetGlobalConfigDependencies
-}
+// GetGlobalConfig assembles the public site configuration from the running
+// configuration, the stored currency and verification code settings, the
+// enabled login methods and the web ads switch. The login methods are best
+// effort: when they cannot be read, none is listed.
+func (s *Service) GetGlobalConfig(ctx context.Context) (*dto.GetGlobalConfigResponse, error) {
+	log := logger.WithContext(ctx)
+	running := s.deps.Config()
+	resp := new(dto.GetGlobalConfigResponse)
 
-// Get global config
-func NewGetGlobalConfigLogic(ctx context.Context, deps GetGlobalConfigDependencies) *GetGlobalConfigLogic {
-	return &GetGlobalConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetGlobalConfigLogic) GetGlobalConfig() (resp *dto.GetGlobalConfigResponse, err error) {
-	resp = new(dto.GetGlobalConfigResponse)
-
-	currencyCfg, err := l.deps.Store.System().GetCurrencyConfig(l.ctx)
+	currencyCfg, err := s.deps.Settings.GetCurrencyConfig(ctx)
 	if err != nil {
-		l.Logger.Error("[GetGlobalConfigLogic] GetCurrencyConfig error: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetCurrencyConfig error: %v", err.Error())
+		log.Errorw("[GetGlobalConfig] GetCurrencyConfig error", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "GetCurrencyConfig error: %v", err.Error())
 	}
-	verifyCodeCfg, err := l.deps.Store.System().GetVerifyCodeConfig(l.ctx)
+	verifyCodeCfg, err := s.deps.Settings.GetVerifyCodeConfig(ctx)
 	if err != nil {
-		l.Logger.Error("[GetGlobalConfigLogic] GetVerifyCodeConfig error: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetVerifyCodeConfig error: %v", err.Error())
+		log.Errorw("[GetGlobalConfig] GetVerifyCodeConfig error", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "GetVerifyCodeConfig error: %v", err.Error())
 	}
 
-	mapping.DeepCopy(&resp.Site, l.deps.Config.Site)
-	mapping.DeepCopy(&resp.Subscribe, l.deps.Config.Subscribe)
-	mapping.DeepCopy(&resp.Auth.Email, l.deps.Config.Email)
-	mapping.DeepCopy(&resp.Auth.Mobile, l.deps.Config.Mobile)
-	mapping.DeepCopy(&resp.Auth.Register, l.deps.Config.Register)
-	mapping.DeepCopy(&resp.Verify, l.deps.Config.Verify)
-	mapping.DeepCopy(&resp.Invite, l.deps.Config.Invite)
+	for _, part := range []struct{ dst, src any }{
+		{&resp.Site, running.Site},
+		{&resp.Subscribe, running.Subscribe},
+		{&resp.Auth.Email, running.Email},
+		{&resp.Auth.Mobile, running.Mobile},
+		{&resp.Auth.Register, running.Register},
+		{&resp.Invite, running.Invite},
+	} {
+		if err := mapping.Copy(part.dst, part.src); err != nil {
+			return nil, xerr.Wrapf(err, xerr.ERROR, "copy the public configuration")
+		}
+	}
 	config.SystemConfigSliceReflectToStruct(currencyCfg, &resp.Currency)
 	config.SystemConfigSliceReflectToStruct(verifyCodeCfg, &resp.VerifyCode)
 
 	resp.Verify = dto.VeifyConfig{
-		TurnstileSiteKey:          l.deps.Config.Verify.TurnstileSiteKey,
-		EnableLoginVerify:         l.deps.Config.Verify.LoginVerify,
-		EnableRegisterVerify:      l.deps.Config.Verify.RegisterVerify,
-		EnableResetPasswordVerify: l.deps.Config.Verify.ResetPasswordVerify,
+		TurnstileSiteKey:          running.Verify.TurnstileSiteKey,
+		EnableLoginVerify:         running.Verify.LoginVerify,
+		EnableRegisterVerify:      running.Verify.RegisterVerify,
+		EnableResetPasswordVerify: running.Verify.ResetPasswordVerify,
+	}
+
+	authMethods, err := s.deps.Accounts.ListAuthMethods(ctx)
+	if err != nil {
+		log.Errorw("[GetGlobalConfig] FindAll error", logger.Field("error", err.Error()))
 	}
 	var methods []string
-
-	// auth methods
-	authMethods, err := l.deps.Store.Auth().FindAll(l.ctx)
-	if err != nil {
-		l.Logger.Error("[GetGlobalConfigLogic] FindAll error: ", logger.Field("error", err.Error()))
-	}
-
 	for _, method := range authMethods {
-		if *method.Enabled {
+		if method.Enabled {
 			methods = append(methods, method.Method)
 			if method.Method == "device" {
 				_ = json.Unmarshal([]byte(method.Config), &resp.Auth.Device)
@@ -76,12 +69,11 @@ func (l *GetGlobalConfigLogic) GetGlobalConfig() (resp *dto.GetGlobalConfigRespo
 	}
 	resp.OAuthMethods = methods
 
-	webAds, err := l.deps.Store.System().FindOneByKey(l.ctx, "WebAD")
+	webAds, err := s.deps.Settings.FindOneByKey(ctx, "WebAD")
 	if err != nil {
-		l.Logger.Error("[GetGlobalConfigLogic] FindOneByKey error: ", logger.Field("error", err.Error()), logger.Field("key", "WebAD"))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindOneByKey error: %v", err.Error())
+		log.Errorw("[GetGlobalConfig] FindOneByKey error", logger.Field("error", err.Error()), logger.Field("key", "WebAD"))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "FindOneByKey error: %v", err.Error())
 	}
-	// web ads config
 	resp.WebAd = webAds.Value == "true"
-	return
+	return resp, nil
 }

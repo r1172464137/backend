@@ -17,7 +17,7 @@ import (
 // @Accept json
 // @Produce json
 // @Param request body dto.CheckVerificationCodeRequest true "Request parameters"
-// @Success 200 {object} httpx.ResponseSuccessBean{data=dto.CheckVerificationCodeRespone}
+// @Success 200 {object} httpx.ResponseSuccessBean{data=dto.CheckVerificationCodeResponse}
 // @Router /v1/common/check_verification_code [post]
 func CheckVerificationCodeHandler(service identity.Service) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {

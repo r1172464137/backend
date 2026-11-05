@@ -1,3 +1,5 @@
+// Package telegram verifies the signed result of the Telegram Login Widget
+// for the Telegram sign-in method and builds the widget's authorization URL.
 package telegram
 
 import (

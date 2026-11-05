@@ -1,3 +1,4 @@
+// Package document holds the help document row (the document table).
 package document
 
 import "time"

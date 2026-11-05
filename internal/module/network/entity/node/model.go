@@ -3,13 +3,14 @@ package node
 import "time"
 
 const (
-	// ServerCacheTTL TTL for node hot-path server caches (server config and user list)
+	// ServerCacheTTL bounds the node-facing response caches, the server
+	// configs and the user lists.
 	ServerCacheTTL = 5 * time.Minute
 
-	// ServerUserListCacheKey Server User List Cache Key
+	// ServerUserListCacheKey prefixes the cached user lists of a server.
 	ServerUserListCacheKey = "server:user:"
 
-	// ServerConfigCacheKey Server Config Cache Key
+	// ServerConfigCacheKey prefixes the cached configs of a server.
 	ServerConfigCacheKey = "server:config:"
 
 	// ServerCacheIndexKey tracks the exact response-cache keys generated for a
@@ -21,7 +22,7 @@ const (
 	ServerCacheGenerationKey = "server:cache:generation:%d"
 )
 
-// FilterParams Filter Server Params
+// FilterParams selects a page of servers.
 type FilterParams struct {
 	Page   int
 	Size   int
@@ -29,6 +30,7 @@ type FilterParams struct {
 	Search string
 }
 
+// FilterNodeParams selects nodes, a page of them for the admin list.
 type FilterNodeParams struct {
 	Page     int      // Page Number
 	Size     int      // Page Size
@@ -41,6 +43,7 @@ type FilterNodeParams struct {
 	Enabled  *bool    // Enabled
 }
 
+// SortItem is a list entry's position.
 type SortItem struct {
 	Id   int64
 	Sort int64

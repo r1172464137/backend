@@ -6,31 +6,25 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type UpdateVerifyConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-func newUpdateVerifyConfigLogic(ctx context.Context, deps Deps) *UpdateVerifyConfigLogic {
-	return &UpdateVerifyConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *UpdateVerifyConfigLogic) UpdateVerifyConfig(req *dto.VerifyConfig) error {
-	err := updateConfigFields(l.ctx, l.deps, "verify", convertedConfigFields(*req))
+// UpdateVerifyConfig stores the verification settings and reloads the verify
+// subsystem from them. A masked Turnstile secret keeps the stored one.
+func (s *Service) UpdateVerifyConfig(ctx context.Context, req *dto.VerifyConfig) error {
+	stored, err := s.storedVerifyConfig(ctx)
 	if err != nil {
-		l.Errorw("[UpdateVerifyConfigLogic] update verify config error: ", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update verify config error: %v", err)
+		logger.WithContext(ctx).Errorw("[UpdateVerifyConfig] stored verify config could not be read", logger.Field("error", err.Error()))
 	}
-	// Update the config
-	l.deps.applyVerifyConfig(req)
-	l.deps.reinit("verify")
-	return nil
+	if err := keepVerifySecrets(req, stored); err != nil {
+		return err
+	}
+	change := settingsChange{category: "verify", next: convertedConfigFields(*req)}
+	if stored != nil {
+		change.previous = convertedConfigFields(*stored)
+	}
+	if err := updateConfigFields(ctx, s.deps, change); err != nil {
+		logger.WithContext(ctx).Errorw("[UpdateVerifyConfig] update verify config error", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update verify config error: %v", err)
+	}
+	return s.deps.reinit("verify")
 }

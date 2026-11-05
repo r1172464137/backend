@@ -5,18 +5,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	walletEntity "github.com/perfect-panel/server/internal/module/billing/entity/wallet"
 	userEntity "github.com/perfect-panel/server/internal/module/identity/entity/user"
 	logEntity "github.com/perfect-panel/server/internal/module/platform/entity/log"
 	"github.com/perfect-panel/server/internal/repository"
-	"gorm.io/gorm"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
 type withdrawalTestRepo struct{ item *walletEntity.Withdrawal }
 
-func (r *withdrawalTestRepo) InsertWithdrawal(_ context.Context, data *walletEntity.Withdrawal, _ ...*gorm.DB) error {
+func (r *withdrawalTestRepo) InsertWithdrawal(_ context.Context, data *walletEntity.Withdrawal) error {
 	r.item = data
 	return nil
 }
@@ -45,10 +44,10 @@ func (r *withdrawalTestWallet) FindWallet(context.Context, int64) (*walletEntity
 func (r *withdrawalTestWallet) FindWalletsByUserIds(context.Context, []int64) (map[int64]*walletEntity.Wallet, error) {
 	return map[int64]*walletEntity.Wallet{r.item.UserId: r.item}, nil
 }
-func (r *withdrawalTestWallet) UpdateBalanceFields(context.Context, *walletEntity.Wallet, ...*gorm.DB) error {
+func (r *withdrawalTestWallet) UpdateBalanceFields(context.Context, *walletEntity.Wallet) error {
 	return nil
 }
-func (r *withdrawalTestWallet) UpdateCommission(_ context.Context, data *walletEntity.Wallet, _ ...*gorm.DB) error {
+func (r *withdrawalTestWallet) UpdateCommission(_ context.Context, data *walletEntity.Wallet) error {
 	r.item.Commission = data.Commission
 	return nil
 }
@@ -123,9 +122,10 @@ func TestRejectWithdrawalRefundsExactlyOnce(t *testing.T) {
 	wallet := &withdrawalTestWallet{item: &walletEntity.Wallet{UserId: 7, Commission: 70}}
 	logs := &withdrawalTestLogs{}
 	store := &withdrawalTestStore{withdrawals: &withdrawalTestRepo{item: withdrawal}, wallet: wallet, logs: logs}
-	logic := newWithdrawalAdminLogic(context.Background(), Deps{Tx: withdrawalTestTx{store: store}})
+	svc := NewService(Deps{Tx: withdrawalTestTx{store: store}})
+	ctx := context.Background()
 
-	err := logic.ReviewWithdrawal(&dto.ReviewWithdrawalRequest{Id: 4, Status: walletEntity.WithdrawalStatusRejected, Reason: "invalid account"})
+	err := svc.ReviewWithdrawal(ctx, &dto.ReviewWithdrawalRequest{Id: 4, Status: walletEntity.WithdrawalStatusRejected, Reason: "invalid account"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +140,8 @@ func TestRejectWithdrawalRefundsExactlyOnce(t *testing.T) {
 		t.Fatalf("refund log = %+v", entry)
 	}
 
-	if err := logic.ReviewWithdrawal(&dto.ReviewWithdrawalRequest{Id: 4, Status: walletEntity.WithdrawalStatusRejected, Reason: "retry"}); err == nil {
-		t.Fatal("second review unexpectedly succeeded")
+	if err := svc.ReviewWithdrawal(ctx, &dto.ReviewWithdrawalRequest{Id: 4, Status: walletEntity.WithdrawalStatusRejected, Reason: "retry"}); xerr.CodeOf(err) != xerr.WithdrawalAlreadyReviewed {
+		t.Fatalf("second review = %v, want WithdrawalAlreadyReviewed", err)
 	}
 	if wallet.item.Commission != 100 || len(logs.entries) != 1 {
 		t.Fatalf("duplicate review changed funds: commission=%d logs=%d", wallet.item.Commission, len(logs.entries))
@@ -153,10 +153,10 @@ func TestCommissionWithdrawCreatesPendingRequestWithWithdrawLog(t *testing.T) {
 	wallet := &withdrawalTestWallet{item: &walletEntity.Wallet{UserId: 7, Commission: 100}}
 	logs := &withdrawalTestLogs{}
 	store := &withdrawalTestStore{withdrawals: withdrawals, wallet: wallet, logs: logs}
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyUser, &userEntity.User{Id: 7})
-	logic := newCommissionWithdrawLogic(ctx, Deps{Tx: withdrawalTestTx{store: store}})
+	ctx := userEntity.NewContext(context.Background(), &userEntity.User{Id: 7})
+	svc := NewService(Deps{Tx: withdrawalTestTx{store: store}})
 
-	resp, err := logic.CommissionWithdraw(&dto.CommissionWithdrawRequest{Amount: 30, Content: "bank"})
+	resp, err := svc.CommissionWithdraw(ctx, &dto.CommissionWithdrawRequest{Amount: 30, Content: "bank"})
 	if err != nil {
 		t.Fatal(err)
 	}

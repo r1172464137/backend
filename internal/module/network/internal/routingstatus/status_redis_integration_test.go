@@ -2,6 +2,7 @@ package routingstatus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -28,7 +29,11 @@ func TestNativeRedisReplayFreshness(t *testing.T) {
 		t.Fatal("non-loopback Redis refused")
 	}
 	client := redis.NewClient(&redis.Options{Addr: addr})
-	defer client.Close()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close redis: %v", err)
+		}
+	})
 	ctx := context.Background()
 	key := "ppanel:test:routingstatus:" + uuid.NewString()
 	defer client.Del(ctx, key)
@@ -46,7 +51,7 @@ func TestNativeRedisReplayFreshness(t *testing.T) {
 	known := func() bool {
 		t.Helper()
 		_, err := readScript.Run(ctx, client, []string{key}, ttl, retention).Text()
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return false
 		}
 		if err != nil {

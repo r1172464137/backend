@@ -53,25 +53,7 @@ func validateJSONSurrogates(data []byte) error {
 			if i+4 >= len(data) {
 				return fmt.Errorf("invalid Unicode escape")
 			}
-			read := func(at int) (uint16, bool) {
-				var v uint16
-				for j := 0; j < 4; j++ {
-					c := data[at+j]
-					v <<= 4
-					switch {
-					case c >= '0' && c <= '9':
-						v += uint16(c - '0')
-					case c >= 'a' && c <= 'f':
-						v += uint16(c - 'a' + 10)
-					case c >= 'A' && c <= 'F':
-						v += uint16(c - 'A' + 10)
-					default:
-						return 0, false
-					}
-				}
-				return v, true
-			}
-			v, ok := read(i + 1)
+			v, ok := readJSONHex(data, i+1)
 			if !ok {
 				return fmt.Errorf("invalid Unicode escape")
 			}
@@ -80,7 +62,7 @@ func validateJSONSurrogates(data []byte) error {
 				if i+6 >= len(data) || data[i+1] != '\\' || data[i+2] != 'u' {
 					return fmt.Errorf("unpaired Unicode surrogate")
 				}
-				low, ok := read(i + 3)
+				low, ok := readJSONHex(data, i+3)
 				if !ok || low < 0xdc00 || low > 0xdfff {
 					return fmt.Errorf("unpaired Unicode surrogate")
 				}
@@ -91,6 +73,25 @@ func validateJSONSurrogates(data []byte) error {
 		}
 	}
 	return nil
+}
+
+func readJSONHex(data []byte, at int) (uint16, bool) {
+	var v uint16
+	for j := 0; j < 4; j++ {
+		c := data[at+j]
+		v <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			v += uint16(c - '0')
+		case c >= 'a' && c <= 'f':
+			v += uint16(c - 'a' + 10)
+		case c >= 'A' && c <= 'F':
+			v += uint16(c - 'A' + 10)
+		default:
+			return 0, false
+		}
+	}
+	return v, true
 }
 
 func validateRoutingJSONFields(data []byte) error {
@@ -122,6 +123,13 @@ func validateRoutingJSONFields(data []byte) error {
 			}
 		}
 	}
+	if err := validateRoutingDNSJSONFields(fields); err != nil {
+		return err
+	}
+	return validateRoutingVersionJSONFields(fields)
+}
+
+func validateRoutingDNSJSONFields(fields map[string]json.RawMessage) error {
 	if raw, ok := fields["dns_policy"]; ok {
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return fmt.Errorf("dns_policy must not be null")
@@ -142,6 +150,10 @@ func validateRoutingJSONFields(data []byte) error {
 			}
 		}
 	}
+	return nil
+}
+
+func validateRoutingVersionJSONFields(fields map[string]json.RawMessage) error {
 	var version int
 	_ = json.Unmarshal(fields["version"], &version)
 	if version == 1 {

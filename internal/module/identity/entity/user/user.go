@@ -1,3 +1,6 @@
+// Package user holds the identity module's account entities: the user row,
+// its sign-in identities, devices and their online records, the filters of
+// the account queries, and the account's cache keys and request context.
 package user
 
 import (
@@ -6,6 +9,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// User is an account row.
 type User struct {
 	Id                    int64          `gorm:"primaryKey"`
 	Password              string         `gorm:"type:varchar(255);not null;comment:User Password"`
@@ -33,8 +37,11 @@ type User struct {
 // AccountState is the minimal account gate used on request hot paths that do
 // not need credentials, devices, notification settings, or auth methods.
 type AccountState struct {
-	Id        int64
-	Enable    *bool
+	Id     int64
+	Enable *bool
+	// IsAdmin is read by request authentication (FindAccountStateForAuth);
+	// the cached node-side gate leaves it nil.
+	IsAdmin   *bool
 	UpdatedAt time.Time
 	DeletedAt gorm.DeletedAt
 }
@@ -43,11 +50,13 @@ func (*User) TableName() string {
 	return "user"
 }
 
+// AuthMethods is a login identity of a user. An identifier is unique within
+// its auth type (idx_auth_type_identifier), not across types.
 type AuthMethods struct {
 	Id             int64     `gorm:"primaryKey"`
 	UserId         int64     `gorm:"index:idx_user_id;not null;comment:User ID"`
-	AuthType       string    `gorm:"type:varchar(255);not null;comment:Auth Type 1: apple 2: google 3: github 4: facebook 5: telegram 6: email 7: mobile 8: device"`
-	AuthIdentifier string    `gorm:"type:varchar(255);unique;index:idx_auth_identifier;not null;comment:Auth Identifier"`
+	AuthType       string    `gorm:"type:varchar(255);not null;uniqueIndex:idx_auth_type_identifier,priority:1;comment:Auth Type 1: apple 2: google 3: github 4: facebook 5: telegram 6: email 7: mobile 8: device"`
+	AuthIdentifier string    `gorm:"type:varchar(255);uniqueIndex:idx_auth_type_identifier,priority:2;not null;comment:Auth Identifier"`
 	Verified       bool      `gorm:"default:false;not null;comment:Is Verified"`
 	CreatedAt      time.Time `gorm:"<-:create;comment:Creation Time"`
 	UpdatedAt      time.Time `gorm:"comment:Update Time"`
@@ -57,6 +66,8 @@ func (*AuthMethods) TableName() string {
 	return "user_auth_methods"
 }
 
+// Device is a device bound to an account, which signs in with its
+// identifier.
 type Device struct {
 	Id         int64     `gorm:"primaryKey"`
 	Ip         string    `gorm:"type:varchar(255);not null;comment:Device IP"`
@@ -73,6 +84,7 @@ func (*Device) TableName() string {
 	return "user_device"
 }
 
+// DeviceOnlineRecord is the online time of one device connection.
 type DeviceOnlineRecord struct {
 	Id            int64     `gorm:"primaryKey"`
 	UserId        int64     `gorm:"type:bigint;not null;comment:User ID"`

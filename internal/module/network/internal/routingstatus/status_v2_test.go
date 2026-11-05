@@ -13,7 +13,11 @@ import (
 func TestV2StatusAndDeliveryFilter(t *testing.T) {
 	mini := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	defer client.Close()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close redis: %v", err)
+		}
+	})
 	ctx := context.Background()
 	first := strings.Repeat("a", 64)
 	second := strings.Repeat("b", 64)

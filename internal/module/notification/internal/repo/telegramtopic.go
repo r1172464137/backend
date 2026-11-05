@@ -1,3 +1,6 @@
+// Package repo holds the notification module's repository implementation: the
+// mapping of forum topics in the administrators' Telegram group. The module
+// facade exports it through NewRepoBuilder.
 package repo
 
 import (
@@ -48,7 +51,7 @@ func (m *telegramTopicRepo) FindByThread(ctx context.Context, chatID, threadID i
 func (m *telegramTopicRepo) UpdateThread(ctx context.Context, id, threadID int64) error {
 	return m.db.WithContext(ctx).Model(&telegramtopic.Topic{}).
 		Where("id = ?", id).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"thread_id": threadID,
 			"status":    telegramtopic.StatusActive,
 		}).Error

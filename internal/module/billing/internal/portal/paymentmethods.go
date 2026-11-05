@@ -3,25 +3,41 @@ package portal
 import (
 	"context"
 
-	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
-	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/internal/module/billing/entity/payment"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
 // GetAvailablePaymentMethods lists the payment methods enabled for checkout.
 func (s *Service) GetAvailablePaymentMethods(ctx context.Context) (*dto.GetAvailablePaymentMethodsResponse, error) {
 	data, err := s.deps.Payments.FindAvailableMethods(ctx)
 	if err != nil {
-		logger.WithContext(ctx).Errorw("[GetAvailablePaymentMethods] database error", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetAvailablePaymentMethods: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "list available payment methods")
 	}
 	resp := &dto.GetAvailablePaymentMethodsResponse{
-		List: make([]dto.PaymentMethod, 0),
+		List: make([]dto.PaymentMethod, 0, len(data)),
 	}
-
-	mapping.DeepCopy(&resp.List, data)
-
+	for _, method := range data {
+		resp.List = append(resp.List, paymentMethodDTO(method))
+	}
 	return resp, nil
+}
+
+// paymentMethodDTO describes a payment method to a buyer: what it is called
+// and what it charges, never its configuration, domain or notify token.
+func paymentMethodDTO(method *payment.Payment) dto.PaymentMethod {
+	if method == nil {
+		return dto.PaymentMethod{}
+	}
+	return dto.PaymentMethod{
+		Id:          method.Id,
+		Name:        method.Name,
+		Platform:    method.Platform,
+		Description: method.Description,
+		Icon:        method.Icon,
+		FeeMode:     method.FeeMode,
+		FeePercent:  method.FeePercent,
+		FeeAmount:   method.FeeAmount,
+		Sort:        method.Sort,
+	}
 }

@@ -23,6 +23,7 @@ func registerPublicUserRoutes(router *server.Hertz, deps Dependencies) {
 	publicUserGroupRouter.GET("/devices", identityPublicUser.GetDeviceListHandler(deps.Identity))
 	publicUserGroupRouter.GET("/info", identityPublicUser.QueryUserInfoHandler(deps.Identity))
 	publicUserGroupRouter.GET("/login_log", identityPublicUser.GetLoginLogHandler(deps.Identity))
+	publicUserGroupRouter.POST("/logout", identityPublicUser.LogoutHandler(deps.Identity))
 	publicUserGroupRouter.PUT("/notify", identityPublicUser.UpdateUserNotifyHandler(deps.Identity))
 	publicUserGroupRouter.GET("/oauth_methods", identityPublicUser.GetOAuthMethodsHandler(deps.Identity))
 	publicUserGroupRouter.PUT("/password", identityPublicUser.UpdateUserPasswordHandler(deps.Identity))

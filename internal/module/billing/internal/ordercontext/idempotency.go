@@ -1,3 +1,6 @@
+// Package ordercontext carries the idempotency metadata of a V2 order
+// creation through the request context into the order creators V1 and V2
+// share; a V1 request carries none.
 package ordercontext
 
 import (

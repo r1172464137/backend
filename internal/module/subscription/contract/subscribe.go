@@ -1,11 +1,14 @@
+// Package dto is the subscription module's contract: the commands, queries
+// and results of its facade and HTTP handlers, and the module's own JSON
+// snapshots of the identity and network data its views embed.
 package dto
 
 type (
+	// SubscribeRequest names the subscription to deliver and the query
+	// parameters its template receives. The client application, and with it
+	// the format, is chosen by the request's user agent.
 	SubscribeRequest struct {
-		Flag   string
 		Token  string
-		Type   string
-		UA     string
 		Params map[string]string
 	}
 	SubscribeResponse struct {

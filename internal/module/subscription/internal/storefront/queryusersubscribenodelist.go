@@ -2,61 +2,51 @@ package storefront
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"time"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
 	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/slicesx"
 	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
+	"gorm.io/gorm"
 )
 
-type QueryUserSubscribeNodeListLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get user subscribe node info
-func newQueryUserSubscribeNodeListLogic(ctx context.Context, deps Deps) *QueryUserSubscribeNodeListLogic {
-	return &QueryUserSubscribeNodeListLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *QueryUserSubscribeNodeListLogic) QueryUserSubscribeNodeList() (resp *dto.QueryUserSubscribeNodeListResponse, err error) {
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
+// QueryUserSubscribeNodeList lists the owner's subscriptions in their term
+// with the nodes each may use. A subscription that may not use the service
+// now lists no nodes, by the same rule the node user list and delivery
+// apply; the plan's nodes are loaded once per plan.
+func (s *Service) QueryUserSubscribeNodeList(ctx context.Context) (*dto.QueryUserSubscribeNodeListResponse, error) {
+	log := logger.WithContext(ctx)
+	u, ok := user.FromContext(ctx)
 	if !ok {
-		logger.Error("current user is not found in context")
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
+		log.Error("current user is not found in context")
+		return nil, xerr.NewErrCode(xerr.InvalidAccess)
 	}
-
-	userSubscribes, err := l.deps.UserSubs.QueryUserSubscribe(l.ctx, u.Id, 1, 2)
+	userSubscribes, err := s.deps.UserSubs.QueryUserSubscribe(ctx, u.Id, usersub.InTermStatuses.Values()...)
 	if err != nil {
-		logger.Errorw("failed to query user subscribe", logger.Field("error", err.Error()), logger.Field("user_id", u.Id))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "DB_ERROR")
+		log.Errorw("[QueryUserSubscribeNodeList] Query subscriptions failed", logger.Field("error", err.Error()), logger.Field("user_id", u.Id))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "query subscriptions of user %d", u.Id)
 	}
 
-	resp = &dto.QueryUserSubscribeNodeListResponse{}
+	resp := &dto.QueryUserSubscribeNodeListResponse{}
 	nodesByPlan := make(map[int64][]*node.Node)
-	for _, us := range userSubscribes {
-		if us == nil {
+	now := timeutil.Now()
+	for _, details := range userSubscribes {
+		if details == nil {
 			continue
 		}
-		userSubscribe := subscribeFromDetails(us)
-		nodes, err := l.getServers(userSubscribe, us.Subscribe, nodesByPlan)
+		userSubscribe := subscribeFromDetails(details)
+		nodes, err := s.subscriptionNodes(ctx, userSubscribe, details.Subscribe, nodesByPlan, now)
 		if err != nil {
 			return nil, err
 		}
-		userSubscribeInfo := dto.UserSubscribeInfo{
+		info := dto.UserSubscribeInfo{
 			Id:          userSubscribe.Id,
 			Nodes:       nodes,
 			Traffic:     userSubscribe.Traffic,
@@ -71,119 +61,80 @@ func (l *QueryUserSubscribeNodeListLogic) QueryUserSubscribeNodeList() (resp *dt
 			Status:      userSubscribe.Status,
 			CreatedAt:   userSubscribe.CreatedAt.Unix(),
 			UpdatedAt:   userSubscribe.UpdatedAt.Unix(),
+			IsTryOut:    s.deps.isTrialPlan(userSubscribe.SubscribeId),
 		}
-
 		if userSubscribe.FinishedAt != nil {
-			userSubscribeInfo.FinishedAt = userSubscribe.FinishedAt.Unix()
+			info.FinishedAt = userSubscribe.FinishedAt.Unix()
 		}
-
-		if l.deps.isTrialPlan(userSubscribe.SubscribeId) {
-			userSubscribeInfo.IsTryOut = true
-		}
-
-		resp.List = append(resp.List, userSubscribeInfo)
+		resp.List = append(resp.List, info)
 	}
-
-	return
+	return resp, nil
 }
 
 func subscribeFromDetails(item *usersub.SubscribeDetails) *usersub.Subscribe {
-	if item == nil {
-		return nil
-	}
 	return &usersub.Subscribe{
 		Id: item.Id, UserId: item.UserId, OrderId: item.OrderId, SubscribeId: item.SubscribeId,
 		StartTime: item.StartTime, ExpireTime: item.ExpireTime, FinishedAt: item.FinishedAt,
 		Traffic: item.Traffic, Download: item.Download, Upload: item.Upload,
 		Token: item.Token, UUID: item.UUID, Status: item.Status, Note: item.Note,
-		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		EntitlementSource: item.EntitlementSource, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
 }
 
-func (l *QueryUserSubscribeNodeListLogic) getServers(userSub *usersub.Subscribe, subDetails *subscribe.Subscribe, nodesByPlan map[int64][]*node.Node) (userSubscribeNodes []*dto.UserSubscribeNodeInfo, err error) {
-	userSubscribeNodes = make([]*dto.UserSubscribeNodeInfo, 0)
-	if l.isSubscriptionExpired(userSub) || l.isTrafficExhausted(userSub) {
-		return l.createExpiredServers(), nil
+// subscriptionNodes returns the nodes the subscription may use now: none
+// unless it is servable, otherwise the enabled nodes of its plan. A
+// subscription whose plan was deleted has no nodes left to list.
+func (s *Service) subscriptionNodes(ctx context.Context, userSub *usersub.Subscribe, plan *subscribe.Subscribe, nodesByPlan map[int64][]*node.Node, now time.Time) ([]*dto.UserSubscribeNodeInfo, error) {
+	if !userSub.ServableAt(now) {
+		return nil, nil
 	}
-
-	if subDetails == nil {
-		subDetails, err = l.deps.Plans.FindOne(l.ctx, userSub.SubscribeId)
-		if err != nil {
-			l.Errorw("[Generate Subscribe]find subscribe details error: %v", logger.Field("error", err.Error()))
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find subscribe details error: %v", err.Error())
+	if plan == nil {
+		var err error
+		if plan, err = s.deps.Plans.FindOne(ctx, userSub.SubscribeId); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				logger.WithContext(ctx).Infow("[QueryUserSubscribeNodeList] Plan of the subscription no longer exists", logger.Field("subscribe_id", userSub.SubscribeId), logger.Field("user_subscribe_id", userSub.Id))
+				return nil, nil
+			}
+			logger.WithContext(ctx).Errorw("[QueryUserSubscribeNodeList] Find plan failed", logger.Field("error", err.Error()), logger.Field("subscribe_id", userSub.SubscribeId))
+			return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find plan %d", userSub.SubscribeId)
 		}
 	}
-	nodeIds := slicesx.StringToInt64Slice(subDetails.Nodes)
-	tags := strings.Split(subDetails.NodeTags, ",")
-	cleanTags := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag != "" {
-			cleanTags = append(cleanTags, tag)
-		}
-	}
-	tags = cleanTags
-
-	l.Debugf("[Generate Subscribe]nodes: %v, NodeTags: %v", nodeIds, tags)
-
-	enable := true
-
-	nodes, cached := nodesByPlan[subDetails.Id]
+	nodes, cached := nodesByPlan[plan.Id]
 	if !cached {
-		nodes, err = l.deps.Nodes.ListNodesByScope(l.ctx, nodeIds, tags, &enable, true)
+		// A plan selecting no nodes has none, as in delivery; the scope
+		// query without conditions would list every node.
+		nodeIDs, tags, err := plan.NodeScope()
 		if err != nil {
-			l.Errorw("[Generate Subscribe]find server details error: %v", logger.Field("error", err.Error()))
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find server details error: %v", err.Error())
+			return nil, xerr.Wrapf(err, xerr.ERROR, "plan nodes: %v", err)
 		}
-		nodesByPlan[subDetails.Id] = nodes
-	}
-
-	if len(nodes) > 0 {
-		for _, n := range nodes {
-			server := n.Server
-			if server == nil {
-				continue
+		if len(nodeIDs) > 0 || len(tags) > 0 {
+			var err error
+			nodes, err = s.deps.Nodes.ListEnabledNodesByScope(ctx, nodeIDs, tags)
+			if err != nil {
+				logger.WithContext(ctx).Errorw("[QueryUserSubscribeNodeList] List plan nodes failed", logger.Field("error", err.Error()), logger.Field("subscribe_id", plan.Id))
+				return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "list nodes of plan %d", plan.Id)
 			}
-			userSubscribeNode := &dto.UserSubscribeNodeInfo{
-				Id:        n.Id,
-				Name:      n.Name,
-				Uuid:      userSub.UUID,
-				Protocol:  n.Protocol,
-				Port:      n.Port,
-				Address:   n.Address,
-				Tags:      strings.Split(n.Tags, ","),
-				Country:   server.Country,
-				City:      server.City,
-				CreatedAt: n.CreatedAt.Unix(),
-			}
-			userSubscribeNodes = append(userSubscribeNodes, userSubscribeNode)
 		}
+		nodesByPlan[plan.Id] = nodes
 	}
 
-	l.Debugf("[Query Subscribe]found servers: %v", len(nodes))
-	logger.Debugf("[Generate Subscribe]found servers: %v", len(nodes))
-	return userSubscribeNodes, nil
-}
-
-func (l *QueryUserSubscribeNodeListLogic) isSubscriptionExpired(userSub *usersub.Subscribe) bool {
-	return userSub.ExpireTime.Unix() < timeutil.Now().Unix() && userSub.ExpireTime.Unix() != 0
-}
-
-// isTrafficExhausted reports whether the subscription has used up its traffic
-// quota (Traffic == 0 means unlimited).
-func (l *QueryUserSubscribeNodeListLogic) isTrafficExhausted(userSub *usersub.Subscribe) bool {
-	return userSub.Traffic > 0 && userSub.Download+userSub.Upload >= userSub.Traffic
-}
-
-func (l *QueryUserSubscribeNodeListLogic) createExpiredServers() []*dto.UserSubscribeNodeInfo {
-	return nil
-}
-
-func (l *QueryUserSubscribeNodeListLogic) getFirstHostLine() string {
-	host := l.deps.Host
-	lines := strings.Split(host, "\n")
-	if len(lines) > 0 {
-		return lines[0]
+	infos := make([]*dto.UserSubscribeNodeInfo, 0, len(nodes))
+	for _, n := range nodes {
+		if n.Server == nil {
+			continue
+		}
+		infos = append(infos, &dto.UserSubscribeNodeInfo{
+			Id:        n.Id,
+			Name:      n.Name,
+			Uuid:      userSub.UUID,
+			Protocol:  n.Protocol,
+			Port:      n.Port,
+			Address:   n.Address,
+			Tags:      strings.Split(n.Tags, ","),
+			Country:   n.Server.Country,
+			City:      n.Server.City,
+			CreatedAt: n.CreatedAt.Unix(),
+		})
 	}
-	return host
+	return infos, nil
 }

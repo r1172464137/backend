@@ -8,14 +8,28 @@ import (
 	"testing"
 
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
+	platformlog "github.com/perfect-panel/server/internal/module/platform/entity/log"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	"github.com/perfect-panel/server/internal/module/platform/internal/systemsetting"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 	"github.com/perfect-panel/server/pkg/cache"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
+
+type interfaceTx struct{ db *gorm.DB }
+type interfaceView struct {
+	kernel.PlatformStore
+	db *gorm.DB
+}
+
+func (v interfaceView) System() kernel.SystemRepo { return NewSystemRepo(cache.NewConn(v.db, nil)) }
+func (v interfaceView) Log() kernel.LogRepo       { return NewLogRepo(v.db) }
+func (p interfaceTx) InPlatformTx(ctx context.Context, fn func(kernel.PlatformStore) error) error {
+	return p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return fn(interfaceView{db: tx}) })
+}
 
 func TestInterfaceConfigQueryQuotesReservedKey(t *testing.T) {
 	var logs bytes.Buffer
@@ -39,7 +53,7 @@ func TestInterfaceConfigDatabaseRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = db.AutoMigrate(&system.System{}); err != nil {
+	if err = db.AutoMigrate(&system.System{}, &platformlog.SystemLog{}); err != nil {
 		t.Fatal(err)
 	}
 	unrelated := system.System{Category: "site", Key: "SiteName", Value: "keep", Type: "string", Desc: "site"}
@@ -47,7 +61,7 @@ func TestInterfaceConfigDatabaseRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := NewSystemRepo(cache.NewConn(db, nil))
-	service := systemsetting.NewService(systemsetting.Deps{System: repo})
+	service := systemsetting.NewService(systemsetting.Deps{System: repo, Store: systemsetting.NewSettingsTransactor(interfaceTx{db: db})})
 	ctx := context.Background()
 	got, err := service.GetInterfaceConfig(ctx)
 	if err != nil || got.HiddenMenuIds == nil || len(got.HiddenMenuIds) != 0 {

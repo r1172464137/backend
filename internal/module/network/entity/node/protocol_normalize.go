@@ -297,127 +297,8 @@ func sanitizeRuntimeProtocol(protocol *Protocol) bool {
 }
 
 func validateRuntimeProtocol(protocol *Protocol) error {
-	switch protocol.Type {
-	case "nowhere":
-		if protocol.Port == 0 {
-			return fmt.Errorf("nowhere requires a non-zero port")
-		}
-		if protocol.Security != "tls" {
-			return fmt.Errorf("nowhere requires tls security")
-		}
-		if protocol.Version == 0 {
-			protocol.Version = 1
-		}
-		if protocol.Version != 1 {
-			return fmt.Errorf("nowhere requires version 1")
-		}
-		network, err := normalizeNowhereNetwork(protocol.Network)
-		if err != nil {
-			return err
-		}
-		protocol.Network = network
-		if len(protocol.ALPN) == 0 {
-			protocol.ALPN = []string{"now/1"}
-		}
-		if len(protocol.ALPN) != 1 {
-			return fmt.Errorf("nowhere requires exactly one alpn value")
-		}
-		protocol.ALPN[0] = strings.TrimSpace(protocol.ALPN[0])
-		if len(protocol.ALPN[0]) == 0 || len(protocol.ALPN[0]) > 255 {
-			return fmt.Errorf("nowhere alpn must be between 1 and 255 bytes")
-		}
-		protocol.SNI = strings.TrimSpace(protocol.SNI)
-		if err := validateNowhereUnsupportedOptions(*protocol); err != nil {
-			return err
-		}
-	case "hysteria", "naive", "tuic":
-		if protocol.Security != "tls" {
-			return fmt.Errorf("%s requires tls security", protocol.Type)
-		}
-	case "anytls", "trojan":
-		if protocol.Security != "tls" && protocol.Security != "reality" {
-			return fmt.Errorf("%s requires tls or reality security", protocol.Type)
-		}
-	case "mieru":
-		transport := strings.ToLower(strings.TrimSpace(protocol.Transport))
-		if transport == "" {
-			transport = strings.ToLower(strings.TrimSpace(protocol.Network))
-		}
-		if transport != "" && transport != "tcp" && transport != "udp" {
-			return fmt.Errorf("mieru requires tcp or udp transport")
-		}
-		switch protocol.Multiplex {
-		case "MULTIPLEXING_OFF", "MULTIPLEXING_LOW", "MULTIPLEXING_MIDDLE", "MULTIPLEXING_HIGH":
-		default:
-			return fmt.Errorf("mieru multiplex is invalid")
-		}
-	case "snell":
-		if protocol.Version == 0 {
-			protocol.Version = 5
-		}
-		protocol.Mode = strings.ToLower(strings.TrimSpace(protocol.Mode))
-		protocol.Transport = strings.ToLower(strings.TrimSpace(protocol.Transport))
-		protocol.Network = strings.ToLower(strings.TrimSpace(protocol.Network))
-		if protocol.Version != 5 && protocol.Version != 6 {
-			return fmt.Errorf("snell requires version 5 or 6")
-		}
-		// Every user authenticates with their own UUID as the PSK, so the
-		// listener key is obsolete for both versions.
-		protocol.ServerKey = ""
-		if protocol.Version == 5 {
-			if protocol.Mode != "" {
-				return fmt.Errorf("snell v5 does not support mode")
-			}
-			if protocol.Obfs != "" && protocol.Obfs != "http" && protocol.Obfs != "tls" {
-				return fmt.Errorf("snell obfs is invalid")
-			}
-		} else {
-			if protocol.Obfs != "" {
-				return fmt.Errorf("snell v6 does not support obfs")
-			}
-			mode := strings.ToLower(strings.TrimSpace(protocol.Mode))
-			if mode != "" && mode != "default" && mode != "unshaped" && mode != "unsafe-raw" {
-				return fmt.Errorf("snell mode is invalid")
-			}
-			protocol.Mode = mode
-		}
-		if protocol.Transport != "" && protocol.Transport != "tcp" || protocol.Network != "" && protocol.Network != "tcp" {
-			return fmt.Errorf("snell requires tcp transport")
-		}
-	case "shadowsocksr":
-		transport := strings.ToLower(strings.TrimSpace(protocol.Transport))
-		if transport == "" {
-			transport = strings.ToLower(strings.TrimSpace(protocol.Network))
-		}
-		switch transport {
-		case "", "both", "tcp,udp", "tcp+udp", "tcp", "udp":
-		default:
-			return fmt.Errorf("shadowsocksr network is invalid")
-		}
-		protocol.Transport = transport
-		protocol.Network = ""
-		protocol.Cipher = strings.ToLower(strings.TrimSpace(protocol.Cipher))
-		protocol.SSRProtocol = strings.ToLower(strings.TrimSpace(protocol.SSRProtocol))
-		protocol.Obfs = strings.ToLower(strings.TrimSpace(protocol.Obfs))
-		if !validShadowsocksrCipher(protocol.Cipher) {
-			return fmt.Errorf("shadowsocksr cipher is invalid")
-		}
-		if protocol.ServerKey == "" {
-			return fmt.Errorf("shadowsocksr requires server_key")
-		}
-		if !validShadowsocksrProtocol(protocol.SSRProtocol) {
-			return fmt.Errorf("shadowsocksr protocol is invalid")
-		}
-		if protocol.Obfs == "" {
-			protocol.Obfs = "plain"
-		}
-		if !validShadowsocksrObfs(protocol.Obfs) {
-			return fmt.Errorf("shadowsocksr obfs is invalid")
-		}
-		// Obfs only wraps TCP, so a UDP-only listener has nothing to obfuscate.
-		if protocol.Transport == "udp" && protocol.Obfs != "plain" {
-			return fmt.Errorf("shadowsocksr udp-only transport requires plain obfs")
-		}
+	if err := validateProtocolType(protocol); err != nil {
+		return err
 	}
 	if protocolRequiresTLSCertificate(*protocol) && !hasTLSCertificate(*protocol) {
 		return fmt.Errorf("%s requires sni and cert_mode", protocol.Type)
@@ -434,6 +315,160 @@ func validateRuntimeProtocol(protocol *Protocol) error {
 		if err := validateShadowsocksPlugin(protocol); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateProtocolType applies the rules of the protocol's own type,
+// normalizing the fields it defaults or canonicalizes.
+func validateProtocolType(protocol *Protocol) error {
+	switch protocol.Type {
+	case "nowhere":
+		return validateNowhere(protocol)
+	case "hysteria", "naive", "tuic":
+		if protocol.Security != "tls" {
+			return fmt.Errorf("%s requires tls security", protocol.Type)
+		}
+	case "anytls", "trojan":
+		if protocol.Security != "tls" && protocol.Security != "reality" {
+			return fmt.Errorf("%s requires tls or reality security", protocol.Type)
+		}
+	case "mieru":
+		return validateMieru(protocol)
+	case "snell":
+		return validateSnell(protocol)
+	case "shadowsocksr":
+		return validateShadowsocksr(protocol)
+	}
+	return nil
+}
+
+func validateNowhere(protocol *Protocol) error {
+	if protocol.Port == 0 {
+		return fmt.Errorf("nowhere requires a non-zero port")
+	}
+	if protocol.Security != "tls" {
+		return fmt.Errorf("nowhere requires tls security")
+	}
+	if protocol.Version == 0 {
+		protocol.Version = 1
+	}
+	if protocol.Version != 1 {
+		return fmt.Errorf("nowhere requires version 1")
+	}
+	network, err := normalizeNowhereNetwork(protocol.Network)
+	if err != nil {
+		return err
+	}
+	protocol.Network = network
+	if len(protocol.ALPN) == 0 {
+		protocol.ALPN = []string{"now/1"}
+	}
+	if len(protocol.ALPN) != 1 {
+		return fmt.Errorf("nowhere requires exactly one alpn value")
+	}
+	protocol.ALPN[0] = strings.TrimSpace(protocol.ALPN[0])
+	if len(protocol.ALPN[0]) == 0 || len(protocol.ALPN[0]) > 255 {
+		return fmt.Errorf("nowhere alpn must be between 1 and 255 bytes")
+	}
+	protocol.SNI = strings.TrimSpace(protocol.SNI)
+	return validateNowhereUnsupportedOptions(*protocol)
+}
+
+func validateMieru(protocol *Protocol) error {
+	transport := strings.ToLower(strings.TrimSpace(protocol.Transport))
+	if transport == "" {
+		transport = strings.ToLower(strings.TrimSpace(protocol.Network))
+	}
+	if transport != "" && transport != "tcp" && transport != "udp" {
+		return fmt.Errorf("mieru requires tcp or udp transport")
+	}
+	switch protocol.Multiplex {
+	case "MULTIPLEXING_OFF", "MULTIPLEXING_LOW", "MULTIPLEXING_MIDDLE", "MULTIPLEXING_HIGH":
+		return nil
+	default:
+		return fmt.Errorf("mieru multiplex is invalid")
+	}
+}
+
+func validateSnell(protocol *Protocol) error {
+	if protocol.Version == 0 {
+		protocol.Version = 5
+	}
+	protocol.Mode = strings.ToLower(strings.TrimSpace(protocol.Mode))
+	protocol.Transport = strings.ToLower(strings.TrimSpace(protocol.Transport))
+	protocol.Network = strings.ToLower(strings.TrimSpace(protocol.Network))
+	if protocol.Version != 5 && protocol.Version != 6 {
+		return fmt.Errorf("snell requires version 5 or 6")
+	}
+	// Every user authenticates with their own UUID as the PSK, so the
+	// listener key is obsolete for both versions.
+	protocol.ServerKey = ""
+	if err := validateSnellObfuscation(protocol); err != nil {
+		return err
+	}
+	if protocol.Transport != "" && protocol.Transport != "tcp" || protocol.Network != "" && protocol.Network != "tcp" {
+		return fmt.Errorf("snell requires tcp transport")
+	}
+	return nil
+}
+
+// validateSnellObfuscation checks the traffic shaping of the version: obfs
+// for v5, the mode for v6.
+func validateSnellObfuscation(protocol *Protocol) error {
+	if protocol.Version == 5 {
+		if protocol.Mode != "" {
+			return fmt.Errorf("snell v5 does not support mode")
+		}
+		if protocol.Obfs != "" && protocol.Obfs != "http" && protocol.Obfs != "tls" {
+			return fmt.Errorf("snell obfs is invalid")
+		}
+		return nil
+	}
+	if protocol.Obfs != "" {
+		return fmt.Errorf("snell v6 does not support obfs")
+	}
+	mode := strings.ToLower(strings.TrimSpace(protocol.Mode))
+	if mode != "" && mode != "default" && mode != "unshaped" && mode != "unsafe-raw" {
+		return fmt.Errorf("snell mode is invalid")
+	}
+	protocol.Mode = mode
+	return nil
+}
+
+func validateShadowsocksr(protocol *Protocol) error {
+	transport := strings.ToLower(strings.TrimSpace(protocol.Transport))
+	if transport == "" {
+		transport = strings.ToLower(strings.TrimSpace(protocol.Network))
+	}
+	switch transport {
+	case "", "both", "tcp,udp", "tcp+udp", "tcp", "udp":
+	default:
+		return fmt.Errorf("shadowsocksr network is invalid")
+	}
+	protocol.Transport = transport
+	protocol.Network = ""
+	protocol.Cipher = strings.ToLower(strings.TrimSpace(protocol.Cipher))
+	protocol.SSRProtocol = strings.ToLower(strings.TrimSpace(protocol.SSRProtocol))
+	protocol.Obfs = strings.ToLower(strings.TrimSpace(protocol.Obfs))
+	if !validShadowsocksrCipher(protocol.Cipher) {
+		return fmt.Errorf("shadowsocksr cipher is invalid")
+	}
+	if protocol.ServerKey == "" {
+		return fmt.Errorf("shadowsocksr requires server_key")
+	}
+	if !validShadowsocksrProtocol(protocol.SSRProtocol) {
+		return fmt.Errorf("shadowsocksr protocol is invalid")
+	}
+	if protocol.Obfs == "" {
+		protocol.Obfs = "plain"
+	}
+	if !validShadowsocksrObfs(protocol.Obfs) {
+		return fmt.Errorf("shadowsocksr obfs is invalid")
+	}
+	// Obfs only wraps TCP, so a UDP-only listener has nothing to obfuscate.
+	if protocol.Transport == "udp" && protocol.Obfs != "plain" {
+		return fmt.Errorf("shadowsocksr udp-only transport requires plain obfs")
 	}
 	return nil
 }

@@ -1,17 +1,22 @@
+// Package traffic holds the queue handlers of the traffic tasks: flushing the
+// aggregated node traffic, the calendar traffic reset, the daily traffic
+// statistics and the log retention. Each handler runs its module and returns
+// the module's error, so asynq owns the retries.
 package traffic
 
 import (
-	"github.com/perfect-panel/server/internal/config"
-	"github.com/perfect-panel/server/internal/infra/taskqueue"
 	"github.com/perfect-panel/server/internal/module/network"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/redis/go-redis/v9"
 )
 
+// Dependencies are the traffic tasks' dependencies. The flush runs the
+// network's traffic aggregator; the daily statistics and the log retention
+// are module calls.
 type Dependencies struct {
-	Store      repository.Store
 	Redis      *redis.Client
-	Queue      *taskqueue.Client
-	Log        func() config.Log
 	Aggregator network.TrafficAggregatorDeps
+	// Statistics records the daily traffic statistics (the network facade);
+	// Logs applies the log retention (the platform facade).
+	Statistics StatRecorder
+	Logs       LogCleaner
 }

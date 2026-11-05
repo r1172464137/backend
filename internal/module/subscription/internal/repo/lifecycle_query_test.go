@@ -43,8 +43,9 @@ func TestActiveLifecycleQueryMatchesPostgresPartialIndexPredicate(t *testing.T) 
 			}
 
 			var rows []*usersub.Subscribe
+			expired, args := usersub.ExpiredCondition(time.Now())
 			stmt := activeLifecycleSubscribes(db).
-				Where("expire_time < ? AND expire_time != ?", time.Now(), time.UnixMilli(0)).
+				Where(expired, args...).
 				Find(&rows).Statement
 			sql := stmt.SQL.String()
 			if !strings.Contains(sql, "status IN (0, 1) AND finished_at IS NULL") {

@@ -13,7 +13,6 @@ import (
 	appconfig "github.com/perfect-panel/server/internal/config"
 	"github.com/perfect-panel/server/internal/infra/requestctx"
 	"github.com/perfect-panel/server/internal/module/billing/entity/payment"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/xerr"
 )
 
@@ -169,7 +168,9 @@ func TestDevicePayloadHelpers_roundTripRequestAndResponse_whenPayloadIsEncrypted
 		t.Fatalf("expected encrypted request to decrypt: %v", err)
 	}
 	requestCtx.Response.SetBodyString(`{"data":{"status":"ok"}}`)
-	EncryptDeviceResponse(requestCtx, secret)
+	if err := EncryptDeviceResponse(requestCtx, secret); err != nil {
+		t.Fatalf("encrypt device response: %v", err)
+	}
 
 	// Then
 	if body := string(requestCtx.Request.Body()); body != `{"name":"device"}` {
@@ -197,7 +198,7 @@ func TestNotifyMiddleware_propagatesPaymentContext_whenTokenResolves(t *testing.
 	// Given
 	paymentConfig := &payment.Payment{Platform: "stripe", Token: "notify-token"}
 	engine := server.Default()
-	engine.GET("/v1/notify/:platform/:token", NotifyMiddleware(paymentStore{payment: paymentRepository{payment: paymentConfig}}), func(requestCtx context.Context, ctx *app.RequestContext) {
+	engine.GET("/v1/notify/:platform/:token", NotifyMiddleware(paymentMethods{payment: paymentConfig}), func(requestCtx context.Context, ctx *app.RequestContext) {
 		platform, _ := requestCtx.Value(requestctx.CtxKeyPlatform).(string)
 		configuredPayment, _ := requestCtx.Value(requestctx.CtxKeyPayment).(*payment.Payment)
 		if platform != paymentConfig.Platform || configuredPayment != paymentConfig {
@@ -224,7 +225,7 @@ func TestNotifyMiddlewareRejectsRoutePlatformThatDoesNotMatchToken(t *testing.T)
 	paymentConfig := &payment.Payment{Platform: "EPay", Token: "notify-token"}
 	engine := server.Default()
 	downstreamRan := false
-	engine.GET("/v1/notify/:platform/:token", NotifyMiddleware(paymentStore{payment: paymentRepository{payment: paymentConfig}}), func(_ context.Context, ctx *app.RequestContext) {
+	engine.GET("/v1/notify/:platform/:token", NotifyMiddleware(paymentMethods{payment: paymentConfig}), func(_ context.Context, ctx *app.RequestContext) {
 		downstreamRan = true
 		ctx.String(http.StatusOK, "unreachable")
 	})
@@ -240,25 +241,18 @@ func TestNotifyMiddlewareRejectsRoutePlatformThatDoesNotMatchToken(t *testing.T)
 	}
 }
 
-type paymentStore struct {
-	repository.Store
-	payment repository.PaymentRepo
-}
-
-func (s paymentStore) Payment() repository.PaymentRepo {
-	return s.payment
-}
-
-type paymentRepository struct {
-	repository.PaymentRepo
+// paymentMethods resolves the token of the one payment method it holds.
+type paymentMethods struct {
 	payment *payment.Payment
 }
 
-func (r paymentRepository) FindOneByPaymentToken(_ context.Context, token string) (*payment.Payment, error) {
-	if token != r.payment.Token {
+var _ PaymentMethods = paymentMethods{}
+
+func (m paymentMethods) FindPaymentMethodByToken(_ context.Context, token string) (*payment.Payment, error) {
+	if token != m.payment.Token {
 		return nil, context.Canceled
 	}
-	return r.payment, nil
+	return m.payment, nil
 }
 
 func requestContext(engine *server.Hertz, method string, uri string) *app.RequestContext {

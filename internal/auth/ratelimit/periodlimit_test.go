@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -18,7 +19,6 @@ func TestPeriodLimit_TakeWithAlign(t *testing.T) {
 }
 
 func TestPeriodLimit_RedisUnavailable(t *testing.T) {
-	//t.Skipf("skip this test because it's not stable")
 	const (
 		seconds = 1
 		quota   = 5
@@ -28,7 +28,7 @@ func TestPeriodLimit_RedisUnavailable(t *testing.T) {
 	})
 
 	l := NewPeriodLimit(seconds, quota, rds, "periodlimit:")
-	val, err := l.Take("first")
+	val, err := l.Take(context.Background(), "first")
 	assert.NotNil(t, err)
 	assert.Equal(t, 0, val)
 }
@@ -43,7 +43,7 @@ func testPeriodLimit(t *testing.T, opts ...PeriodOption) {
 	l := NewPeriodLimit(seconds, quota, store, "periodlimit", opts...)
 	var allowed, hitQuota, overQuota int
 	for i := 0; i < total; i++ {
-		val, err := l.Take("first")
+		val, err := l.Take(context.Background(), "first")
 		if err != nil {
 			t.Error(err)
 		}
@@ -66,7 +66,7 @@ func testPeriodLimit(t *testing.T, opts ...PeriodOption) {
 func TestQuotaFull(t *testing.T) {
 	rds := newTestRedis(t)
 	l := NewPeriodLimit(1, 1, rds, "periodlimit")
-	val, err := l.Take("first")
+	val, err := l.Take(context.Background(), "first")
 	assert.Nil(t, err)
 	assert.Equal(t, HitQuota, val)
 }

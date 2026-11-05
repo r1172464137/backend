@@ -7,11 +7,34 @@ ifeq ($(strip $(VERSION)),)
 VERSION=unknown version
 endif
 CHANNEL?=dev
-BUILDTIME=$(shell date -u)
-GOBUILD=CGO_ENABLED=0 go build -trimpath -ldflags '-X "github.com/perfect-panel/server/internal/app/buildinfo.Version=$(VERSION)" \
-		-X "github.com/perfect-panel/server/internal/app/buildinfo.BuildTime=$(BUILDTIME)" \
-		-X "github.com/perfect-panel/server/internal/app/buildinfo.Channel=$(CHANNEL)" \
-		-w -s -buildid='
+# Empty means now. CI passes one value so every artifact of a run agrees.
+BUILD_TIME?=
+# script/ldflags.sh is the only definition of the injected build metadata; the
+# Dockerfile and the release workflow call it too. Expanded once, so every
+# binary of one make run carries the same build time.
+LDFLAGS:=$(shell VERSION='$(VERSION)' CHANNEL='$(CHANNEL)' BUILD_TIME='$(BUILD_TIME)' sh script/ldflags.sh)
+ifeq ($(strip $(LDFLAGS)),)
+$(error script/ldflags.sh failed; check VERSION, CHANNEL and BUILD_TIME)
+endif
+GOBUILD=CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)"
+
+# Pinned developer tools. CI installs the same versions through these targets.
+TOOLS_BIN := $(CURDIR)/bin/tools
+GOLANGCI_LINT_VERSION ?= v2.15.0
+GOIMPORTS_VERSION ?= v0.44.0
+GOVULNCHECK_VERSION ?= v1.8.0
+GORELEASER_VERSION ?= v2.18.2
+# protoc reports this release as "libprotoc 3.21.12", which is the version
+# recorded in the generated files' headers.
+PROTOC_VERSION ?= 21.12
+GOLANGCI_LINT := $(TOOLS_BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+GOIMPORTS := $(TOOLS_BIN)/goimports-$(GOIMPORTS_VERSION)
+PROTOC_GEN_GO := $(TOOLS_BIN)/protoc-gen-go
+PROTOC ?= protoc
+PROTO_FILES := api/server/v1/server.proto
+# lint-new reports issues on lines changed since this revision; HEAD covers
+# uncommitted work, a branch's merge base (LINT_BASE=origin/dev) covers a PR.
+LINT_BASE ?= HEAD
 
 PLATFORM_LIST = \
 	darwin-amd64 \
@@ -36,6 +59,79 @@ all: linux-amd64 darwin-amd64 windows-amd64 # Most used
 
 perf:
 	bash scripts/perf/bench.sh
+
+.PHONY: check fmt fmt-files fmt-check vet lint lint-new test test-race vulncheck proto proto-check ldflags
+
+# check is the fast local subset of CI: formatting, vet, lint and the unit
+# tests (CI adds the database-backed and -race runs, govulncheck and the
+# generated-code check).
+check: fmt-check vet lint test
+
+fmt: $(GOIMPORTS)
+	$(GOIMPORTS) -w .
+
+# Formats only FILES; the pre-commit hook passes the staged Go files.
+fmt-files: $(GOIMPORTS)
+	$(GOIMPORTS) -w $(FILES)
+
+fmt-check: $(GOIMPORTS)
+	@unformatted="$$(gofmt -l .)"; \
+	if [ -n "$$unformatted" ]; then echo "gofmt would reformat:"; echo "$$unformatted"; exit 1; fi
+	@unformatted="$$($(GOIMPORTS) -l .)"; \
+	if [ -n "$$unformatted" ]; then echo "goimports would rewrite (run make fmt):"; echo "$$unformatted"; exit 1; fi
+
+vet:
+	go vet ./...
+
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run ./...
+
+# Reports only issues on lines changed since LINT_BASE: the pre-commit hook's
+# quick pass. CI lints the whole tree.
+lint-new: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run --new-from-rev=$(LINT_BASE) ./...
+
+test:
+	go test ./...
+
+test-race:
+	go test -race ./...
+
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+# Regenerates the protobuf bindings with the pinned protoc and the
+# protoc-gen-go version go.mod requires, which the generated headers record.
+proto: $(PROTOC_GEN_GO) $(GOIMPORTS)
+	@found="$$($(PROTOC) --version 2>/dev/null)"; \
+	if [ "$$found" != "libprotoc 3.$(PROTOC_VERSION)" ]; then \
+		echo "protoc $(PROTOC_VERSION) (libprotoc 3.$(PROTOC_VERSION)) required, found: $${found:-none}"; exit 1; fi
+	$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) --go_out=paths=source_relative:. $(PROTO_FILES)
+	# Keep generator output in the same import format as fmt and the commit hook.
+	$(GOIMPORTS) -w $(PROTO_FILES:.proto=.pb.go)
+
+# Fails when the committed bindings differ from what the .proto files generate.
+proto-check: proto
+	git diff --exit-code -- api/
+
+ldflags:
+	@echo "$(LDFLAGS)"
+
+# print-VAR prints a variable, so workflows read the pinned versions from here:
+#   make -s print-PROTOC_VERSION
+print-%:
+	@echo '$($*)'
+
+$(GOLANGCI_LINT):
+	GOBIN=$(TOOLS_BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	mv $(TOOLS_BIN)/golangci-lint $@
+
+$(GOIMPORTS):
+	GOBIN=$(TOOLS_BIN) go install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+	mv $(TOOLS_BIN)/goimports $@
+
+$(PROTOC_GEN_GO): go.mod go.sum
+	go build -o $@ google.golang.org/protobuf/cmd/protoc-gen-go
 
 darwin-amd64:
 	GOARCH=amd64 GOOS=darwin $(GOBUILD) -o $(BINDIR)/$(NAME)-$@

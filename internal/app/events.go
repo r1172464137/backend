@@ -10,6 +10,8 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/perfect-panel/server/internal/infra/eventbus"
 	"github.com/perfect-panel/server/internal/infra/taskqueue"
+	"github.com/perfect-panel/server/internal/module/identity"
+	"github.com/perfect-panel/server/internal/module/subscription"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"go.opentelemetry.io/otel"
@@ -49,7 +51,9 @@ func (p asynqEventPublisher) Publish(ctx context.Context, event eventbus.Event) 
 
 // originContext resumes the trace context serialized on the outbox row;
 // rows without one (pre-trace events, traceless producers) fall back to the
-// pump's context.
+// pump's context. The resumed trace is extracted into a fresh context: it
+// only parents the delivery's span, and nothing of the pump's own context
+// (its span, deadline or values) belongs to that trace.
 func originContext(ctx context.Context, carrier string) context.Context {
 	if carrier == "" {
 		return ctx
@@ -68,13 +72,16 @@ func originContext(ctx context.Context, carrier string) context.Context {
 // the modules' inbox idempotency.
 func newEventBus(store repository.Store, srv *Application) *eventbus.Bus {
 	bus := eventbus.New(store.Outbox(), asynqEventPublisher{client: srv.Queue})
-	bus.Subscribe("identity.user_registered", "subscription.trial_grant", func(ctx context.Context, event eventbus.Event) error {
+	bus.Subscribe(identity.UserRegisteredTopic, subscription.TrialGrantConsumer, func(ctx context.Context, event eventbus.Event) error {
 		userID, err := strconv.ParseInt(event.Key, 10, 64)
-		if err != nil {
-			logger.Errorw("[EventBus] corrupt user_registered key; dropping", logger.Field("key", event.Key))
-			return nil
+		if err == nil {
+			return srv.Subscription.GrantTrial(ctx, userID)
 		}
-		return srv.Subscription.GrantTrial(ctx, userID)
+		// A key that is not a user id can never be granted a trial: failing
+		// the delivery would only retry it into the dead-letter queue, so the
+		// event is logged and dropped.
+		logger.WithContext(ctx).Errorw("[EventBus] corrupt user_registered key; dropping", logger.Field("key", event.Key))
+		return nil
 	})
 	return bus
 }

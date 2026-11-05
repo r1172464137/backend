@@ -2,17 +2,11 @@ package logger
 
 import (
 	"context"
-	"sync"
-	"sync/atomic"
 
 	"github.com/perfect-panel/server/pkg/requestmeta"
 )
 
-var (
-	fieldsContextKey contextKey
-	globalFields     atomic.Value
-	globalFieldsLock sync.Mutex
-)
+var fieldsContextKey contextKey
 
 // ContextWithRequestMetadata adds explicitly authorized risk metadata to all
 // process logs emitted with this context. Credentials, bodies and other
@@ -55,19 +49,6 @@ func ContextWithRequestMetadata(ctx context.Context, metadata requestmeta.Metada
 
 type contextKey struct{}
 
-// AddGlobalFields adds global fields.
-func AddGlobalFields(fields ...LogField) {
-	globalFieldsLock.Lock()
-	defer globalFieldsLock.Unlock()
-
-	old := globalFields.Load()
-	if old == nil {
-		globalFields.Store(append([]LogField(nil), fields...))
-	} else {
-		globalFields.Store(append(old.([]LogField), fields...))
-	}
-}
-
 // ContextWithFields returns a new context with the given fields.
 func ContextWithFields(ctx context.Context, fields ...LogField) context.Context {
 	if val := ctx.Value(fieldsContextKey); val != nil {
@@ -80,10 +61,4 @@ func ContextWithFields(ctx context.Context, fields ...LogField) context.Context 
 	}
 
 	return context.WithValue(ctx, fieldsContextKey, fields)
-}
-
-// WithFields returns a new logger with the given fields.
-// deprecated: use ContextWithFields instead.
-func WithFields(ctx context.Context, fields ...LogField) context.Context {
-	return ContextWithFields(ctx, fields...)
 }

@@ -88,12 +88,21 @@ func prepareCutoverBackup(t *testing.T, driver, dsn string) {
 		t.Fatal(err)
 	}
 	if err := RequireNoBusinessObjects(context.Background(), db, false); err != nil {
-		pool.Close()
-		t.Fatalf("backup fixture must be empty: %v", err)
+		t.Fatalf("backup fixture must be empty: %v", errors.Join(err, pool.Close()))
 	}
-	pool.Close()
-	m := Migrate(driver, dsn)
-	defer m.Close()
+	if err := pool.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Migrate(driver, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		a, b := m.Close()
+		if err := errors.Join(a, b); err != nil {
+			t.Error(err)
+		}
+	}()
 	version, dirty, err := m.Version()
 	if err != nil && !errors.Is(err, migrate.ErrNilVersion) {
 		t.Fatal(err)
@@ -118,7 +127,11 @@ func prepareCutoverBackup(t *testing.T, driver, dsn string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer seedPool.Close()
+	defer func() {
+		if err := seedPool.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if err := CreateAdminUser("local-backup@example.invalid", "local-test-password", seedDB); err != nil {
 		t.Fatal(err)
 	}
@@ -136,28 +149,12 @@ func runOrderedRoutingDown(t *testing.T, dialect, dsn string) {
 	if dsn == "" {
 		t.Skip("set the dedicated loopback-only ordered-routing test DSN")
 	}
-	var db *sql.DB
-	var err error
-	if dialect == orm.DriverMySQL {
-		cfg, parseErr := mysqlDriver.ParseDSN(dsn)
-		if parseErr != nil {
-			t.Fatal(parseErr)
+	db := openOrderedTestDB(t, dialect, dsn)
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
 		}
-		verifyDisposableDatabase(t, cfg.Net, cfg.Addr, cfg.DBName)
-		cfg.MultiStatements = true
-		db, err = sql.Open("mysql", cfg.FormatDSN())
-	} else {
-		u, parseErr := url.Parse(dsn)
-		if parseErr != nil {
-			t.Fatal(parseErr)
-		}
-		verifyDisposableDatabase(t, "tcp", u.Host, strings.TrimPrefix(u.Path, "/"))
-		db, err = sql.Open("pgx", dsn)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
@@ -190,9 +187,18 @@ func runOrderedRoutingDown(t *testing.T, dialect, dsn string) {
 	const overrideID = int64(876543219)
 	const extraKey = "__ordered_routing_test_large_value__"
 	cleanup := func() {
-		_, _ = db.ExecContext(ctx, "DELETE FROM server_config_overrides WHERE server_id = "+placeholder(1), overrideID)
-		_, _ = db.ExecContext(ctx, "DELETE FROM "+systemTable+" WHERE "+key+" = "+placeholder(1), extraKey)
-		_, _ = db.ExecContext(ctx, "UPDATE "+systemTable+" SET "+value+" = '' WHERE "+key+" = 'Routing'")
+		for _, q := range []struct {
+			sql  string
+			args []any
+		}{
+			{"DELETE FROM server_config_overrides WHERE server_id = " + placeholder(1), []any{overrideID}},
+			{"DELETE FROM " + systemTable + " WHERE " + key + " = " + placeholder(1), []any{extraKey}},
+			{"UPDATE " + systemTable + " SET " + value + " = '' WHERE " + key + " = 'Routing'", nil},
+		} {
+			if _, err := db.ExecContext(ctx, q.sql, q.args...); err != nil {
+				t.Errorf("cleanup: %v", err)
+			}
+		}
 	}
 	defer cleanup()
 	exec := func(query string, args ...any) {
@@ -207,7 +213,9 @@ func runOrderedRoutingDown(t *testing.T, dialect, dsn string) {
 		if err != nil {
 			t.Fatalf("guard changed schema: %v", err)
 		}
-		rows.Close()
+		if err := checkAndCloseRows(rows); err != nil {
+			t.Error(err)
+		}
 	}
 	blocked := func(label string) {
 		t.Helper()
@@ -245,7 +253,9 @@ func runOrderedRoutingDown(t *testing.T, dialect, dsn string) {
 		t.Fatalf("safe down: %v", err)
 	}
 	if rows, err := db.QueryContext(ctx, "SELECT routing FROM server_config_overrides LIMIT 1"); err == nil {
-		rows.Close()
+		if err := checkAndCloseRows(rows); err != nil {
+			t.Error(err)
+		}
 		t.Fatal("down did not remove routing column")
 	}
 	if dialect == orm.DriverMySQL {
@@ -274,4 +284,35 @@ func verifyDisposableDatabase(t *testing.T, network, address, name string) {
 	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		t.Fatal("destructive migration test refuses non-loopback databases")
 	}
+}
+
+func checkAndCloseRows(rows *sql.Rows) (err error) {
+	defer func() { err = errors.Join(err, rows.Close()) }()
+	return rows.Err()
+}
+
+func openOrderedTestDB(t *testing.T, dialect, dsn string) *sql.DB {
+	t.Helper()
+	var db *sql.DB
+	var err error
+	if dialect == orm.DriverMySQL {
+		cfg, parseErr := mysqlDriver.ParseDSN(dsn)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		verifyDisposableDatabase(t, cfg.Net, cfg.Addr, cfg.DBName)
+		cfg.MultiStatements = true
+		db, err = sql.Open("mysql", cfg.FormatDSN())
+	} else {
+		u, parseErr := url.Parse(dsn)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		verifyDisposableDatabase(t, "tcp", u.Host, strings.TrimPrefix(u.Path, "/"))
+		db, err = sql.Open("pgx", dsn)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
 }

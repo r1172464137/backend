@@ -8,6 +8,7 @@ import (
 	"github.com/perfect-panel/server/pkg/requestmeta"
 )
 
+// RedactedValue replaces a redacted field value or text in the log.
 const RedactedValue = "[REDACTED]"
 
 var (

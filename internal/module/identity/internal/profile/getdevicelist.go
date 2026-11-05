@@ -4,35 +4,29 @@ import (
 	"context"
 
 	"github.com/perfect-panel/server/internal/infra/mapping"
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
-	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
-type GetDeviceListLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get Device List
-func newGetDeviceListLogic(ctx context.Context, deps Deps) *GetDeviceListLogic {
-	return &GetDeviceListLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
+// GetDeviceList lists the calling account's devices, their identifiers
+// masked: an identifier signs the device in, so a web session must not read
+// it back in full.
+func (s *Service) GetDeviceList(ctx context.Context) (*dto.GetDeviceListResponse, error) {
+	userInfo, ok := user.FromContext(ctx)
+	if !ok {
+		return nil, xerr.Errorf(xerr.InvalidAccess, "no signed-in user")
 	}
-}
-
-func (l *GetDeviceListLogic) GetDeviceList() (resp *dto.GetDeviceListResponse, err error) {
-	userInfo := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	list, count, err := l.deps.Devices.QueryDeviceList(l.ctx, userInfo.Id)
+	list, count, err := s.deps.Devices.QueryDeviceList(ctx, userInfo.Id)
+	if err != nil {
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "list devices of user %d", userInfo.Id)
+	}
 	userRespList := make([]dto.UserDevice, 0)
-	mapping.DeepCopy(&userRespList, list)
-	resp = &dto.GetDeviceListResponse{
-		Total: count,
-		List:  userRespList,
+	if err := mapping.Copy(&userRespList, list); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "map devices of user %d", userInfo.Id)
 	}
-	return
+	return &dto.GetDeviceListResponse{
+		Total: count,
+		List:  maskDevices(userRespList),
+	}, nil
 }

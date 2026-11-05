@@ -92,11 +92,11 @@ func TestCorsPreflightBypassesServerSecretMiddleware(t *testing.T) {
 func newTestServer(secret string) *Server {
 	platformService := platform.New(platform.Deps{})
 	return New(Dependencies{
-		Routes: routes.Dependencies{Config: appconfig.Config{
+		Routes: routes.Dependencies{Config: appconfig.Config{Runtime: appconfig.Runtime{
 			Node: appconfig.NodeConfig{
 				NodeSecret: secret,
 			},
-		}, Platform: platformService},
+		}}, Platform: platformService},
 	}, "127.0.0.1:0", nil)
 }
 

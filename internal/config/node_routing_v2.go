@@ -67,17 +67,8 @@ func rejectDNSSystemDialer(raw string) error {
 		switch v := value.(type) {
 		case map[string]any:
 			for key, child := range v {
-				if strings.EqualFold(key, "sockopt") {
-					if socket, ok := child.(map[string]any); ok {
-						for name, setting := range socket {
-							if strings.EqualFold(name, "addressPortStrategy") {
-								strategy, ok := setting.(string)
-								if !ok || (strategy != "" && !strings.EqualFold(strategy, "none")) {
-									return fmt.Errorf("addressPortStrategy cannot use system DNS with explicit DNS policy")
-								}
-							}
-						}
-					}
+				if err := rejectDNSSystemSocket(key, child); err != nil {
+					return err
 				}
 				if err := walk(child); err != nil {
 					return err
@@ -95,59 +86,54 @@ func rejectDNSSystemDialer(raw string) error {
 	return walk(root)
 }
 
+func rejectDNSSystemSocket(key string, child any) error {
+	if strings.EqualFold(key, "sockopt") {
+		if socket, ok := child.(map[string]any); ok {
+			for name, setting := range socket {
+				if strings.EqualFold(name, "addressPortStrategy") {
+					strategy, ok := setting.(string)
+					if !ok || (strategy != "" && !strings.EqualFold(strategy, "none")) {
+						return fmt.Errorf("addressPortStrategy cannot use system DNS with explicit DNS policy")
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func normalizeRoutingV2(input, result *NodeRouting, ids map[string]struct{}) error {
 	byID := make(map[string]NodeOutbound, len(result.Outbounds))
 	for _, out := range result.Outbounds {
 		byID[out.ID] = out
 	}
+	links, err := normalizeRoutingChains(input, result, byID)
+	if err != nil {
+		return err
+	}
+	if err := normalizeRoutingDefaults(input, result, ids); err != nil {
+		return err
+	}
+	return normalizeRoutingDNS(input, result, ids, byID, links)
+}
+
+func normalizeRoutingChains(input, result *NodeRouting, byID map[string]NodeOutbound) (map[string]string, error) {
 	links := make(map[string]string, len(byID))
 	for _, out := range result.Outbounds {
 		if input.DNSPolicy != nil {
 			for _, raw := range []string{out.StreamSettings, out.XHTTPExtra} {
 				if err := rejectDNSSystemDialer(raw); err != nil {
-					return errorsWithField("routing.outbounds", err.Error())
+					return nil, errorsWithField("routing.outbounds", err.Error())
 				}
 			}
 		}
-		via := out.ViaOutboundID
-		if out.StreamSettings != "" {
-			var value map[string]json.RawMessage
-			_ = json.Unmarshal([]byte(out.StreamSettings), &value)
-			for k, raw := range value {
-				if !strings.EqualFold(k, "sockopt") {
-					continue
-				}
-				var socket map[string]json.RawMessage
-				if err := json.Unmarshal(raw, &socket); err != nil && string(raw) != "null" {
-					return errorsWithField("routing.outbounds", "invalid raw sockopt")
-				}
-				for name, value := range socket {
-					if !strings.EqualFold(name, "dialerProxy") {
-						continue
-					}
-					var tag string
-					if err := json.Unmarshal(value, &tag); err != nil {
-						return errorsWithField("routing.outbounds", "invalid raw dialerProxy")
-					}
-					if tag == "" {
-						continue
-					}
-					if via != "" {
-						return errorsWithField("routing.outbounds", "raw dialerProxy conflicts with via_outbound_id")
-					}
-					if tag == "Default" || tag == "block" {
-						continue
-					}
-					if !strings.HasPrefix(tag, "routing_") {
-						return errorsWithField("routing.outbounds", "raw dialerProxy must reference an existing outbound")
-					}
-					via = strings.TrimPrefix(tag, "routing_")
-				}
-			}
+		via, err := routingOutboundVia(out)
+		if err != nil {
+			return nil, err
 		}
 		if via != "" {
 			if _, ok := byID[via]; !ok {
-				return errorsWithField("routing.outbounds", fmt.Sprintf("unknown via outbound %q", via))
+				return nil, errorsWithField("routing.outbounds", fmt.Sprintf("unknown via outbound %q", via))
 			}
 		}
 		links[out.ID] = via
@@ -156,11 +142,57 @@ func normalizeRoutingV2(input, result *NodeRouting, ids map[string]struct{}) err
 		visited := make(map[string]bool)
 		for current := out.ID; current != ""; current = links[current] {
 			if visited[current] {
-				return errorsWithField("routing.outbounds", "outbound chain contains a cycle")
+				return nil, errorsWithField("routing.outbounds", "outbound chain contains a cycle")
 			}
 			visited[current] = true
 		}
 	}
+	return links, nil
+}
+
+// routingOutboundVia checks the raw dialer before resolving the resulting link.
+func routingOutboundVia(out NodeOutbound) (string, error) {
+	via := out.ViaOutboundID
+	if out.StreamSettings == "" {
+		return via, nil
+	}
+	var value map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(out.StreamSettings), &value)
+	for k, raw := range value {
+		if !strings.EqualFold(k, "sockopt") {
+			continue
+		}
+		var socket map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &socket); err != nil && string(raw) != "null" {
+			return "", errorsWithField("routing.outbounds", "invalid raw sockopt")
+		}
+		for name, value := range socket {
+			if !strings.EqualFold(name, "dialerProxy") {
+				continue
+			}
+			var tag string
+			if err := json.Unmarshal(value, &tag); err != nil {
+				return "", errorsWithField("routing.outbounds", "invalid raw dialerProxy")
+			}
+			if tag == "" {
+				continue
+			}
+			if via != "" {
+				return "", errorsWithField("routing.outbounds", "raw dialerProxy conflicts with via_outbound_id")
+			}
+			if tag == "Default" || tag == "block" {
+				continue
+			}
+			if !strings.HasPrefix(tag, "routing_") {
+				return "", errorsWithField("routing.outbounds", "raw dialerProxy must reference an existing outbound")
+			}
+			via = strings.TrimPrefix(tag, "routing_")
+		}
+	}
+	return via, nil
+}
+
+func normalizeRoutingDefaults(input, result *NodeRouting, ids map[string]struct{}) error {
 	if len(input.UserDefaults) > MaxRoutingValues {
 		return errorsWithField("routing.user_defaults", "too many entries")
 	}
@@ -177,6 +209,10 @@ func normalizeRoutingV2(input, result *NodeRouting, ids map[string]struct{}) err
 		result.UserDefaults = append(result.UserDefaults, d)
 	}
 	sort.Slice(result.UserDefaults, func(i, j int) bool { return result.UserDefaults[i].UserID < result.UserDefaults[j].UserID })
+	return nil
+}
+
+func normalizeRoutingDNS(input, result *NodeRouting, ids map[string]struct{}, byID map[string]NodeOutbound, links map[string]string) error {
 	if input.DNSPolicy == nil {
 		return nil
 	}
@@ -201,17 +237,8 @@ func normalizeRoutingV2(input, result *NodeRouting, ids map[string]struct{}) err
 		if _, ok := ids[resolver.OutboundID]; !ok || resolver.OutboundID == RoutingBlock {
 			return errorsWithField(field+".outbound_id", "unknown or block outbound")
 		}
-		if resolver.Protocol == "udp" {
-			if out, ok := byID[resolver.OutboundID]; ok {
-				if strings.EqualFold(out.Protocol, "http") {
-					return errorsWithField(field+".outbound_id", "HTTP outbound does not support UDP DNS")
-				}
-				if strings.EqualFold(out.Protocol, "socks") {
-					if via, ok := byID[links[out.ID]]; ok && strings.EqualFold(via.Protocol, "http") {
-						return errorsWithField(field+".outbound_id", "SOCKS UDP through an HTTP predecessor is unsupported")
-					}
-				}
-			}
+		if err := validateResolverOutbound(field, resolver, byID, links); err != nil {
+			return err
 		}
 		if resolver.Domains == nil || len(resolver.Domains) > MaxRoutingValuesPerRule || (i == len(policy.Resolvers)-1) != (len(resolver.Domains) == 0) {
 			return errorsWithField(field+".domains", "only the last resolver must have empty domains")
@@ -231,50 +258,79 @@ func normalizeRoutingV2(input, result *NodeRouting, ids map[string]struct{}) err
 			}
 			resolver.BootstrapIP = ip.String()
 		}
-		var host string
-		switch resolver.Protocol {
-		case "udp", "tcp":
-			normalized, err := NormalizeNodeDNS([]NodeDNS{{Proto: "udp", Address: resolver.Address, Domains: []string{}}})
-			if err != nil {
-				return errorsWithField(field+".address", err.Error())
-			}
-			resolver.Address = normalized[0].Address
-			host = resolver.Address
-			if parsed, _, err := net.SplitHostPort(host); err == nil {
-				host = parsed
-			}
-		case "https":
-			u, err := url.Parse(resolver.Address)
-			if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
-				return errorsWithField(field+".address", "expected HTTPS URL without userinfo or fragment")
-			}
-			if _, err := NormalizeNodeDNS([]NodeDNS{{Proto: "udp", Address: u.Host, Domains: []string{}}}); err != nil {
-				return errorsWithField(field+".address", "invalid HTTPS host or port")
-			}
-			host = u.Hostname()
-		default:
-			return errorsWithField(field+".protocol", "unsupported resolver protocol")
+		host, err := normalizeResolverAddress(field, &resolver)
+		if err != nil {
+			return err
 		}
-		host = strings.Trim(host, "[]")
-		_, literalErr := netip.ParseAddr(host)
-		if resolver.BootstrapIP != "" {
-			if literalErr == nil {
-				return errorsWithField(field+".bootstrap_ip", "cannot bootstrap an IP literal resolver")
-			}
-			canonicalHost := strings.ToLower(strings.TrimSuffix(host, "."))
-			if previous, ok := bootstrapHosts[canonicalHost]; ok && previous != resolver.BootstrapIP {
-				return errorsWithField(field+".bootstrap_ip", "conflicting bootstrap IPs for hostname")
-			}
-			bootstrapHosts[canonicalHost] = resolver.BootstrapIP
-		}
-		// With only one resolver, a direct resolver hostname necessarily asks
-		// itself for its own address unless explicitly bootstrapped.
-		if len(policy.Resolvers) == 1 && resolver.OutboundID == RoutingDirect && resolver.BootstrapIP == "" {
-			if literalErr != nil {
-				return errorsWithField(field+".bootstrap_ip", "required for the resolver's direct self-resolution cycle")
-			}
+		if err := validateResolverBootstrap(field, host, resolver, len(policy.Resolvers), bootstrapHosts); err != nil {
+			return err
 		}
 		result.DNSPolicy.Resolvers = append(result.DNSPolicy.Resolvers, resolver)
 	}
 	return nil
+}
+
+func validateResolverBootstrap(field, host string, resolver NodeDNSResolver, count int, bootstrapHosts map[string]string) error {
+	host = strings.Trim(host, "[]")
+	_, literalErr := netip.ParseAddr(host)
+	if resolver.BootstrapIP != "" {
+		if literalErr == nil {
+			return errorsWithField(field+".bootstrap_ip", "cannot bootstrap an IP literal resolver")
+		}
+		canonicalHost := strings.ToLower(strings.TrimSuffix(host, "."))
+		if previous, ok := bootstrapHosts[canonicalHost]; ok && previous != resolver.BootstrapIP {
+			return errorsWithField(field+".bootstrap_ip", "conflicting bootstrap IPs for hostname")
+		}
+		bootstrapHosts[canonicalHost] = resolver.BootstrapIP
+	}
+	// A single direct resolver hostname otherwise asks itself for its address.
+	if count == 1 && resolver.OutboundID == RoutingDirect && resolver.BootstrapIP == "" {
+		if literalErr != nil {
+			return errorsWithField(field+".bootstrap_ip", "required for the resolver's direct self-resolution cycle")
+		}
+	}
+	return nil
+}
+
+func validateResolverOutbound(field string, resolver NodeDNSResolver, byID map[string]NodeOutbound, links map[string]string) error {
+	if resolver.Protocol == "udp" {
+		if out, ok := byID[resolver.OutboundID]; ok {
+			if strings.EqualFold(out.Protocol, "http") {
+				return errorsWithField(field+".outbound_id", "HTTP outbound does not support UDP DNS")
+			}
+			if strings.EqualFold(out.Protocol, "socks") {
+				if via, ok := byID[links[out.ID]]; ok && strings.EqualFold(via.Protocol, "http") {
+					return errorsWithField(field+".outbound_id", "SOCKS UDP through an HTTP predecessor is unsupported")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeResolverAddress(field string, resolver *NodeDNSResolver) (string, error) {
+	switch resolver.Protocol {
+	case "udp", "tcp":
+		normalized, err := NormalizeNodeDNS([]NodeDNS{{Proto: "udp", Address: resolver.Address, Domains: []string{}}})
+		if err != nil {
+			return "", errorsWithField(field+".address", err.Error())
+		}
+		resolver.Address = normalized[0].Address
+		host := resolver.Address
+		if parsed, _, err := net.SplitHostPort(host); err == nil {
+			host = parsed
+		}
+		return host, nil
+	case "https":
+		u, err := url.Parse(resolver.Address)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
+			return "", errorsWithField(field+".address", "expected HTTPS URL without userinfo or fragment")
+		}
+		if _, err := NormalizeNodeDNS([]NodeDNS{{Proto: "udp", Address: u.Host, Domains: []string{}}}); err != nil {
+			return "", errorsWithField(field+".address", "invalid HTTPS host or port")
+		}
+		return u.Hostname(), nil
+	default:
+		return "", errorsWithField(field+".protocol", "unsupported resolver protocol")
+	}
 }

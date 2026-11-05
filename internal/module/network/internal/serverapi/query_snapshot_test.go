@@ -40,7 +40,7 @@ func TestQueryServerProtocolConfigUsesAuthoritativeDoubleRead(t *testing.T) {
 		},
 		Config: func() Snapshot { panic("routing must not use runtime config") },
 	}
-	response, err := newQueryServerProtocolConfigLogic(context.Background(), deps).QueryServerProtocolConfig(&dto.QueryServerConfigRequest{ServerID: 1})
+	response, err := NewService(deps).QueryServerProtocolConfig(context.Background(), &dto.QueryServerConfigRequest{ServerID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

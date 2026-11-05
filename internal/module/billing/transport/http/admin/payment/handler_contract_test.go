@@ -7,10 +7,14 @@ import (
 	"github.com/perfect-panel/server/internal/module/billing"
 )
 
+// handlerFactory compiles only for a factory that builds a native Hertz
+// handler from S.
+func handlerFactory[S any](func(S) app.HandlerFunc) {}
+
 func TestHandlerFactories_return_native_hertz_handlers(t *testing.T) {
-	var _ func(billing.Service) app.HandlerFunc = CreatePaymentMethodHandler
-	var _ func(billing.Service) app.HandlerFunc = DeletePaymentMethodHandler
-	var _ func(billing.Service) app.HandlerFunc = GetPaymentMethodListHandler
-	var _ func(billing.Service) app.HandlerFunc = GetPaymentPlatformHandler
-	var _ func(billing.Service) app.HandlerFunc = UpdatePaymentMethodHandler
+	handlerFactory[billing.Service](CreatePaymentMethodHandler)
+	handlerFactory[billing.Service](DeletePaymentMethodHandler)
+	handlerFactory[billing.Service](GetPaymentMethodListHandler)
+	handlerFactory[billing.Service](GetPaymentPlatformHandler)
+	handlerFactory[billing.Service](UpdatePaymentMethodHandler)
 }

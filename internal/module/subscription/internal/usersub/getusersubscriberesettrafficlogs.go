@@ -7,34 +7,20 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetUserSubscribeResetTrafficLogsLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get user subcribe reset traffic logs
-func newGetUserSubscribeResetTrafficLogsLogic(ctx context.Context, deps Deps) *GetUserSubscribeResetTrafficLogsLogic {
-	return &GetUserSubscribeResetTrafficLogsLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetUserSubscribeResetTrafficLogsLogic) GetUserSubscribeResetTrafficLogs(req *dto.GetUserSubscribeResetTrafficLogsRequest) (resp *dto.GetUserSubscribeResetTrafficLogsResponse, err error) {
-	data, total, err := l.deps.Logs.FilterSystemLog(l.ctx, &log.FilterParams{
+// GetUserSubscribeResetTrafficLogs pages a subscription's traffic reset log.
+func (s *Service) GetUserSubscribeResetTrafficLogs(ctx context.Context, req *dto.GetUserSubscribeResetTrafficLogsRequest) (*dto.GetUserSubscribeResetTrafficLogsResponse, error) {
+	lg := logger.WithContext(ctx)
+	data, total, err := s.deps.Logs.FilterSystemLog(ctx, &log.FilterParams{
 		Page:     req.Page,
 		Size:     req.Size,
 		Type:     log.TypeResetSubscribe.Uint8(),
 		ObjectID: req.UserSubscribeId,
 	})
 	if err != nil {
-		l.Errorf("[ResetSubscribeTrafficLog] failed to filter system log: %v", err)
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FilterSystemLog failed, err: %v", err)
+		lg.Errorf("[ResetSubscribeTrafficLog] failed to filter system log: %v", err)
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "FilterSystemLog failed, err: %v", err)
 	}
 
 	var list []dto.ResetSubscribeTrafficLog
@@ -42,8 +28,8 @@ func (l *GetUserSubscribeResetTrafficLogsLogic) GetUserSubscribeResetTrafficLogs
 	for _, item := range data {
 		var content log.ResetSubscribe
 		if err = content.Unmarshal([]byte(item.Content)); err != nil {
-			l.Errorf("[ResetSubscribeTrafficLog] failed to unmarshal log: %v", err)
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "corrupt reset subscription log %d: %v", item.Id, err)
+			lg.Errorf("[ResetSubscribeTrafficLog] failed to unmarshal log: %v", err)
+			return nil, xerr.Wrapf(err, xerr.ERROR, "corrupt reset subscription log %d: %v", item.Id, err)
 		}
 		list = append(list, dto.ResetSubscribeTrafficLog{
 			Id:               item.Id,

@@ -16,6 +16,7 @@ const (
 	InventoryRestoreConsumer = inventory.InventoryRestoreConsumer
 )
 
+// ErrOutOfStock reports that the plan has no inventory left to reserve.
 var ErrOutOfStock = inventory.ErrOutOfStock
 
 // Inventory owns reservation persistence. Callers pass only business inputs.
@@ -24,6 +25,7 @@ type Inventory interface {
 	Restore(ctx context.Context, orderNo string, subscribeID int64) error
 }
 
+// NewInventory returns the plan inventory over its store.
 func NewInventory(store InventoryStore) Inventory {
 	return inventory.New(store)
 }

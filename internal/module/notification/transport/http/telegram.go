@@ -1,3 +1,4 @@
+// Package handler holds the Hertz handler of the Telegram bot webhook.
 package handler
 
 import (
@@ -10,8 +11,16 @@ import (
 	"github.com/perfect-panel/server/pkg/logger"
 )
 
+// RegisterTelegramHandlers registers the Telegram bot webhook; botToken
+// reads the current bot token, which the webhook secret derives from.
 func RegisterTelegramHandlers(router *server.Hertz, service notification.Service, botToken func() string) {
 	router.POST("/v1/telegram/webhook", TelegramHandler(service, botToken))
+}
+
+// WebhookUpdates is the part of the notification facade the webhook feeds:
+// it decodes and handles one update.
+type WebhookUpdates interface {
+	HandleTelegramWebhook(ctx context.Context, payload []byte) error
 }
 
 // TelegramHandler documents Telegram.
@@ -24,7 +33,7 @@ func RegisterTelegramHandlers(router *server.Hertz, service notification.Service
 // @Param request body object true "Telegram Bot API update"
 // @Success 200 {object} httpx.ResponseSuccessBean
 // @Router /v1/telegram/webhook [post]
-func TelegramHandler(service notification.Service, botToken func() string) app.HandlerFunc {
+func TelegramHandler(service WebhookUpdates, botToken func() string) app.HandlerFunc {
 	return func(c context.Context, ctx *app.RequestContext) {
 		// Telegram echoes back the secret registered with setWebhook. The
 		// comparison is constant-time and the log line reveals neither the

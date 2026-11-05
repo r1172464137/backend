@@ -5,59 +5,75 @@ import (
 
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
+	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type ToggleUserSubscribeStatusLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
+// ToggleUserSubscribeStatus stops an active subscription or resumes a
+// stopped one. The status is read under the row lock, so the toggle never
+// undoes a status the lifecycle sweep or a refund wrote meanwhile.
+func (s *Service) ToggleUserSubscribeStatus(ctx context.Context, req *dto.ToggleUserSubscribeStatusRequest) error {
+	return s.changeStatus(ctx, req.UserSubscribeId, func(current uint8) (uint8, error) {
+		target, ok := toggledStatus(current)
+		if !ok {
+			return 0, xerr.Errorf(xerr.SubscriptionStatusNotToggleable, "subscription %d has status %d", req.UserSubscribeId, current)
+		}
+		return target, nil
+	})
 }
 
-// NewToggleUserSubscribeStatusLogic Stop user subscribe
-func newToggleUserSubscribeStatusLogic(ctx context.Context, deps Deps) *ToggleUserSubscribeStatusLogic {
-	return &ToggleUserSubscribeStatusLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
+// ChangeUserSubscribeStatus stops or resumes a subscription the caller saw
+// in status from. It refuses when the status changed meanwhile, so an
+// operator's confirmed "stop" can never become a resume because someone
+// stopped it first.
+func (s *Service) ChangeUserSubscribeStatus(ctx context.Context, id int64, from, to uint8) error {
+	if target, ok := toggledStatus(from); !ok || target != to {
+		return xerr.Errorf(xerr.SubscriptionStatusNotToggleable, "subscription %d cannot change from status %d to %d", id, from, to)
 	}
+	return s.changeStatus(ctx, id, func(current uint8) (uint8, error) {
+		if current != from {
+			return 0, xerr.Errorf(xerr.SubscriptionStatusChanged, "subscription %d is now in status %d, not %d", id, current, from)
+		}
+		return to, nil
+	})
 }
 
-func (l *ToggleUserSubscribeStatusLogic) ToggleUserSubscribeStatus(req *dto.ToggleUserSubscribeStatusRequest) error {
-	userSub, err := l.deps.UserSubs.FindOneSubscribe(l.ctx, req.UserSubscribeId)
-	if err != nil {
-		l.Errorw("FindOneSubscribe error", logger.Field("error", err.Error()), logger.Field("userSubscribeId", req.UserSubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), " FindOneSubscribe error: %v", err.Error())
-	}
-
-	switch userSub.Status {
+// toggledStatus is the other end of the stop/resume toggle, the only status
+// change an operator makes by hand.
+func toggledStatus(status uint8) (uint8, bool) {
+	switch status {
 	case usersub.SubscribeStatusActive:
-		userSub.Status = usersub.SubscribeStatusStopped
+		return usersub.SubscribeStatusStopped, true
 	case usersub.SubscribeStatusStopped:
-		userSub.Status = usersub.SubscribeStatusActive
-	default:
-		l.Errorw("invalid user subscribe status", logger.Field("userSubscribeId", req.UserSubscribeId), logger.Field("status", userSub.Status))
-		return errors.Wrapf(xerr.NewErrCodeMsg(xerr.ERROR, "invalid subscribe status"), "invalid user subscribe status: %d", userSub.Status)
+		return usersub.SubscribeStatusActive, true
 	}
+	return 0, false
+}
 
-	err = l.deps.UserSubs.UpdateSubscribe(l.ctx, userSub)
+// changeStatus writes the status next(current) returns, under the row lock,
+// then drops the plan caches.
+func (s *Service) changeStatus(ctx context.Context, id int64, next func(current uint8) (uint8, error)) error {
+	var changed *usersub.Subscribe
+	err := s.deps.Store.InSubscriptionTx(ctx, func(store repository.SubscriptionStore) error {
+		sub, err := store.UserSubscription().FindOneSubscribeForUpdate(ctx, id)
+		if err != nil {
+			return xerr.Wrapf(err, xerr.DatabaseQueryError, "find subscription %d", id)
+		}
+		target, err := next(sub.Status)
+		if err != nil {
+			return err
+		}
+		sub.Status = target
+		if err := store.UserSubscription().UpdateSubscribeColumns(ctx, sub, "status"); err != nil {
+			return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update subscription %d", id)
+		}
+		changed = sub
+		return nil
+	})
 	if err != nil {
-		l.Errorw("UpdateSubscribe error", logger.Field("error", err.Error()), logger.Field("userSubscribeId", req.UserSubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), " UpdateSubscribe error: %v", err.Error())
+		logger.WithContext(ctx).Errorw("[UserSubscribeStatus] change failed", logger.Field("error", xerr.Detail(err)), logger.Field("user_subscribe_id", id))
+		return err
 	}
-
-	// Clear user subscribe cache
-	if err = l.deps.Cache.ClearSubscribeCache(l.ctx, userSub); err != nil {
-		l.Errorw("ClearSubscribeCache failed:", logger.Field("error", err.Error()), logger.Field("userSubscribeId", userSub.Id))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "ClearSubscribeCache failed: %v", err.Error())
-	}
-	// Clear subscribe cache
-	if err = l.deps.Plans.ClearCache(l.ctx, userSub.SubscribeId); err != nil {
-		l.Errorw("failed to clear subscribe cache", logger.Field("error", err.Error()), logger.Field("subscribeId", userSub.SubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "failed to clear subscribe cache: %v", err.Error())
-	}
-
-	return nil
+	return s.clearPlanCaches(ctx, changed.SubscribeId)
 }

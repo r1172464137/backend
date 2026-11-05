@@ -6,21 +6,22 @@ import (
 	"time"
 
 	"github.com/perfect-panel/server/internal/module/platform/entity/outbox"
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/repository/kernel"
+	"github.com/perfect-panel/server/pkg/timeutil"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
-var _ repository.OutboxRepo = (*outboxRepo)(nil)
+var _ kernel.OutboxRepo = (*outboxRepo)(nil)
 
 type outboxRepo struct {
 	db *gorm.DB
 }
 
 // NewOutboxRepo builds the module-owned implementation.
-func NewOutboxRepo(db *gorm.DB) repository.OutboxRepo {
+func NewOutboxRepo(db *gorm.DB) kernel.OutboxRepo {
 	return &outboxRepo{db: db}
 }
 
@@ -65,7 +66,7 @@ func (m *outboxRepo) ListUnpublished(ctx context.Context, limit int) ([]*outbox.
 func (m *outboxRepo) MarkPublished(ctx context.Context, id int64) error {
 	return m.db.WithContext(ctx).Model(&outbox.Event{}).
 		Where("id = ?", id).
-		Update("published_at", time.Now()).Error
+		Update("published_at", timeutil.Now()).Error
 }
 
 func (m *outboxRepo) DeletePublishedBefore(ctx context.Context, cutoff time.Time) (int64, error) {

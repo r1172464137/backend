@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 )
 
 func TestNewWriter(t *testing.T) {
@@ -30,17 +29,8 @@ func TestConsoleWriter(t *testing.T) {
 	w := newConsoleWriter()
 	lw := newLogWriter(log.New(&buf, "", 0))
 	w.(*concreteWriter).errorLog = lw
-	w.Alert("foo bar 1")
-	var val mockedEntry
-	if err := json.Unmarshal(buf.Bytes(), &val); err != nil {
-		t.Fatal(err)
-	}
-	assert.Equal(t, levelAlert, val.Level)
-	assert.Equal(t, "foo bar 1", val.Content)
-
-	buf.Reset()
-	w.(*concreteWriter).errorLog = lw
 	w.Error("foo bar 2")
+	var val mockedEntry
 	if err := json.Unmarshal(buf.Bytes(), &val); err != nil {
 		t.Fatal(err)
 	}
@@ -57,15 +47,6 @@ func TestConsoleWriter(t *testing.T) {
 	assert.Equal(t, "foo bar 3", val.Content)
 
 	buf.Reset()
-	w.(*concreteWriter).severeLog = lw
-	w.Severe("foo bar 4")
-	if err := json.Unmarshal(buf.Bytes(), &val); err != nil {
-		t.Fatal(err)
-	}
-	assert.Equal(t, levelFatal, val.Level)
-	assert.Equal(t, "foo bar 4", val.Content)
-
-	buf.Reset()
 	w.(*concreteWriter).slowLog = lw
 	w.Slow("foo bar 5")
 	if err := json.Unmarshal(buf.Bytes(), &val); err != nil {
@@ -74,30 +55,16 @@ func TestConsoleWriter(t *testing.T) {
 	assert.Equal(t, levelSlow, val.Level)
 	assert.Equal(t, "foo bar 5", val.Content)
 
-	buf.Reset()
-	w.(*concreteWriter).statLog = lw
-	w.Stat("foo bar 6")
-	if err := json.Unmarshal(buf.Bytes(), &val); err != nil {
-		t.Fatal(err)
-	}
-	assert.Equal(t, levelStat, val.Level)
-	assert.Equal(t, "foo bar 6", val.Content)
-
 	w.(*concreteWriter).infoLog = hardToCloseWriter{}
 	assert.NotNil(t, w.Close())
 	w.(*concreteWriter).infoLog = easyToCloseWriter{}
 	w.(*concreteWriter).errorLog = hardToCloseWriter{}
 	assert.NotNil(t, w.Close())
 	w.(*concreteWriter).errorLog = easyToCloseWriter{}
-	w.(*concreteWriter).severeLog = hardToCloseWriter{}
-	assert.NotNil(t, w.Close())
-	w.(*concreteWriter).severeLog = easyToCloseWriter{}
 	w.(*concreteWriter).slowLog = hardToCloseWriter{}
 	assert.NotNil(t, w.Close())
 	w.(*concreteWriter).slowLog = easyToCloseWriter{}
-	w.(*concreteWriter).statLog = hardToCloseWriter{}
-	assert.NotNil(t, w.Close())
-	w.(*concreteWriter).statLog = easyToCloseWriter{}
+	assert.Nil(t, w.Close())
 }
 
 func TestNewFileWriter(t *testing.T) {
@@ -114,16 +81,33 @@ func TestNewFileWriter(t *testing.T) {
 	})
 }
 
+// The file output writes the access (debug and info), error (errors and
+// stacks) and slow logs, the files ReadLastNLogLines reads back.
+func TestFileWriterCreatesTheLogFiles(t *testing.T) {
+	dir := t.TempDir()
+	w, err := newFileWriter(LogConf{Path: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	assert.Equal(t, []string{accessFilename, errorFilename, slowFilename}, names)
+}
+
 func TestNopWriter(t *testing.T) {
 	assert.NotPanics(t, func() {
 		var w nopWriter
-		w.Alert("foo")
 		w.Debug("foo")
 		w.Error("foo")
 		w.Info("foo")
-		w.Severe("foo")
 		w.Stack("foo")
-		w.Stat("foo")
 		w.Slow("foo")
 		_ = w.Close()
 	})
@@ -180,19 +164,11 @@ func TestWritePlainAny(t *testing.T) {
 	assert.Contains(t, buf.String(), "100")
 
 	buf.Reset()
-	writePlainAny(hardToWriteWriter{}, levelStat, 100)
+	writePlainAny(hardToWriteWriter{}, levelInfo, 100)
 	assert.Contains(t, buf.String(), "write error")
 
 	buf.Reset()
 	writePlainAny(hardToWriteWriter{}, levelSevere, "foo")
-	assert.Contains(t, buf.String(), "write error")
-
-	buf.Reset()
-	writePlainAny(hardToWriteWriter{}, levelAlert, "foo")
-	assert.Contains(t, buf.String(), "write error")
-
-	buf.Reset()
-	writePlainAny(hardToWriteWriter{}, levelFatal, "foo")
 	assert.Contains(t, buf.String(), "write error")
 
 	buf.Reset()
@@ -270,117 +246,6 @@ func TestLogWithLimitContentLength(t *testing.T) {
 	})
 }
 
-func TestComboWriter(t *testing.T) {
-	var mockWriters []Writer
-	for i := 0; i < 3; i++ {
-		mockWriters = append(mockWriters, new(tracedWriter))
-	}
-
-	cw := comboWriter{
-		writers: mockWriters,
-	}
-
-	t.Run("Alert", func(t *testing.T) {
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).On("Alert", "test alert").Once()
-		}
-		cw.Alert("test alert")
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Alert", "test alert")
-		}
-	})
-
-	t.Run("Close", func(t *testing.T) {
-		for i := range cw.writers {
-			if i == 1 {
-				cw.writers[i].(*tracedWriter).On("Close").Return(errors.New("error")).Once()
-			} else {
-				cw.writers[i].(*tracedWriter).On("Close").Return(nil).Once()
-			}
-		}
-		err := cw.Close()
-		assert.Error(t, err)
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Close")
-		}
-	})
-
-	t.Run("Debug", func(t *testing.T) {
-		fields := []LogField{{Key: "key", Value: "value"}}
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).On("Debug", "test debug", fields).Once()
-		}
-		cw.Debug("test debug", fields...)
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Debug", "test debug", fields)
-		}
-	})
-
-	t.Run("Error", func(t *testing.T) {
-		fields := []LogField{{Key: "key", Value: "value"}}
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).On("Error", "test error", fields).Once()
-		}
-		cw.Error("test error", fields...)
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Error", "test error", fields)
-		}
-	})
-
-	t.Run("Info", func(t *testing.T) {
-		fields := []LogField{{Key: "key", Value: "value"}}
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).On("Info", "test info", fields).Once()
-		}
-		cw.Info("test info", fields...)
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Info", "test info", fields)
-		}
-	})
-
-	t.Run("Severe", func(t *testing.T) {
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).On("Severe", "test severe").Once()
-		}
-		cw.Severe("test severe")
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Severe", "test severe")
-		}
-	})
-
-	t.Run("Slow", func(t *testing.T) {
-		fields := []LogField{{Key: "key", Value: "value"}}
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).On("Slow", "test slow", fields).Once()
-		}
-		cw.Slow("test slow", fields...)
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Slow", "test slow", fields)
-		}
-	})
-
-	t.Run("Stack", func(t *testing.T) {
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).On("Stack", "test stack").Once()
-		}
-		cw.Stack("test stack")
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Stack", "test stack")
-		}
-	})
-
-	t.Run("Stat", func(t *testing.T) {
-		fields := []LogField{{Key: "key", Value: "value"}}
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).On("Stat", "test stat", fields).Once()
-		}
-		cw.Stat("test stat", fields...)
-		for _, mw := range cw.writers {
-			mw.(*tracedWriter).AssertCalled(t, "Stat", "test stat", fields)
-		}
-	})
-}
-
 type mockedEntry struct {
 	Level     string `json:"level"`
 	Content   string `json:"content"`
@@ -411,45 +276,4 @@ type hardToWriteWriter struct{}
 
 func (h hardToWriteWriter) Write(_ []byte) (_ int, _ error) {
 	return 0, errors.New("write error")
-}
-
-type tracedWriter struct {
-	mock.Mock
-}
-
-func (w *tracedWriter) Alert(v any) {
-	w.Called(v)
-}
-
-func (w *tracedWriter) Close() error {
-	args := w.Called()
-	return args.Error(0)
-}
-
-func (w *tracedWriter) Debug(v any, fields ...LogField) {
-	w.Called(v, fields)
-}
-
-func (w *tracedWriter) Error(v any, fields ...LogField) {
-	w.Called(v, fields)
-}
-
-func (w *tracedWriter) Info(v any, fields ...LogField) {
-	w.Called(v, fields)
-}
-
-func (w *tracedWriter) Severe(v any) {
-	w.Called(v)
-}
-
-func (w *tracedWriter) Slow(v any, fields ...LogField) {
-	w.Called(v, fields)
-}
-
-func (w *tracedWriter) Stack(v any) {
-	w.Called(v)
-}
-
-func (w *tracedWriter) Stat(v any, fields ...LogField) {
-	w.Called(v, fields)
 }

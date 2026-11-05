@@ -7,7 +7,6 @@ import (
 
 	"github.com/perfect-panel/server/internal/module/platform/entity/task"
 	"gorm.io/driver/mysql"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -36,13 +35,7 @@ func TestMySQLTaskScopeFilterUsesGeneratedColumnIndexShape(t *testing.T) {
 }
 
 func TestTaskRepoActiveUpdatesAreTypeAndStateGuarded(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:task-state-guards?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.AutoMigrate(&task.Task{}, &task.TaskError{}); err != nil {
-		t.Fatal(err)
-	}
+	db := openTestDB(t, "task-state-guards", &task.Task{}, &task.TaskError{})
 	repo := NewTaskRepo(db)
 	data := &task.Task{Type: task.TypeEmail, Status: task.StatusPending, Scope: `{}`, Content: `{}`}
 	if err := repo.Insert(context.Background(), data); err != nil {

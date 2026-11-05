@@ -20,7 +20,7 @@ func deviceReplayClient(t *testing.T) *redis.Client {
 	t.Helper()
 	rdb := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: rdb.Addr(), MaxRetries: -1})
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 	return client
 }
 
@@ -34,7 +34,7 @@ func TestDeviceSecurityRejectsUnsignedAndReplayedRequests(t *testing.T) {
 		return appconfig.DeviceConfig{Enable: true, EnableSecurity: true, OnlyRealDevice: true, SecuritySecret: secret}
 	}, client), func(_ context.Context, c *app.RequestContext) {
 		calls++
-		c.JSON(200, map[string]interface{}{"data": map[string]string{"ok": "true"}})
+		c.JSON(200, map[string]any{"data": map[string]string{"ok": "true"}})
 	})
 	data, timestamp, err := deviceauth.Encrypt([]byte(`{"identifier":"device"}`), secret)
 	if err != nil {
@@ -73,7 +73,7 @@ func TestDeviceSecurityUsesAuthenticatedSessionWithoutHeader(t *testing.T) {
 	router := server.New()
 	called := false
 	router.POST("/protected", func(ctx context.Context, c *app.RequestContext) {
-		ctx = context.WithValue(ctx, requestctx.CtxKeyUser, &user.User{Id: 1})
+		ctx = user.NewContext(ctx, &user.User{Id: 1})
 		ctx = context.WithValue(ctx, requestctx.LoginType, "device")
 		c.Next(ctx)
 	}, DeviceMiddleware(func() appconfig.DeviceConfig {
@@ -107,7 +107,7 @@ func TestDeviceSecurityRequiresReplayStoreAndValidQueryEnvelope(t *testing.T) {
 	}
 	rdb := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: rdb.Addr(), MaxRetries: -1})
-	defer client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 	rdb.SetError("unavailable")
 	if err := DecryptDeviceRequest(context.Background(), makeRequest(), secret, client); err == nil {
 		t.Fatal("Redis error accepted")

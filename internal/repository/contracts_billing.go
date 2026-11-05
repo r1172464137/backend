@@ -7,25 +7,38 @@ import (
 	"github.com/perfect-panel/server/internal/module/billing/entity/coupon"
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	"github.com/perfect-panel/server/internal/module/billing/entity/payment"
-	"gorm.io/gorm"
 )
 
-// OrderRepo order 数据访问接口
+// OrderRepo manages the order table: an order from its creation through
+// payment to settlement, and the order statistics of the dashboards.
 type OrderRepo interface {
-	Insert(ctx context.Context, data *order.Order, tx ...*gorm.DB) error
+	Insert(ctx context.Context, data *order.Order) error
 	FindOne(ctx context.Context, id int64) (*order.Order, error)
 	FindOneByOrderNo(ctx context.Context, orderNo string) (*order.Order, error)
 	FindOneByIdempotencyKey(ctx context.Context, key string) (*order.Order, error)
 	FindOneByOrderNoForUpdate(ctx context.Context, orderNo string) (*order.Order, error)
-	Update(ctx context.Context, data *order.Order, tx ...*gorm.DB) error
-	Delete(ctx context.Context, id int64, tx ...*gorm.DB) error
-	UpdateOrderStatusFrom(ctx context.Context, orderNo string, from, status uint8, tx ...*gorm.DB) (bool, error)
-	UpdatePaymentExpectation(ctx context.Context, orderNo string, amount int64, currency string, tx ...*gorm.DB) (bool, error)
-	SetPaymentTradeNoIfEmpty(ctx context.Context, orderNo, tradeNo string, tx ...*gorm.DB) (bool, error)
-	MarkOrderPaid(ctx context.Context, orderNo, tradeNo string, tx ...*gorm.DB) (bool, error)
+	Update(ctx context.Context, data *order.Order) error
+	Delete(ctx context.Context, id int64) error
+	UpdateOrderStatusFrom(ctx context.Context, orderNo string, from, status uint8) (bool, error)
+	UpdatePaymentExpectation(ctx context.Context, orderNo string, amount int64, currency string) (bool, error)
+	SetPaymentTradeNoIfEmpty(ctx context.Context, orderNo, tradeNo string) (bool, error)
+	BeginPaymentSession(ctx context.Context, orderNo string) (bool, error)
+	CompletePaymentSession(ctx context.Context, orderNo, tradeNo, session string) (bool, error)
+	MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, error)
+	// SetCommission records the referral commission paid for the order and
+	// the referrer credited with it; a refund reverses it in proportion
+	// against that referrer, whoever refers the buyer by then.
+	SetCommission(ctx context.Context, orderNo string, amount, refererID int64) error
+	// HasCommissionedOrder reports whether another order of the user has
+	// already earned a referral commission.
+	HasCommissionedOrder(ctx context.Context, userID int64, exceptOrderNo string) (bool, error)
 	CountPendingByPaymentID(ctx context.Context, paymentID int64) (int64, error)
 	QueryOrdersByStatusAfterID(ctx context.Context, status uint8, afterID int64, limit int) ([]*order.Order, error)
 	CountUserCouponUsage(ctx context.Context, userID int64, coupon string) (int64, error)
+	// CountPendingGuestOrders counts the unpaid orders a canonical guest
+	// identity created at or after since and still holds before its account
+	// exists.
+	CountPendingGuestOrders(ctx context.Context, authType, identifier string, since time.Time) (int64, error)
 	QueryOrderListByPage(ctx context.Context, page, size int, status uint8, user, subscribe int64, search string) (int64, []*order.Details, error)
 	FindOneDetails(ctx context.Context, id int64) (*order.Details, error)
 	FindOneDetailsByOrderNo(ctx context.Context, orderNo string) (*order.Details, error)
@@ -55,19 +68,20 @@ type OrderEventRepo interface {
 	DeletePublishedBefore(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
-// PaymentRepo payment 数据访问接口
+// PaymentRepo manages the payment methods administrators configure; a gateway
+// callback finds its method by the token in its notify URL.
 type PaymentRepo interface {
-	Insert(ctx context.Context, data *payment.Payment, tx ...*gorm.DB) error
+	Insert(ctx context.Context, data *payment.Payment) error
 	FindOne(ctx context.Context, id int64) (*payment.Payment, error)
-	Update(ctx context.Context, data *payment.Payment, tx ...*gorm.DB) error
-	Delete(ctx context.Context, id int64, tx ...*gorm.DB) error
+	Update(ctx context.Context, data *payment.Payment) error
+	Delete(ctx context.Context, id int64) error
 	FindOneByPaymentToken(ctx context.Context, token string) (*payment.Payment, error)
 	FindAll(ctx context.Context) ([]*payment.Payment, error)
 	FindListByPage(ctx context.Context, page, size int, req *payment.Filter) (int64, []*payment.Payment, error)
 	FindAvailableMethods(ctx context.Context) ([]*payment.Payment, error)
 }
 
-// CouponRepo coupon 数据访问接口
+// CouponRepo manages the coupons and the count of their uses.
 type CouponRepo interface {
 	Insert(ctx context.Context, data *coupon.Coupon) error
 	FindOne(ctx context.Context, id int64) (*coupon.Coupon, error)
@@ -77,8 +91,8 @@ type CouponRepo interface {
 	UpdateCount(ctx context.Context, code string) error
 	// ReserveUsage atomically claims one coupon use. now is a Unix
 	// millisecond timestamp, matching the stored start/expire columns.
-	ReserveUsage(ctx context.Context, code string, now int64, tx ...*gorm.DB) (bool, error)
-	ReleaseUsage(ctx context.Context, code string, tx ...*gorm.DB) error
+	ReserveUsage(ctx context.Context, code string, now int64) (bool, error)
+	ReleaseUsage(ctx context.Context, code string) error
 	QueryCouponListByPage(ctx context.Context, page, size int, subscribe int64, search string) (total int64, list []*coupon.Coupon, err error)
 	BatchDelete(ctx context.Context, ids []int64) error
 }

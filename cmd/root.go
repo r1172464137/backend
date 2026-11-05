@@ -1,3 +1,7 @@
+// Package cmd is the PPanel command line: run starts the server, first the
+// setup wizard when the configuration is incomplete; migrate holds the
+// database migration tools; version prints the build. It is the only package
+// that imports the composition root, internal/app, to build the application.
 package cmd
 
 import (

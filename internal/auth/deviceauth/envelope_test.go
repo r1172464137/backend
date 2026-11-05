@@ -58,7 +58,7 @@ func TestEnvelopeAuthenticatesOperationAndTimestamp(t *testing.T) {
 func TestReplayReservationIsAtomicAndFailsClosed(t *testing.T) {
 	rdb := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: rdb.Addr(), MaxRetries: -1})
-	defer client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 	e := Envelope{Time: strconv.FormatInt(time.Now().UnixNano(), 16)}
 	var accepted atomic.Int32
 	var wg sync.WaitGroup

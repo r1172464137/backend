@@ -17,7 +17,11 @@ func TestSequenceOrderingIndependentOfWallClock(t *testing.T) {
 	start := time.Unix(1800000000, 0)
 	s.SetTime(start)
 	client := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close redis: %v", err)
+		}
+	})
 	ctx := context.Background()
 	id := func(rev int64) *dto.RoutingCandidateIdentity {
 		return &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: rev}
@@ -297,7 +301,11 @@ func TestIndependentInstancesFreshnessAndUnknown(t *testing.T) {
 	start := time.Unix(1800000000, 0)
 	s.SetTime(start)
 	client := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close redis: %v", err)
+		}
+	})
 	ctx := context.Background()
 	a := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 1, UpdatedAt: 100}
 	b := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "22222222-2222-4222-8222-222222222222", RoutingSequence: 1, UpdatedAt: 100, RoutingError: &dto.RoutingReportError{Stage: "bind", Message: "token=secret"}}

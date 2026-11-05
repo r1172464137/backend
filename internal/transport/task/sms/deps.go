@@ -1,3 +1,5 @@
+// Package sms holds the queue handler that sends verification-code text
+// messages through the configured provider and audits every attempt.
 package sms
 
 import (
@@ -5,8 +7,9 @@ import (
 	"github.com/perfect-panel/server/internal/repository"
 )
 
+// Dependencies are the SMS task's: the message log (the platform kernel's)
+// and the runtime settings.
 type Dependencies struct {
-	Store  repository.Store
+	Logs   repository.LogRepo
 	Mobile func() config.MobileConfig
-	Model  func() string
 }

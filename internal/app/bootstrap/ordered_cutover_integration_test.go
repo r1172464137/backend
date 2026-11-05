@@ -28,7 +28,21 @@ import (
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/orm"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
+
+func migrationDeps(c *config.Config, store repository.Store) *Dependencies {
+	return &Dependencies{Config: func() config.Config { return *c },
+		Administrators:  identity.New(identity.Deps{Store: store, Users: store.User(), UserAuths: store.UserAuth()}),
+		MigrateDatabase: func(ctx context.Context, cfg orm.Config) error { return MigrateOrderedDatabase(ctx, cfg, store) }}
+}
+
+func mustMigrate(t *testing.T, ctx context.Context, deps *Dependencies) {
+	t.Helper()
+	if err := Migrate(ctx, deps); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestOrderedCutoverMySQL(t *testing.T) {
 	runCutoverIntegration(t, "mysql", os.Getenv("PPANEL_TEST_ORDERED_ROUTING_MYSQL_DSN"))
@@ -41,46 +55,8 @@ func runCutoverIntegration(t *testing.T, dialect, dsn string) {
 	if dsn == "" {
 		t.Skip("dedicated loopback cutover database required")
 	}
-	// Proof tools are mandatory and exercised before touching any fixture or
-	// migration. A missing/broken helper must not leave a changed database.
-	requireNodeProof(t)
-	if proof := runNodeProof(t, map[string]any{"kind": "spider_uri", "uri": "/"}); !proof.OK {
-		t.Fatalf("node proof precheck failed: %s", proof.Error)
-	}
-	xray := os.Getenv("PPANEL_TEST_XRAY")
-	if xray == "" {
-		t.Fatal("PPANEL_TEST_XRAY is required before cutover fixtures")
-	}
-	if _, err := exec.LookPath(xray); err != nil {
-		t.Fatalf("xray precheck: %v", err)
-	}
-	var addr, name string
-	if dialect == "mysql" {
-		cfg, err := mysqlDriver.ParseDSN(dsn)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if cfg.Net != "tcp" {
-			t.Fatal("TCP required")
-		}
-		addr, name = cfg.Addr, cfg.DBName
-	} else {
-		u, err := url.Parse(dsn)
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr, name = u.Host, strings.TrimPrefix(u.Path, "/")
-	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		t.Fatal("non-loopback refused")
-	}
-	if !strings.HasSuffix(name, "_test") {
-		t.Fatal("dedicated _test DB required")
-	}
+	verifyCutoverInputs(t, dialect, dsn)
+
 	ctx := context.Background()
 	cfg := orm.ParseDSN(dsn)
 	if cfg == nil {
@@ -99,10 +75,18 @@ func runCutoverIntegration(t *testing.T, dialect, dsn string) {
 		t.Fatal(err)
 	}
 	pool, _ := db.DB()
-	defer pool.Close()
+	defer func() {
+		if err := pool.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	mini := miniredis.RunT(t)
 	rds := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	defer rds.Close()
+	defer func() {
+		if err := rds.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	store := repository.NewGormStoreWithBuilders(db, rds, repository.Builders{Platform: platform.NewRepoBuilder(), Network: network.NewRepoBuilder(rds), Billing: billing.NewRepoBuilder(), Subscription: subscription.NewRepoBuilder(), Identity: identity.NewRepoBuilder(), Support: support.NewRepoBuilder(), Notification: notification.NewRepoBuilder()})
 	set := func(key, value string) {
 		t.Helper()
@@ -119,8 +103,12 @@ func runCutoverIntegration(t *testing.T, dialect, dsn string) {
 		t.Fatal(err)
 	}
 	defer func() {
-		_ = store.Node().DeleteServerConfigOverride(ctx, server.Id)
-		_ = store.Node().DeleteServer(ctx, server.Id)
+		if err := store.Node().DeleteServerConfigOverride(ctx, server.Id); err != nil {
+			t.Error(err)
+		}
+		if err := store.Node().DeleteServer(ctx, server.Id); err != nil {
+			t.Error(err)
+		}
 	}()
 	if err := db.Table("server_config_overrides").Create(map[string]any{"server_id": server.Id, "block": `["full:local.example"]`, "dns": `[]`}).Error; err != nil {
 		t.Fatal(err)
@@ -129,125 +117,29 @@ func runCutoverIntegration(t *testing.T, dialect, dsn string) {
 	c.SetDatabaseConfig(*cfg)
 	c.Administrator.Email = "local-cutover@example.invalid"
 	c.Administrator.Password = "local-test-only"
-	deps := &Dependencies{Config: func() config.Config { return c }, Store: store}
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Error("conflicting tag did not stop cutover")
-			}
-		}()
-		Migrate(deps)
-	}()
-	version, exists, err = schemaVersion(ctx, *cfg)
-	if err != nil || !exists || version != 2179 {
-		t.Fatalf("preflight modified migration version: %d %v %v", version, exists, err)
-	}
-	if db.Migrator().HasColumn("server_config_overrides", "routing") {
-		t.Fatal("preflight performed DDL")
-	}
-	set("Outbound", `[{"name":"egress","protocol":"socks","address":"127.0.0.1","port":1080,"rules":["full:route.example"],"ip_rules":["10.0.0.0/8"],"protocol_rules":["bittorrent"]}]`)
-	if err := db.Table("server_config_overrides").Where("server_id = ?", server.Id).Update("outbound", `[{"name":"dns_out","protocol":"direct"}]`).Error; err != nil {
-		t.Fatal(err)
-	}
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Error("local conflicting tag did not stop cutover")
-			}
-		}()
-		Migrate(deps)
-	}()
-	version, exists, err = schemaVersion(ctx, *cfg)
-	if err != nil || !exists || version != 2179 || db.Migrator().HasColumn("server_config_overrides", "routing") {
-		t.Fatalf("local blocker occurred after DDL: version=%d err=%v", version, err)
-	}
-	if err := db.Table("server_config_overrides").Where("server_id = ?", server.Id).Update("outbound", nil).Error; err != nil {
-		t.Fatal(err)
-	}
-	assertBlockedBeforeDDL := func(label string) {
-		t.Helper()
-		blocked := false
-		func() { defer func() { blocked = recover() != nil }(); Migrate(deps) }()
-		if !blocked {
-			t.Fatalf("%s was not blocked", label)
-		}
-		v, exists, err := schemaVersion(ctx, *cfg)
-		if err != nil || !exists || v != 2179 || db.Migrator().HasColumn("server_config_overrides", "routing") {
-			t.Fatalf("%s blocker after DDL: %d %v", label, v, err)
-		}
-	}
-	for _, bad := range []struct{ name, protocols string }{
-		{"unsupported listener", `[{"type":"naive","port":443,"enable":true}]`},
-		{"shadowsocks plugin", `[{"type":"shadowsocks","port":443,"enable":true,"cipher":"aes-128-gcm","plugin":"obfs"}]`},
-		{"unsupported UoT", `[{"type":"shadowsocks","port":443,"enable":true,"cipher":"aes-128-gcm","uot_version":2}]`},
-		{"case-folded protocol field", `[{"type":"vless","port":443,"enable":true,"transport":"tcp","security":"none","Security":"tls"}]`},
-		{"XHTTP mode", `[{"type":"vless","port":443,"enable":true,"transport":"xhttp","xhttp_mode":"bogus"}]`},
-		{"XHTTP xmux type", `[{"type":"vless","port":443,"enable":true,"transport":"xhttp","xhttp_extra":"{\"xmux\":\"oops\"}"}]`},
-	} {
-		if err := db.Table("servers").Where("id = ?", server.Id).Update("protocols", bad.protocols).Error; err != nil {
-			t.Fatal(err)
-		}
-		assertBlockedBeforeDDL(bad.name)
-	}
-	if err := db.Table("servers").Where("id = ?", server.Id).Update("protocols", `[]`).Error; err != nil {
-		t.Fatal(err)
-	}
-	set("Outbound", `[{"name":"tuic","protocol":"tuic","address":"127.0.0.1","port":443,"uuid":"00000000-0000-0000-0000-000000000001","password":"secret"}]`)
-	assertBlockedBeforeDDL("TUIC outbound")
-	set("Outbound", `[{"name":"bad-spider","protocol":"vless","address":"example.com","port":443,"uuid":"00000000-0000-0000-0000-000000000001","security":"reality","transport":"tcp","reality_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","spider_x":"/%"}]`)
-	assertBlockedBeforeDDL("malformed REALITY spider")
-	set("Outbound", `[{"name":"bad-spider-number","protocol":"vless","address":"example.com","port":443,"uuid":"00000000-0000-0000-0000-000000000001","security":"reality","transport":"tcp","reality_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","spider_x":"/?p=4097"}]`)
-	assertBlockedBeforeDDL("REALITY spider numeric limit")
-	set("Outbound", `[{"name":"raw-uot","protocol":"blackhole","settings":"{\"response\":{\"type\":\"none\",\"uot\":true}}"}]`)
-	assertBlockedBeforeDDL("unconsumed raw UoT")
-	set("Outbound", `[{"name":"egress","protocol":"socks","address":"127.0.0.1","port":1080,"rules":["full:route.example"],"ip_rules":["10.0.0.0/8"],"protocol_rules":["bittorrent"]}]`)
-	set("DNS", `[{"proto":"tls","address":"1.1.1.1","domains":[]}]`)
-	assertBlockedBeforeDDL("global DNS protocol")
-	set("DNS", `[{"proto":"udp","address":"1.1.1.1","domains":["regexp:("]}]`)
-	assertBlockedBeforeDDL("global DNS invalid regexp")
-	set("DNS", `[]`)
-	if err := db.Table("server_config_overrides").Where("server_id = ?", server.Id).Update("dns", `[{"address":"https://resolver.example/dns-query","domains":[]}]`).Error; err != nil {
-		t.Fatal(err)
-	}
-	assertBlockedBeforeDDL("local DNS address")
-	if err := db.Table("server_config_overrides").Where("server_id = ?", server.Id).Update("dns", `[]`).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := store.System().UpdateValueByCategoryKey(ctx, "server", "NodePullInterval", "86401", "int"); err != nil {
-		t.Fatal(err)
-	}
-	assertBlockedBeforeDDL("invalid pull interval")
-	if err := store.System().UpdateValueByCategoryKey(ctx, "server", "NodePullInterval", "10", "int"); err != nil {
-		t.Fatal(err)
-	}
-	legacyEntries, err := store.System().GetLegacyNodeConfigUncached(ctx)
+	deps := migrationDeps(&c, store)
+	checkCutoverBlockers(t, ctx, db, cfg, store, deps, server, set)
+
+	// Build the expected legacy routes from the seeded fixture, independently
+	// of the production decoder used by the offline converter.
+	globalLegacy := config.LegacyRoutingInput{Block: []string{"full:global.example"}, BlockIPs: []string{"10.0.0.0/8"}, BlockProtocols: []string{"bittorrent"},
+		Outbound: []config.NodeOutbound{{Name: "egress", Protocol: "socks", Address: "127.0.0.1", Port: 1080, Rules: []string{"full:route.example"}, IPRules: []string{"10.0.0.0/8"}, ProtocolRules: []string{"bittorrent"}}}}
+	localLegacy := globalLegacy
+	localLegacy.Block, localLegacy.BlockIPs, localLegacy.BlockProtocols = []string{"full:local.example"}, nil, nil
+	first, err := network.PreflightOrderedCutover(ctx, store, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	globalLegacy, err := decodeLegacyRouting(legacyEntries)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyOverride, err := store.Node().FindServerConfigOverride(ctx, server.Id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	localLegacy, _, err := effectiveLegacyRouting(globalLegacy, legacyOverride)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := preflightOrderedCutover(ctx, store, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := preflightOrderedCutover(ctx, store, false)
+	second, err := network.PreflightOrderedCutover(ctx, store, false)
 	if err != nil || !reflect.DeepEqual(first, second) {
 		t.Fatalf("nondeterministic plans %v", err)
 	}
-	Migrate(deps)
+	installCutoverGuard(t, db, dialect)
+	mustMigrate(t, ctx, deps)
+	removeCutoverGuard(t, db, dialect)
 	version, _, err = schemaVersion(ctx, *cfg)
-	if err != nil || version != 2180 {
-		t.Fatalf("version %d %v", version, err)
+	if err != nil || version != 3024 {
+		t.Fatalf("latest version %d %v, want 3024 after 02180 cutover", version, err)
 	}
 	entries, err := store.System().GetNodeConfigUncached(ctx)
 	if err != nil {
@@ -285,24 +177,7 @@ func runCutoverIntegration(t *testing.T, dialect, dsn string) {
 		t.Fatal(err)
 	}
 	compareEffectiveXrayRules(t, &localPolicy, localLegacy)
-	// Simulate interruption after per-domain writes but before the final marker.
-	if err := store.System().UpdateValueByCategoryKey(ctx, "server", "RoutingCutover", "pending", "string"); err != nil {
-		t.Fatal(err)
-	}
-	Migrate(deps)
-	entries, err = store.System().GetNodeConfigUncached(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	completed := false
-	for _, e := range entries {
-		if e.Key == "RoutingCutover" && e.Value == "complete" {
-			completed = true
-		}
-	}
-	if !completed {
-		t.Fatal("interrupted cutover did not resume")
-	}
+	checkCutoverRestart(t, ctx, db, cfg, store, deps, set)
 }
 
 // Compile both the actual legacy builder's ordered categories and the migrated
@@ -355,51 +230,8 @@ func compareEffectiveXrayRules(t *testing.T, policy *config.NodeRouting, source 
 		}
 		ordered = append(ordered, map[string]any{"type": "field", rule.Kind: rule.Values, "outboundTag": tag})
 	}
-	compile := func(rules []map[string]any, customTag string) []map[string]any {
-		t.Helper()
-		cfg := map[string]any{"log": map[string]any{"loglevel": "none"}, "outbounds": []map[string]any{
-			{"tag": "Default", "protocol": "freedom", "settings": map[string]any{}},
-			{"tag": "block", "protocol": "blackhole", "settings": map[string]any{}},
-			{"tag": "dns_out", "protocol": "dns", "settings": map[string]any{}},
-			{"tag": customTag, "protocol": source.Outbound[0].Protocol, "settings": map[string]any{"address": source.Outbound[0].Address, "port": source.Outbound[0].Port}},
-		}, "routing": map[string]any{"domainStrategy": "AsIs", "rules": rules}}
-		body, err := json.Marshal(cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		file := filepath.Join(t.TempDir(), "xray.json")
-		if err := os.WriteFile(file, body, 0600); err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		output, err := exec.CommandContext(ctx, xray, "convert", "pb", "-debug", file).CombinedOutput()
-		if err != nil {
-			t.Fatalf("compile Xray fixture: %v: %s", err, output)
-		}
-		start := bytes.Index(output, []byte("{\n"))
-		if start < 0 {
-			t.Fatalf("Xray debug JSON missing: %s", output)
-		}
-		var decoded struct {
-			App []map[string]json.RawMessage `json:"app"`
-		}
-		if err := json.Unmarshal(output[start:], &decoded); err != nil {
-			t.Fatal(err)
-		}
-		for _, app := range decoded.App {
-			if raw, ok := app["rule"]; ok {
-				var result []map[string]any
-				if err := json.Unmarshal(raw, &result); err != nil {
-					t.Fatal(err)
-				}
-				return result
-			}
-		}
-		t.Fatal("compiled Xray router missing")
-		return nil
-	}
-	before, after := compile(legacy, oldTag), compile(ordered, newTag)
+
+	before, after := compileCutoverRules(t, xray, source, legacy, oldTag), compileCutoverRules(t, xray, source, ordered, newTag)
 	for _, rule := range after {
 		if target, ok := rule["TargetTag"].(map[string]any); ok && target["Tag"] == newTag {
 			target["Tag"] = oldTag
@@ -428,6 +260,275 @@ func compareEffectiveXrayRules(t *testing.T, policy *config.NodeRouting, source 
 		}
 		if proof.Rules[i].Kind != kind || proof.Rules[i].Tag != tag {
 			t.Fatalf("node rule %d = %#v, want %s/%s", i, proof.Rules[i], kind, tag)
+		}
+	}
+}
+
+func checkCutoverBlockers(t *testing.T, ctx context.Context, db *gorm.DB, cfg *orm.Config, store repository.Store, deps *Dependencies, server *node.Server, set func(string, string)) {
+	t.Helper()
+	if Migrate(ctx, deps) == nil {
+		t.Fatal("conflicting tag did not stop cutover")
+	}
+	version, exists, err := schemaVersion(ctx, *cfg)
+	if err != nil || !exists || version != 2179 {
+		t.Fatalf("preflight modified migration version: %d %v %v", version, exists, err)
+	}
+	if db.Migrator().HasColumn("server_config_overrides", "routing") {
+		t.Fatal("preflight performed DDL")
+	}
+	set("Outbound", `[{"name":"egress","protocol":"socks","address":"127.0.0.1","port":1080,"rules":["full:route.example"],"ip_rules":["10.0.0.0/8"],"protocol_rules":["bittorrent"]}]`)
+	if err := db.Table("server_config_overrides").Where("server_id = ?", server.Id).Update("outbound", `[{"name":"dns_out","protocol":"direct"}]`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if Migrate(ctx, deps) == nil {
+		t.Fatal("local conflicting tag did not stop cutover")
+	}
+	version, exists, err = schemaVersion(ctx, *cfg)
+	if err != nil || !exists || version != 2179 || db.Migrator().HasColumn("server_config_overrides", "routing") {
+		t.Fatalf("local blocker occurred after DDL: version=%d err=%v", version, err)
+	}
+	if err := db.Table("server_config_overrides").Where("server_id = ?", server.Id).Update("outbound", nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	assertBlockedBeforeDDL := func(label string) {
+		t.Helper()
+		if Migrate(ctx, deps) == nil {
+			t.Fatalf("%s was not blocked", label)
+		}
+		v, exists, err := schemaVersion(ctx, *cfg)
+		if err != nil || !exists || v != 2179 || db.Migrator().HasColumn("server_config_overrides", "routing") {
+			t.Fatalf("%s blocker after DDL: %d %v", label, v, err)
+		}
+	}
+	for _, bad := range []struct{ name, protocols string }{
+		{"unsupported listener", `[{"type":"naive","port":443,"enable":true}]`},
+		{"shadowsocks plugin", `[{"type":"shadowsocks","port":443,"enable":true,"cipher":"aes-128-gcm","plugin":"obfs"}]`},
+		{"unsupported UoT", `[{"type":"shadowsocks","port":443,"enable":true,"cipher":"aes-128-gcm","uot_version":2}]`},
+		{"case-folded protocol field", `[{"type":"vless","port":443,"enable":true,"transport":"tcp","security":"none","Security":"tls"}]`},
+		{"XHTTP mode", `[{"type":"vless","port":443,"enable":true,"transport":"xhttp","xhttp_mode":"bogus"}]`},
+		{"XHTTP xmux type", `[{"type":"vless","port":443,"enable":true,"transport":"xhttp","xhttp_extra":"{\"xmux\":\"oops\"}"}]`},
+	} {
+		if err := db.Table("servers").Where("id = ?", server.Id).Update("protocols", bad.protocols).Error; err != nil {
+			t.Fatal(err)
+		}
+		assertBlockedBeforeDDL(bad.name)
+	}
+	if err := db.Table("servers").Where("id = ?", server.Id).Update("protocols", `[]`).Error; err != nil {
+		t.Fatal(err)
+	}
+	set("Outbound", `[{"name":"tuic","protocol":"tuic","address":"127.0.0.1","port":443,"uuid":"00000000-0000-0000-0000-000000000001","password":"secret"}]`)
+	assertBlockedBeforeDDL("TUIC outbound")
+	set("Outbound", `[{"name":"bad-spider","protocol":"vless","address":"example.com","port":443,"uuid":"00000000-0000-0000-0000-000000000001","security":"reality","transport":"tcp","reality_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","spider_x":"/%"}]`)
+	assertBlockedBeforeDDL("malformed REALITY spider")
+	set("Outbound", `[{"name":"bad-spider-number","protocol":"vless","address":"example.com","port":443,"uuid":"00000000-0000-0000-0000-000000000001","security":"reality","transport":"tcp","reality_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","spider_x":"/?p=4097"}]`)
+	assertBlockedBeforeDDL("REALITY spider numeric limit")
+	set("Outbound", `[{"name":"raw-uot","protocol":"blackhole","settings":"{\"response\":{\"type\":\"none\",\"uot\":true}}"}]`)
+	assertBlockedBeforeDDL("unconsumed raw UoT")
+	set("Outbound", `[{"name":"egress","protocol":"socks","address":"127.0.0.1","port":1080,"rules":["full:route.example"],"ip_rules":["10.0.0.0/8"],"protocol_rules":["bittorrent"]}]`)
+	set("DNS", `[{"proto":"tls","address":"1.1.1.1","domains":[]}]`)
+	assertBlockedBeforeDDL("global DNS protocol")
+	set("DNS", `[{"proto":"udp","address":"1.1.1.1","domains":["regexp:("]}]`)
+	assertBlockedBeforeDDL("global DNS invalid regexp")
+	set("DNS", `[]`)
+	if err := db.Table("server_config_overrides").Where("server_id = ?", server.Id).Update("dns", `[{"address":"https://resolver.example/dns-query","domains":[]}]`).Error; err != nil {
+		t.Fatal(err)
+	}
+	assertBlockedBeforeDDL("local DNS address")
+	if err := db.Table("server_config_overrides").Where("server_id = ?", server.Id).Update("dns", `[]`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.System().UpdateValueByCategoryKey(ctx, "server", "NodePullInterval", "86401", "int"); err != nil {
+		t.Fatal(err)
+	}
+	assertBlockedBeforeDDL("invalid pull interval")
+	if err := store.System().UpdateValueByCategoryKey(ctx, "server", "NodePullInterval", "10", "int"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkCutoverRestart(t *testing.T, ctx context.Context, db *gorm.DB, cfg *orm.Config, store repository.Store, deps *Dependencies, set func(string, string)) {
+	t.Helper()
+	// Simulate interruption after per-domain writes but before the final marker.
+	if err := store.System().UpdateValueByCategoryKey(ctx, "server", "RoutingCutover", "pending", "string"); err != nil {
+		t.Fatal(err)
+	}
+	mustMigrate(t, ctx, deps)
+	entries, err := store.System().GetNodeConfigUncached(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := false
+	for _, e := range entries {
+		if e.Key == "RoutingCutover" && e.Value == "complete" {
+			completed = true
+		}
+	}
+	if !completed {
+		t.Fatal("interrupted cutover did not resume")
+	}
+	// A high upstream version does not prove the fork cutover took place.
+	set("RoutingCutover", "")
+	if err := Migrate(ctx, deps); err == nil {
+		t.Fatal("high version without cutover marker accepted")
+	}
+	version, _, err := schemaVersion(ctx, *cfg)
+	if err != nil || version != 3024 {
+		t.Fatalf("missing-marker refusal wrote migration state: %d %v", version, err)
+	}
+	set("RoutingCutover", "complete")
+	mustMigrate(t, ctx, deps) // A complete latest schema restarts without conversion.
+	if err := db.Exec("UPDATE schema_migrations SET version = ?", 3025).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, deps); err == nil {
+		t.Fatal("unknown future schema accepted")
+	}
+	if err := db.Exec("UPDATE schema_migrations SET version = ?, dirty = ?", 3024, true).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, deps); err == nil {
+		t.Fatal("dirty later schema accepted")
+	}
+	if err := db.Exec("UPDATE schema_migrations SET dirty = ?", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Even a valid marker and current version cannot substitute for legacy
+	// backup columns; detect this before writing anything.
+	if err := db.Migrator().DropColumn("server_config_overrides", "block_ips"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, deps); err == nil {
+		t.Fatal("missing legacy column accepted")
+	}
+	version, _, err = schemaVersion(ctx, *cfg)
+	if err != nil || version != 3024 {
+		t.Fatalf("column refusal modified version: %d %v", version, err)
+	}
+}
+
+func compileCutoverRules(t *testing.T, xray string, source config.LegacyRoutingInput, rules []map[string]any, customTag string) []map[string]any {
+	t.Helper()
+	cfg := map[string]any{"log": map[string]any{"loglevel": "none"}, "outbounds": []map[string]any{
+		{"tag": "Default", "protocol": "freedom", "settings": map[string]any{}},
+		{"tag": "block", "protocol": "blackhole", "settings": map[string]any{}},
+		{"tag": "dns_out", "protocol": "dns", "settings": map[string]any{}},
+		{"tag": customTag, "protocol": source.Outbound[0].Protocol, "settings": map[string]any{"address": source.Outbound[0].Address, "port": source.Outbound[0].Port}},
+	}, "routing": map[string]any{"domainStrategy": "AsIs", "rules": rules}}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "xray.json")
+	if err := os.WriteFile(file, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, xray, "convert", "pb", "-debug", file).CombinedOutput()
+	if err != nil {
+		t.Fatalf("compile Xray fixture: %v: %s", err, output)
+	}
+	start := bytes.Index(output, []byte("{\n"))
+	if start < 0 {
+		t.Fatalf("Xray debug JSON missing: %s", output)
+	}
+	var decoded struct {
+		App []map[string]json.RawMessage `json:"app"`
+	}
+	if err := json.Unmarshal(output[start:], &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, app := range decoded.App {
+		if raw, ok := app["rule"]; ok {
+			var result []map[string]any
+			if err := json.Unmarshal(raw, &result); err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+	}
+	t.Fatal("compiled Xray router missing")
+	return nil
+}
+
+func verifyCutoverInputs(t *testing.T, dialect, dsn string) {
+	t.Helper()
+	// Proof tools are mandatory and exercised before touching any fixture or
+	// migration. A missing/broken helper must not leave a changed database.
+	requireNodeProof(t)
+	if proof := runNodeProof(t, map[string]any{"kind": "spider_uri", "uri": "/"}); !proof.OK {
+		t.Fatalf("node proof precheck failed: %s", proof.Error)
+	}
+	xray := os.Getenv("PPANEL_TEST_XRAY")
+	if xray == "" {
+		t.Fatal("PPANEL_TEST_XRAY is required before cutover fixtures")
+	}
+	if _, err := exec.LookPath(xray); err != nil {
+		t.Fatalf("xray precheck: %v", err)
+	}
+	var addr, name string
+	if dialect == "mysql" {
+		cfg, err := mysqlDriver.ParseDSN(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Net != "tcp" {
+			t.Fatal("TCP required")
+		}
+		addr, name = cfg.Addr, cfg.DBName
+	} else {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr, name = u.Host, strings.TrimPrefix(u.Path, "/")
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		t.Fatal("non-loopback refused")
+	}
+	if !strings.HasSuffix(name, "_test") {
+		t.Fatal("dedicated _test DB required")
+	}
+}
+
+func installCutoverGuard(t *testing.T, db *gorm.DB, dialect string) {
+	t.Helper()
+	// Observe the actual migration boundary: the first official migration is
+	// forbidden until the fork's 02180 marker is durably complete.
+	if dialect == "mysql" {
+		if err := db.Exec(`CREATE TRIGGER require_cutover BEFORE UPDATE ON schema_migrations FOR EACH ROW
+			BEGIN IF NEW.version = 3000 AND COALESCE((SELECT value FROM ` + "`system`" + ` WHERE category='server' AND ` + "`key`" + `='RoutingCutover'), '') <> 'complete' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='cutover incomplete'; END IF; END`).Error; err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err := db.Exec(`CREATE FUNCTION require_cutover() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+			IF NEW.version = 3000 AND (SELECT value FROM system WHERE category='server' AND "key"='RoutingCutover') IS DISTINCT FROM 'complete' THEN RAISE EXCEPTION 'cutover incomplete'; END IF;
+			RETURN NEW; END $$`).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Exec(`CREATE TRIGGER require_cutover BEFORE UPDATE ON schema_migrations FOR EACH ROW EXECUTE FUNCTION require_cutover()`).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func removeCutoverGuard(t *testing.T, db *gorm.DB, dialect string) {
+	t.Helper()
+
+	if dialect == "mysql" {
+		if err := db.Exec(`DROP TRIGGER require_cutover`).Error; err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err := db.Exec(`DROP TRIGGER require_cutover ON schema_migrations`).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Exec(`DROP FUNCTION require_cutover()`).Error; err != nil {
+			t.Fatal(err)
 		}
 	}
 }

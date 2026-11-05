@@ -1,3 +1,6 @@
+// Package task holds the task bookkeeping rows (the task and task_error
+// tables) and the scope and content of the batch email and quota gift tasks
+// they record.
 package task
 
 import (
@@ -59,7 +62,7 @@ func (TaskError) TableName() string {
 	return "task_error"
 }
 
-// Filter task 列表查询过滤条件
+// Filter selects a page of the task list.
 type Filter struct {
 	Type   Type
 	Page   int

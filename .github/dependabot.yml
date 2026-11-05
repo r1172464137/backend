@@ -1,0 +1,43 @@
+# Dependabot keeps the Go modules and the SHA-pinned GitHub Actions current.
+# Minor and patch module updates arrive as one weekly pull request so the
+# review cost stays low; a major update gets a pull request of its own, since
+# it usually needs code changes. Action pins are bumped together for the same
+# reason. Commit messages follow the repository's conventional-commit rules
+# (.commitlintrc.json).
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    groups:
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: "build(deps)"
+    labels:
+      - dependencies
+      - go
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Shanghai
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - github-actions

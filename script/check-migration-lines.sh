@@ -13,6 +13,15 @@
 #
 # Hence the reserved bands: LTS fixes stay below FEATURE_BAND_START, feature work
 # starts at it.
+#
+# The LTS band only matters while the two lines have diverged. As long as the
+# LTS ref is an ancestor of HEAD (master fast-forwarded to dev, or master checked
+# out itself), the two refs are one line and the feature-band migrations on it
+# are simply the line's own, so the check that LTS migrations stay below
+# FEATURE_BAND_START does not apply and is skipped. The other checks run in both
+# cases: both dialects present, no LTS migration missing here, and a migration
+# that exists only here numbered in the feature band (on one line too, a number
+# below one already applied is skipped by every database past it).
 
 set -euo pipefail
 
@@ -45,6 +54,17 @@ fi
 
 status=0
 
+# One line or two. merge-base --is-ancestor also holds for equal refs; on a
+# shallow clone it cannot see the ancestry and reports two lines, so CI checks
+# out the full history.
+if git merge-base --is-ancestor "$LTS_REF" HEAD; then
+  one_line=1
+  echo "check-migration-lines: $LTS_REF is an ancestor of HEAD (or HEAD itself), so the two refs are one"
+  echo "migration line; skipping only the check that its migrations stay below the feature band."
+else
+  one_line=0
+fi
+
 # Every migration needs both dialects: one that ships for only one of them takes
 # down every deployment on the other.
 mysql_numbers="$(local_migration_numbers mysql)"
@@ -68,15 +88,17 @@ if [ -n "$missing" ]; then
   status=1
 fi
 
-while read -r number; do
-  [ -n "$number" ] || continue
-  if [ "$((10#$number))" -ge "$FEATURE_BAND_START" ]; then
-    echo "Migration $number is on $LTS_REF but sits in the feature band (>= $FEATURE_BAND_START)."
-    echo "LTS migrations must stay below it so the feature line can always add"
-    echo "migrations above every number an LTS database has already applied."
-    status=1
-  fi
-done <<<"$lts_numbers"
+if [ "$one_line" -eq 0 ]; then
+  while read -r number; do
+    [ -n "$number" ] || continue
+    if [ "$((10#$number))" -ge "$FEATURE_BAND_START" ]; then
+      echo "Migration $number is on $LTS_REF but sits in the feature band (>= $FEATURE_BAND_START)."
+      echo "LTS migrations must stay below it so the feature line can always add"
+      echo "migrations above every number an LTS database has already applied."
+      status=1
+    fi
+  done <<<"$lts_numbers"
+fi
 
 feature_only="$(comm -13 <(echo "$lts_numbers") <(echo "$head_numbers"))"
 while read -r number; do
@@ -90,7 +112,11 @@ while read -r number; do
 done <<<"$feature_only"
 
 if [ "$status" -eq 0 ]; then
-  echo "Migration lines agree: $(echo "$lts_numbers" | grep -c .) on ${LTS_REF}, $(echo "$feature_only" | grep -c .) feature-only."
+  if [ "$one_line" -eq 1 ]; then
+    echo "Migration lines agree: $(echo "$lts_numbers" | grep -c .) on ${LTS_REF}, $(echo "$feature_only" | grep -c .) added since (one line)."
+  else
+    echo "Migration lines agree: $(echo "$lts_numbers" | grep -c .) on ${LTS_REF}, $(echo "$feature_only" | grep -c .) feature-only."
+  fi
 fi
 
 exit "$status"

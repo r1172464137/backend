@@ -28,11 +28,11 @@
 |---|---|---|
 | `identity` | 用户、认证、OAuth、设备、验证码 | UserRepo、AuthRepo、UserAuthRepo、UserDeviceRepo、模块内的 OAuth 适配器 |
 | `billing` | 订单、支付、优惠券、余额与提现 | OrderRepo、OrderEventRepo、PaymentRepo、CouponRepo、UserWithdrawalRepo、模块内的订单上下文、订单事件与支付适配器 |
-| `subscription` | 套餐、用户订阅、配额、库存、用量入账与模板渲染 | SubscribeRepo、UserSubscriptionRepo、SubscriptionTrafficRepo、模块内的 inventory、trafficusage 与 render |
+| `subscription` | 套餐、用户订阅、配额、库存、用量入账、客户端应用与模板渲染 | SubscribeRepo、UserSubscriptionRepo、SubscriptionTrafficRepo、EntitlementRepo、ClientRepo、模块内的 inventory、trafficusage 与 render |
 | `network` | 节点、流量、edge | NodeRepo、TrafficRepo、`internal/module/network/internal/edgeauth`、`internal/module/network/internal/trafficagg` |
 | `support` | 工单、公告、文档、广告、营销 | TicketRepo、AnnouncementRepo、DocumentRepo、AdsRepo |
-| `notification` | email / sms / telegram / 站内通知 | `internal/infra/mail`、`internal/infra/sms`、`internal/transport/task/email` 与 `sms`、telegram bot |
-| `platform`（共享内核） | 配置、系统设置、日志、汇率、GeoIP、缓存、ID 生成 | SystemRepo、LogRepo、ClientRepo、TaskRepo、`pkg/*` 基础库 |
+| `notification` | email / sms / telegram / 站内通知 | TelegramTopicRepo、`internal/infra/mail`、`internal/infra/sms`、`internal/transport/task/email` 与 `sms`、telegram bot |
+| `platform`（共享内核） | 配置、系统设置、日志、GeoIP、缓存、ID 生成 | SystemRepo、LogRepo、TaskRepo、InboxRepo、OutboxRepo、`pkg/*` 基础库 |
 
 划分原则：粒度对齐"未来的微服务候选"。`platform` 是共享内核，任何模块可依赖它，它不依赖任何模块。
 
@@ -42,7 +42,7 @@
 internal/module/<name>/
 ├── <name>.go        # 门面：接口 + 构造函数 New(deps)
 ├── contract/        # 本模块拥有的 Command / Query / Result 与跨域只读快照
-├── events/          # 集成事件定义（其他模块可订阅）
+├── events/          # 集成事件载荷（按需；主题常量由门面导出，其他模块可订阅）
 ├── entity/          # 模块拥有的持久化数据定义
 ├── transport/http/  # 本模块的 Hertz handler（只依赖本模块门面与 contract）
 └── internal/        # 实现：service / repo / 供应商适配器 —— Go 编译器保证外部不可 import
@@ -62,19 +62,37 @@ internal/module/<name>/
 
 ### 边界强制（已落地）
 
+EPay V1/V2 协议实现位于 `billing/internal/payment/epay/protocol`，兼容适配与
+业务网关仍在 billing 内部。API 下单的请求标记与可复用支付入口保存在 billing 拥有的
+`order.payment_session`；先持久化标记再调用远端，失败后保留未知结果并走现有对账，
+不持有跨网络事务锁，也不新增跨模块写入。详见 [EPay 接入](../guide/epay-zh.md)。
+
 - **编译器**：模块实现位于嵌套 `internal/` 下，跨模块 import 内部包直接编译失败。
-- **架构测试** `internal/arch/arch_test.go`（随 `go test ./...` 与 lefthook pre-commit 运行）：
-  - `TestLogicImportFreeze`：legacy logic 跨包依赖基线已清零，禁止恢复；
+- **架构测试** `internal/arch`（随 `go test ./...`、CI 与 lefthook pre-commit 运行）：
   - `TestInternalLayout`：固定 internal 的 8 个职责组，限制基础设施的反向依赖；
   - `TestRuntimePackagesStayInternal`：禁止恢复根目录的 queue、scheduler、adapter、initialize Go 包；
+  - `TestSharedPackageBoundary`：`pkg` 只收通用库，且不依赖应用代码；
   - `TestAppImportBoundary`：只有 CLI 导入应用组装根；
-  - `TestModulePurity`：模块不得 import 应用组装与 legacy logic，版本元数据除外；
+  - `TestModulePurity`：模块不得 import 应用组装，版本元数据除外；
   - `TestModulesDoNotDependOnFullStore`：模块使用消费者定义的仓储能力，禁止完整 `repository.Store`；
-  - `TestTasksDoNotOwnIdentityTransactions`：账号写事务属于 identity，不能留在任务处理器；
+  - `TestModulesUseOnlyTheirOwnRepositories`：模块只使用自己拥有的仓储契约与作用域事务，
+    其他模块的数据经属主门面读写（规则 2、4）；契约→属主映射即测试中的 `repositoryOwners`，
+    未列出的契约属于共享内核；
+  - `TestPlatformDependsOnNoModule`：共享内核不 import 任何业务模块，也不 import 引用全部模块实体的
+    `internal/repository`；
+  - `TestTaskHandlersOpenNoTransactions`：任务处理器只解码消息并调用模块，事务属于模块；
+  - `TestEntryPointsReachModuleDataThroughModules`：CLI、HTTP 中间件、任务处理器与运行时
+    bootstrap 不直接读写模块的表；组装根只在属主模块的构造调用里传入属主自己的仓储，其余一律经门面；
+  - `TestEventTopicsAreNamedConstants`：集成事件的主题由生产方导出常量（如 `identity.UserRegisteredTopic`），
+    订阅与追加 outbox 时不得手写字符串；
   - `TestModuleLayout`：模块只允许暴露门面、`contract/`、`events/`、`entity/` 与 `transport/`；
   - `TestModuleContractsAreIndependent`：禁止中央 DTO 与跨模块 contract 依赖；
+  - `TestModuleContractNamesAreUnique`：不同模块不得重复导出同名 contract 类型；
   - `TestModuleTransportOwnership`：handler 只能依赖所属模块门面与 contract；
-  - `TestLegacyHandlerTreeRemoved`：禁止恢复顶层 `internal/handler`。
+  - `TestModuleCoreDoesNotImportTransport`：模块核心不得反向导入 `transport/`；
+  - `TestHandlerFactories_returnNativeHertzHandlers`：handler 工厂返回 Hertz 原生 handler 类型；
+  - `TestLegacyHandlerTreeRemoved`：禁止恢复顶层 `internal/handler`；
+  - `TestGoFileNamesAreLowercase`：Go 文件与目录一律使用小写 snake_case 命名。
 
 ## 迁移路径
 
@@ -145,7 +163,7 @@ internal/module/<name>/
 3. **拆 ServiceContext**（已完成）：延续现有 DI 重构，每模块一个 deps 结构；原 `ServiceContext`
    已删除，业务 handler、中间件、route、transport、queue、scheduler 与 initialize 全部改为模块门面或
    任务专属窄依赖。`internal/arch` 的组装根检查（现为 `TestAppImportBoundary`）将 import 组装根的包目录从初始
-   71 项收窄到 1 项，仅允许 `cmd` 组装根调用 `svc.NewApplication`，新代码不得向业务层回传组装对象。
+   71 项收窄到 1 项，仅允许 `cmd` 组装根调用 `app.NewApplication`，新代码不得向业务层回传组装对象。
    管理端可热更新的配置、Telegram 客户端、节点倍率与生命周期回调由 `internal/app/state.State`
    统一持有：配置以不可变快照原子发布，更新过程串行化，避免 HTTP 与队列读配置时和重初始化并发竞争。
    billing 模块（admin order/payment）已按此模式落地：
@@ -175,10 +193,10 @@ internal/module/<name>/
    （adminserver、serverapi、edge、nodeconfig）→ `notification`（telegram）。
    **`internal/logic` 目录已删除**：logic 层跨包依赖冻结基线清零后整树消失，7 个模块全部就位。
    跨切面惯例沉淀：运行时可变配置一律经"每请求快照闭包"进模块；进程级副作用
-   （Restart/ReinitSubsystem/设备踢线/机器人）经 ServiceContext 函数字段或闭包晚绑定；
+   （Restart/ReinitSubsystem/设备踢线/机器人）经 `internal/app/state.State` 的函数字段或闭包晚绑定；
    验证码原语抽为中立包 `internal/module/identity/internal/verification`；trafficagg 去 svc 化后由 queue 与
-   network 模块各自组装。`queue/logic/*` 与 handler/initialize/scheduler 仍持 svcCtx，
-   属组装根性质，其收缩并入第 5 步。
+   network 模块各自组装。当时仍持 svcCtx 的 queue/handler/initialize/scheduler 已在第 3 步
+   改为任务专属窄依赖，`ServiceContext` 随之删除。
 5. **数据所有权清算**（✅ 2026-07-24 完成）：表→模块归属定稿如下；
    附录 A.4 的跨模块 JOIN/Preload 全部清理（邮件收件人两段查询、用户统计 Go 侧合并、
    订单计划关联改模块层 PlanReader 填充）；`*userRepo` 物理分家为 identity/
@@ -189,15 +207,16 @@ internal/module/<name>/
 
    | 模块 | 表 |
    |---|---|
-   | identity | `user`（除钱包列）、`user_auth_methods`、`user_device`、`user_device_online_record`、`auth_method` |
-   | billing | `order`、`order_event`、`payment`、`coupon`、`user_withdrawal`、user 表的钱包列（Balance/GiftAmount/Commission，待拆 `user_wallet` 表） |
-   | subscription | `subscribe`、`subscribe_group`、`subscribe_application`、`user_subscribe` |
+   | identity | `user`、`user_auth_methods`、`user_device`、`user_device_online_record`、`auth_method` |
+   | billing | `order`、`order_event`、`payment`、`coupon`、`withdrawals`、`user_wallet` |
+   | subscription | `subscribe`、`subscribe_group`、`subscribe_application`、`user_subscribe`、`subscription_entitlement`、`subscription_entitlement_revision`、`subscription_period` |
    | network | `servers`、`nodes`、`server_config_overrides`、`traffic_log` |
    | support | `ticket`、`ticket_follow`、`announcement`、`ads`、`document` |
-   | notification | （暂无自有表；模板常量随代码） |
-   | platform（共享内核） | `system`、`system_logs`、`task`、`domain_event_inbox`、`client` |
+   | notification | `telegram_topic` |
+   | platform（共享内核） | `system`、`system_logs`、`task`、`task_error`、`domain_event_inbox`、`domain_event_outbox` |
 
-   审计日志（`system_logs`）与收件箱（`domain_event_inbox`）保持豁免：任何域事务可写。
+   审计日志（`system_logs`）、收件箱（`domain_event_inbox`）与发件箱（`domain_event_outbox`）保持豁免：
+   任何域事务可写。表归属与仓储契约的属主一一对应，由 `TestModulesUseOnlyTheirOwnRepositories` 强制。
 6. **拆分就绪**：门面换 gRPC 实现（`api/` 已有 protobuf 基建）、~~事件换消息队列~~
    （已完成：asynq 即 broker，见下"队列化改造"——换独立 broker 只动 Publisher 适配器
    与 worker 壳）、搬表/分库（每模块 builder 指向独立连接）、Redis 归属与配置分发。
@@ -212,7 +231,7 @@ internal/module/<name>/
 经门面 `NewRepoBuilder` 导出；identity 的跨域缓存级联经 `SubscriptionCacheBridge`
 显式注入。实体包按表归属拆分（`entity/usersub`、`entity/wallet`）。模块 import
 `internal/repository` 自此为"依赖共享契约"，不再是过渡债务；拆库时每模块把自己的
-builder 指向独立连接即可。不允许 import 应用组装与 `internal/logic`（测试强制）。
+builder 指向独立连接即可。模块只使用自己拥有的契约，且不允许 import 应用组装（测试强制）。
 
 **事件总线显性化 + 实体入模（2026-07-25）**：
 - `internal/infra/eventbus.Bus`：通用 outbox（`domain_event_outbox` 表，迁移 02145）+
@@ -243,9 +262,9 @@ builder 指向独立连接即可。不允许 import 应用组装与 `internal/lo
   `subscription.trial_grant`、`subscription.quota_grant`、`billing.quota_gift`。
 
 **异步 trace 贯通（2026-07-25）**：asynq 无消息头，`internal/infra/taskqueue` 用 payload 信封携带
-W3C trace 上下文——`asynqx.Client`（`ServiceContext.Queue` 的类型）在 `EnqueueContext`
+W3C trace 上下文——`taskqueue.Client`（`app.Application.Queue` 的类型）在 `EnqueueContext`
 时把调用方 span 上下文包进 `{__trace_carrier__, __trace_body__}` 信封；worker 侧
-`mux.Use(asynqx.Middleware())` 解包、以生产者为父开 consumer span（含 task id/重试次数
+`mux.Use(taskqueue.Middleware())` 解包、以生产者为父开 consumer span（含 task id/重试次数
 属性、错误记账），handler 拿到原始 payload。无信封的 payload（老在途任务、无 trace
 生产者、调度 tick）直通并得到根 span——**每次任务执行都有 trace id 进日志**。
 领域事件更进一步：outbox 行存产生请求的 trace 上下文（`trace_carrier` 列，迁移 02146），
@@ -265,7 +284,6 @@ subscription→billing→identity 的构建顺序）；identity 的三座桥收�
 方言日期分桶助手抽为 `pkg/orm.DateBucketExpr`。顺带修了 token/uuid OR 条件与其他
 过滤器 AND 组合时的优先级缺陷（补括号）。
 
-**拆库时的共享表落位（设计预记，第 6 步执行）**：`domain_event_inbox`/
 **业务 DTO 与 handler 入模（2026-08-21）**：`internal/model/dto` 的 22 个中央 DTO 文件已按
 `identity`、`billing`、`subscription`、`network`、`support`、`platform` 的所有权迁入各模块
 `contract/`；跨域嵌套响应改为模块自有只读快照。原 `internal/handler` 的 HTTP 适配器按实际调用
@@ -276,25 +294,22 @@ subscription→billing→identity 的构建顺序）；identity 的三座桥收�
 重复导出同名 contract 类型，也禁止模块核心反向导入 `transport/`；route golden 记录具体模块
 transport 子包，不再归一化成已删除的 `internal/handler`。
 
-`domain_event_outbox` 必须与本域事务同库提交——拆库时**每服务自带一份**（同构表），
-不共享；`system_logs` 每服务自带日志表（或改日志事件流）；迁移流按表归属切分历史，
-新迁移建议带域标记。
+**拆库时的共享表落位（设计预记，第 6 步执行）**：`domain_event_inbox`/`domain_event_outbox`
+必须与本域事务同库提交——拆库时**每服务自带一份**（同构表），不共享；`system_logs` 每服务自带
+日志表（或改日志事件流）；迁移流按表归属切分历史，新迁移建议带域标记。
 
 **错误码按域分段（2026-07-25）**：存量 66 码**冻结原值**（客户端按数值分支，重编号即
 breaking change），新码必须落在属主模块的万段内：Shared=10xxxx、identity=11xxxx、
 billing=12xxxx、subscription=13xxxx、network=14xxxx、support=15xxxx、platform=16xxxx、
-notification=17xxxx（`pkg/xerr/errCode.go` 的 Band* 常量）。
+notification=17xxxx（`pkg/xerr/err_code.go` 的 Band* 常量）。
 `TestErrorCodeSegmentation`（AST 解析）强制：值唯一、冻结集不增不减、新码必须入段且
 必须有 message；4 个历史无 message 的码（20010/61005/90002/90009）单列冻结，只许收窄。
 第 6 步 gRPC 化时业务码经 status detail 过线，分段保证多服务独立演进不撞号。
 
-**svc 导入基线现状**（第 3 步收官判定）：基线从 71 收缩后定格在 49（含事件总线的
-queue 壳 `queue/logic/events`），剩余条目全部为组装根/传输层性质——`cmd`、`initialize`、
-`internal`（server）、模块内 `transport/http/**`（薄壳调门面）、`internal/transport/http/middleware`、
-`internal/transport/http/routes`、`internal/transport/http/server`、`queue/**`、`scheduler`。业务逻辑对
-`ServiceContext` 的依赖已归零；`ServiceContext` 本身长期保留为组装根（基础设施连接 +
-七个模块门面 + EventBus + 运行时晚绑定），"拆 ServiceContext"拆的是业务依赖，
-不是消灭该类型。这些剩余依赖是进程装配的本职，不再视为债务。
+**组装根现状**（第 3 步收官判定）：原 `svc.ServiceContext` 与它的导入基线均已删除。
+`internal/app.NewApplication` 构造基础设施连接、七个模块门面与事件总线，`internal/app/state.State`
+持有运行时晚绑定；只有 `cmd` 导入 `internal/app`（`TestAppImportBoundary`）。HTTP、任务与调度入口
+只拿到各自的窄依赖结构，业务逻辑对组装根的依赖为零。
 
 ## 门面接口草案（示意）
 
@@ -324,16 +339,17 @@ type OrderPaid struct {
 }
 ```
 
-订阅方（如 subscription 模块开通订阅、notification 发送通知）通过 `pkg/eventbus` 注册
-handler，投递语义为 at-least-once，处理方必须幂等（复用 subscription 库存流程的 inbox 幂等键模式）。
+订阅方（如 subscription 模块开通订阅、notification 发送通知）在组装根（`internal/app/events.go`）
+经 `internal/infra/eventbus` 注册 handler，主题引用属主门面导出的常量；投递语义为 at-least-once，
+处理方必须幂等（复用 subscription 库存流程的 inbox 幂等键模式）。
 
 ## 风险与对策
 
 - **事务语义变更**：跨域"一个大事务"改为"事务 + 事件"后是最终一致。对策：每类事件配
   对账任务兜底（已有 `SchedulerReconcilePaidOrders` 模式可复制）；先迁读路径、后迁写路径。
 - **边界腐化**：靠机器强制（编译器 + arch 测试），基线只减不增；新增基线条目需修订本 ADR。
-- **过渡期双轨**：模块化域与遗留域并存期间，遗留代码调用新模块只走门面，避免出现
-  "新模块 import 旧 logic"的回头路（测试强制）。
+- **过渡期双轨**（已结束）：`internal/logic` 与 `internal/svc` 已删除，`TestInternalLayout`
+  固定 internal 的一级目录，遗留树无法恢复。
 
 ## 附录 A：跨域耦合盘点（2026-07-24 快照）
 

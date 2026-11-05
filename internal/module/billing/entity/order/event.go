@@ -2,6 +2,11 @@ package order
 
 import "time"
 
+// EventTypePaymentPaid is the type of the event the order repository appends
+// with the Pending -> Paid transition; its CreatedAt is when the order was
+// settled, the reference point of the guest session exchange.
+const EventTypePaymentPaid = "order.payment_paid"
+
 // Event is the durable order event outbox.  Redis only distributes these
 // records with low latency; reconnecting clients always recover from this
 // table.

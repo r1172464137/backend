@@ -7,35 +7,21 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetClientLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get Client
-func newGetClientLogic(ctx context.Context, deps Deps) *GetClientLogic {
-	return &GetClientLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetClientLogic) GetClient() (resp *dto.GetSubscribeClientResponse, err error) {
-	data, err := l.deps.Store.Client().List(l.ctx)
+// GetClient lists the client applications of the public download page in
+// their stored order. A download link that does not decode is left empty.
+func (s *Service) GetClient(ctx context.Context) (*dto.GetSubscribeClientResponse, error) {
+	data, err := s.deps.Clients.ListClientApplications(ctx)
 	if err != nil {
-		l.Errorf("Failed to get subscribe application list: %v", err)
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Failed to get subscribe application list")
+		logger.WithContext(ctx).Errorf("Failed to get subscribe application list: %v", err)
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "list the subscribe applications")
 	}
 	var list []dto.SubscribeClient
 	for _, item := range data {
-		var temp dto.PlatformDownloadLinkSnapshot
+		var links dto.PlatformDownloadLinkSnapshot
 		if item.DownloadLink != "" {
-			_ = json.Unmarshal([]byte(item.DownloadLink), &temp)
+			_ = json.Unmarshal([]byte(item.DownloadLink), &links)
 		}
 		list = append(list, dto.SubscribeClient{
 			Id:           item.Id,
@@ -44,12 +30,11 @@ func (l *GetClientLogic) GetClient() (resp *dto.GetSubscribeClientResponse, err 
 			Icon:         item.Icon,
 			Scheme:       item.Scheme,
 			IsDefault:    item.IsDefault,
-			DownloadLink: temp,
+			DownloadLink: links,
 		})
 	}
-	resp = &dto.GetSubscribeClientResponse{
+	return &dto.GetSubscribeClientResponse{
 		Total: int64(len(list)),
 		List:  list,
-	}
-	return
+	}, nil
 }

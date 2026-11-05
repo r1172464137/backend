@@ -12,14 +12,14 @@ import (
 
 func TestAdminNodeIntervalsBounds(t *testing.T) {
 	store := testPlatformStore()
-	deps := Deps{Store: store, System: &serializedSystemRepo{owner: store}}
+	deps := Deps{Store: NewSettingsTransactor(store), System: &serializedSystemRepo{owner: store}}
 	for _, field := range []string{"node_pull_interval", "node_push_interval"} {
 		for _, value := range []string{"0", "1", "86400"} {
 			var req dto.NodeConfig
 			if err := json.Unmarshal([]byte(`{"`+field+`":`+value+`}`), &req); err != nil {
 				t.Fatal(err)
 			}
-			if err := newUpdateNodeConfigLogic(context.Background(), deps).UpdateNodeConfig(&req); err != nil {
+			if err := NewService(deps).UpdateNodeConfig(context.Background(), &req); err != nil {
 				t.Fatalf("%s=%s: %v", field, value, err)
 			}
 		}
@@ -28,7 +28,7 @@ func TestAdminNodeIntervalsBounds(t *testing.T) {
 			if err := json.Unmarshal([]byte(`{"`+field+`":`+value+`}`), &req); err != nil {
 				t.Fatal(err)
 			}
-			if err := newUpdateNodeConfigLogic(context.Background(), deps).UpdateNodeConfig(&req); err == nil {
+			if err := NewService(deps).UpdateNodeConfig(context.Background(), &req); err == nil {
 				t.Fatalf("accepted %s=%s", field, value)
 			}
 		}
@@ -41,13 +41,13 @@ func TestAdminNodeIntervalsBounds(t *testing.T) {
 
 func TestOrderedNodeConfigPresenceAndRemovedLegacy(t *testing.T) {
 	store := testPlatformStore()
-	deps := Deps{Store: store, System: &serializedSystemRepo{owner: store}}
+	deps := Deps{Store: NewSettingsTransactor(store), System: &serializedSystemRepo{owner: store}}
 	update := func(body string) error {
 		var req dto.NodeConfig
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			t.Fatal(err)
 		}
-		return newUpdateNodeConfigLogic(context.Background(), deps).UpdateNodeConfig(&req)
+		return NewService(deps).UpdateNodeConfig(context.Background(), &req)
 	}
 	if err := update(`{"node_push_interval":33}`); err != nil {
 		t.Fatal(err)
@@ -89,12 +89,12 @@ func TestOrderedNodeConfigPresenceAndRemovedLegacy(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct","unknown":true}}`), &invalid); err == nil {
 		t.Fatal("unknown routing field accepted")
 	}
-	got, err := newGetNodeConfigLogic(context.Background(), deps).GetNodeConfig()
+	got, err := NewService(deps).GetNodeConfig(context.Background())
 	if err != nil || got.Routing == nil || got.RoutingRevision != 3 || got.RoutingMode != "global-v1" {
 		t.Fatalf("get %#v %v", got, err)
 	}
 	store.systems["Routing"].Value = ""
-	if _, err = newGetNodeConfigLogic(context.Background(), deps).GetNodeConfig(); err == nil {
+	if _, err = NewService(deps).GetNodeConfig(context.Background()); err == nil {
 		t.Fatal("missing global routing accepted")
 	}
 }

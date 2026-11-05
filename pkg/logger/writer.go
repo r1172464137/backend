@@ -3,7 +3,6 @@ package logger
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,16 +15,17 @@ import (
 )
 
 type (
+	// A Writer is the output the log entries go to; SetWriter installs one.
+	// Each method writes one entry of its level, with fields next to v.
 	Writer interface {
-		Alert(v any)
 		Close() error
 		Debug(v any, fields ...LogField)
 		Error(v any, fields ...LogField)
 		Info(v any, fields ...LogField)
-		Severe(v any)
 		Slow(v any, fields ...LogField)
+		// Stack writes v, a message followed by its call stack, at error
+		// level.
 		Stack(v any)
-		Stat(v any, fields ...LogField)
 	}
 
 	atomicWriter struct {
@@ -33,31 +33,23 @@ type (
 		lock   sync.RWMutex
 	}
 
-	comboWriter struct {
-		writers []Writer
-	}
-
 	concreteWriter struct {
-		infoLog   io.WriteCloser
-		errorLog  io.WriteCloser
-		severeLog io.WriteCloser
-		slowLog   io.WriteCloser
-		statLog   io.WriteCloser
-		stackLog  io.Writer
+		infoLog  io.WriteCloser
+		errorLog io.WriteCloser
+		slowLog  io.WriteCloser
+		stackLog io.Writer
 	}
 )
 
-// NewWriter creates a new Writer with the given io.Writer.
+// NewWriter returns a Writer that writes the entries of every level to w.
 func NewWriter(w io.Writer) Writer {
 	lw := newLogWriter(log.New(w, "", flags))
 
 	return &concreteWriter{
-		infoLog:   lw,
-		errorLog:  lw,
-		severeLog: lw,
-		slowLog:   lw,
-		statLog:   lw,
-		stackLog:  lw,
+		infoLog:  lw,
+		errorLog: lw,
+		slowLog:  lw,
+		stackLog: lw,
 	}
 }
 
@@ -92,110 +84,48 @@ func (w *atomicWriter) Swap(v Writer) Writer {
 	return old
 }
 
-func (c comboWriter) Alert(v any) {
-	for _, w := range c.writers {
-		w.Alert(v)
-	}
-}
-
-func (c comboWriter) Close() error {
-	var errs []error
-	for _, w := range c.writers {
-		errs = append(errs, w.Close())
-	}
-	return errors.Join(errs...)
-}
-
-func (c comboWriter) Debug(v any, fields ...LogField) {
-	for _, w := range c.writers {
-		w.Debug(v, fields...)
-	}
-}
-
-func (c comboWriter) Error(v any, fields ...LogField) {
-	for _, w := range c.writers {
-		w.Error(v, fields...)
-	}
-}
-
-func (c comboWriter) Info(v any, fields ...LogField) {
-	for _, w := range c.writers {
-		w.Info(v, fields...)
-	}
-}
-
-func (c comboWriter) Severe(v any) {
-	for _, w := range c.writers {
-		w.Severe(v)
-	}
-}
-
-func (c comboWriter) Slow(v any, fields ...LogField) {
-	for _, w := range c.writers {
-		w.Slow(v, fields...)
-	}
-}
-
-func (c comboWriter) Stack(v any) {
-	for _, w := range c.writers {
-		w.Stack(v)
-	}
-}
-
-func (c comboWriter) Stat(v any, fields ...LogField) {
-	for _, w := range c.writers {
-		w.Stat(v, fields...)
-	}
-}
-
 func newConsoleWriter() Writer {
 	outLog := newLogWriter(log.New(fatihcolor.Output, "", flags))
 	errLog := newLogWriter(log.New(fatihcolor.Error, "", flags))
 	return &concreteWriter{
-		infoLog:   outLog,
-		errorLog:  errLog,
-		severeLog: errLog,
-		slowLog:   errLog,
-		stackLog:  newLessWriter(errLog, options.logStackCooldownMills),
-		statLog:   outLog,
+		infoLog:  outLog,
+		errorLog: errLog,
+		slowLog:  errLog,
+		stackLog: newLessWriter(errLog, options.logStackCooldownMills),
 	}
 }
 
 func newFileWriter(c LogConf) (Writer, error) {
 	var err error
-	var opts []LogOption
+	var opts []logOption
 	var infoLog io.WriteCloser
 	var errorLog io.WriteCloser
-	var severeLog io.WriteCloser
 	var slowLog io.WriteCloser
-	var statLog io.WriteCloser
 	var stackLog io.Writer
 
 	if len(c.Path) == 0 {
 		return nil, ErrLogPathNotSet
 	}
 
-	opts = append(opts, WithCooldownMillis(c.StackCooldownMillis))
+	opts = append(opts, withCooldownMillis(c.StackCooldownMillis))
 	if c.Compress {
-		opts = append(opts, WithGzip())
+		opts = append(opts, withGzip())
 	}
 	if c.KeepDays > 0 {
-		opts = append(opts, WithKeepDays(c.KeepDays))
+		opts = append(opts, withKeepDays(c.KeepDays))
 	}
 	if c.MaxBackups > 0 {
-		opts = append(opts, WithMaxBackups(c.MaxBackups))
+		opts = append(opts, withMaxBackups(c.MaxBackups))
 	}
 	if c.MaxSize > 0 {
-		opts = append(opts, WithMaxSize(c.MaxSize))
+		opts = append(opts, withMaxSize(c.MaxSize))
 	}
 
-	opts = append(opts, WithRotation(c.Rotation))
+	opts = append(opts, withRotation(c.Rotation))
 
 	accessFile := path.Join(c.Path, accessFilename)
 	errorFile := path.Join(c.Path, errorFilename)
-	severeFile := path.Join(c.Path, severeFilename)
 	slowFile := path.Join(c.Path, slowFilename)
-	statFile := path.Join(c.Path, statFilename)
 
 	handleOptions(opts)
 	setupLogLevel(c)
@@ -208,32 +138,18 @@ func newFileWriter(c LogConf) (Writer, error) {
 		return nil, err
 	}
 
-	if severeLog, err = createOutput(severeFile); err != nil {
-		return nil, err
-	}
-
 	if slowLog, err = createOutput(slowFile); err != nil {
-		return nil, err
-	}
-
-	if statLog, err = createOutput(statFile); err != nil {
 		return nil, err
 	}
 
 	stackLog = newLessWriter(errorLog, options.logStackCooldownMills)
 
 	return &concreteWriter{
-		infoLog:   infoLog,
-		errorLog:  errorLog,
-		severeLog: severeLog,
-		slowLog:   slowLog,
-		statLog:   statLog,
-		stackLog:  stackLog,
+		infoLog:  infoLog,
+		errorLog: errorLog,
+		slowLog:  slowLog,
+		stackLog: stackLog,
 	}, nil
-}
-
-func (w *concreteWriter) Alert(v any) {
-	output(w.errorLog, levelAlert, v)
 }
 
 func (w *concreteWriter) Close() error {
@@ -245,15 +161,7 @@ func (w *concreteWriter) Close() error {
 		return err
 	}
 
-	if err := w.severeLog.Close(); err != nil {
-		return err
-	}
-
-	if err := w.slowLog.Close(); err != nil {
-		return err
-	}
-
-	return w.statLog.Close()
+	return w.slowLog.Close()
 }
 
 func (w *concreteWriter) Debug(v any, fields ...LogField) {
@@ -268,10 +176,6 @@ func (w *concreteWriter) Info(v any, fields ...LogField) {
 	output(w.infoLog, levelInfo, v, fields...)
 }
 
-func (w *concreteWriter) Severe(v any) {
-	output(w.severeLog, levelFatal, v)
-}
-
 func (w *concreteWriter) Slow(v any, fields ...LogField) {
 	output(w.slowLog, levelSlow, v, fields...)
 }
@@ -280,14 +184,7 @@ func (w *concreteWriter) Stack(v any) {
 	output(w.stackLog, levelError, v)
 }
 
-func (w *concreteWriter) Stat(v any, fields ...LogField) {
-	output(w.statLog, levelStat, v, fields...)
-}
-
 type nopWriter struct{}
-
-func (n nopWriter) Alert(_ any) {
-}
 
 func (n nopWriter) Close() error {
 	return nil
@@ -302,16 +199,10 @@ func (n nopWriter) Error(_ any, _ ...LogField) {
 func (n nopWriter) Info(_ any, _ ...LogField) {
 }
 
-func (n nopWriter) Severe(_ any) {
-}
-
 func (n nopWriter) Slow(_ any, _ ...LogField) {
 }
 
 func (n nopWriter) Stack(_ any) {
-}
-
-func (n nopWriter) Stat(_ any, _ ...LogField) {
 }
 
 func buildPlainFields(fields logEntry) []string {
@@ -331,21 +222,7 @@ func buildPlainFields(fields logEntry) []string {
 	return items
 }
 
-func combineGlobalFields(fields []LogField) []LogField {
-	globals := globalFields.Load()
-	if globals == nil {
-		return fields
-	}
-
-	gf := globals.([]LogField)
-	ret := make([]LogField, 0, len(gf)+len(fields))
-	ret = append(ret, gf...)
-	ret = append(ret, fields...)
-
-	return ret
-}
-
-func marshalJson(t interface{}) ([]byte, error) {
+func marshalJson(t any) ([]byte, error) {
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
@@ -361,7 +238,7 @@ func marshalJson(t interface{}) ([]byte, error) {
 
 func output(writer io.Writer, level string, val any, fields ...LogField) {
 	val = redactValue(val)
-	fields = redactFields(combineGlobalFields(fields))
+	fields = redactFields(fields)
 	maxLen := atomic.LoadUint32(&maxContentLength)
 	var truncated bool
 	val, truncated = limitValue(val, maxLen, 0)
@@ -394,11 +271,7 @@ func output(writer io.Writer, level string, val any, fields ...LogField) {
 func wrapLevelWithColor(level string) string {
 	var colour fatihcolor.Attribute
 	switch level {
-	case levelAlert:
-		colour = fatihcolor.FgRed
 	case levelError:
-		colour = fatihcolor.FgRed
-	case levelFatal:
 		colour = fatihcolor.FgRed
 	case levelInfo:
 		colour = fatihcolor.FgBlue
@@ -406,8 +279,6 @@ func wrapLevelWithColor(level string) string {
 		colour = fatihcolor.FgYellow
 	case levelDebug:
 		colour = fatihcolor.FgYellow
-	case levelStat:
-		colour = fatihcolor.FgGreen
 	default:
 		return level
 	}

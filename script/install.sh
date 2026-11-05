@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
-# Fork release installer/updater. Existing etc/ and runtime data are never replaced.
-# PPANEL_RELEASE_REPO=owner/repo (default r1172464137/backend)
-# PPANEL_VERSION=vX.Y.Z (default latest). --download-only DIR verifies without installing.
+# Installs or upgrades the PPanel server on a Linux host with systemd.
+# 在带 systemd 的 Linux 主机上安装或升级 PPanel 服务端。
+#
+#   sudo bash install.sh
+#
+# Downloads the latest release archive for this machine (linux amd64 or
+# arm64) from github.com/r1172464137/backend, verifies it against the
+# release's SHA256SUMS, installs it to /opt/ppanel-server owned by the system
+# user "ppanel", writes the systemd unit "ppanel.service" and starts it.
+# Running it again upgrades the binary and keeps etc/.
+#
+# Environment / 环境变量:
+#   PPANEL_RELEASE_REPO owner/repo (default: r1172464137/backend)
+#   PPANEL_VERSION   release tag to install, e.g. v1.2.3 (default: latest)
+#   PPANEL_DB        with PPANEL_REDIS: written to etc/ppanel.env so the first
+#   PPANEL_REDIS     start completes the configuration without the wizard
+#                    (formats: docs/guide/config.md, section 4)
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then set -euo pipefail; fi
 
 release_init() {
@@ -22,64 +36,172 @@ release_fetch() {
     [[ $asset =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
     mkdir -p "$dir" || return 1
     curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$dir/SHA256SUMS" "$RELEASE_BASE/SHA256SUMS" || return 1
-    # Exactly one entry, exactly this basename, and a SHA-256 digest. Never
-    # feed untrusted manifest paths to sha256sum, or accept an empty selection.
     awk -v asset="$asset" '$2 == asset { n++; if (length($1) != 64 || $1 !~ /^[a-fA-F0-9]+$/ || NF != 2) bad=1; print $1 "  " asset } END { if (n != 1 || bad) exit 1 }' "$dir/SHA256SUMS" > "$dir/$asset.sha256" || { echo "invalid/missing checksum for $asset" >&2; return 1; }
     curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$dir/$asset" "$RELEASE_BASE/$asset" || return 1
     (cd "$dir" && sha256sum -c "$asset.sha256") || { rm -f "$dir/$asset"; return 1; }
 }
 
-# Sourcing exposes the actual production download helpers for nonprivileged tests.
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 0; fi
 
-version=${PPANEL_VERSION:-}; download_dir=''
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --download-only) download_dir=${2:?directory required}; shift 2 ;;
-        --help|-h) echo 'PPANEL_RELEASE_REPO=owner/repo PPANEL_VERSION=vX.Y.Z bash install.sh [--download-only DIR]'; exit 0 ;;
-        *) echo "unknown argument: $1" >&2; exit 1 ;;
-    esac
+REPO="${PPANEL_RELEASE_REPO:-r1172464137/backend}"
+INSTALL_DIR="/opt/ppanel-server"
+SERVICE_NAME="ppanel"
+SERVICE_USER="ppanel"
+UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+VERSION="${PPANEL_VERSION:-}"
+
+msg() { printf '==> %s\n' "$*"; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# --- preflight / 环境检查 ---------------------------------------------------
+
+[ "$(id -u)" -eq 0 ] || die "run this script as root / 请以 root 用户运行此脚本"
+[ "$(uname -s)" = "Linux" ] || die "Linux only; other systems: unpack the release archive and run ppanel-server run --config etc/ppanel.yaml / 仅支持 Linux"
+command -v systemctl >/dev/null 2>&1 || die "systemd is required / 需要 systemd"
+for cmd in curl tar sha256sum install; do
+	command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required / 需要安装 $cmd"
 done
-case $(uname -m) in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) echo 'unsupported architecture' >&2; exit 1 ;;
+
+case "$(uname -m)" in
+x86_64 | amd64) ARCH="amd64" ;;
+aarch64 | arm64) ARCH="arm64" ;;
+*) die "unsupported architecture $(uname -m): release archives exist for amd64 and arm64 / 不支持的架构，发布包只提供 amd64 与 arm64" ;;
 esac
-release_init "${PPANEL_RELEASE_REPO:-r1172464137/backend}" "$version"
-asset="ppanel-server-linux-$arch.tar.gz"
-if [[ -n $download_dir ]]; then release_fetch "$asset" "$download_dir"; exit; fi
-[[ $EUID == 0 && $(uname -s) == Linux ]] || { echo 'Linux root installation required; use --download-only for verification' >&2; exit 1; }
-for cmd in curl tar sha256sum install systemctl; do command -v "$cmd" >/dev/null; done
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-release_fetch "$asset" "$tmp"
-# Archives have one predictable top-level directory, not a layout guessed by find|head.
-root=${asset%.tar.gz}
-tar -tzf "$tmp/$asset" > "$tmp/entries"
-awk -v root="$root" 'index($0, root "/") != 1 || $0 ~ /(^|\/)\.\.(\/|$)/ { bad=1 } END { exit bad }' "$tmp/entries"
-mkdir "$tmp/extract"
-tar -xzf "$tmp/$asset" --no-same-owner -C "$tmp/extract"
-[[ -f $tmp/extract/$root/ppanel-server ]]
-install_dir=/opt/ppanel-server
-mkdir -p "$install_dir/etc"
-if [[ -f $install_dir/ppanel-server ]]; then cp -p "$install_dir/ppanel-server" "$install_dir/ppanel-server.previous"; fi
-# Stop only after the replacement has been downloaded and verified.
-if systemctl is-active --quiet ppanel; then systemctl stop ppanel; fi
-install -m 0755 "$tmp/extract/$root/ppanel-server" "$install_dir/ppanel-server"
-if [[ ! -e $install_dir/etc/ppanel.yaml ]]; then install -m 0600 /dev/null "$install_dir/etc/ppanel.yaml"; fi
-cat > /etc/systemd/system/ppanel.service <<EOF
+
+# --- resolve the release / 解析版本 -----------------------------------------
+
+release_init "$REPO" "$VERSION"
+VERSION=$RELEASE_TAG
+
+ASSET="ppanel-server-linux-${ARCH}.tar.gz"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# --- download and verify / 下载并校验 ---------------------------------------
+
+msg "Downloading ${ASSET} ${VERSION} / 正在下载 ${ASSET} ${VERSION} ..."
+release_fetch "$ASSET" "$TMP"
+
+mkdir -p "${TMP}/extract"
+ROOT=${ASSET%.tar.gz}
+tar -tzf "${TMP}/${ASSET}" > "${TMP}/entries"
+awk -v root="$ROOT" 'index($0, root "/") != 1 || $0 ~ /(^|\/)\.\.(\/|$)/ { bad=1 } END { exit bad }' "${TMP}/entries"
+tar -xzf "${TMP}/${ASSET}" --no-same-owner -C "${TMP}/extract"
+BINARY="${TMP}/extract/${ROOT}/ppanel-server"
+[ -f "$BINARY" ] && [ ! -L "$BINARY" ] || die "ppanel-server not found in ${ASSET} / 压缩包中没有 ppanel-server"
+
+# --- system user and files / 系统用户与文件 ---------------------------------
+
+if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+	msg "Creating the system user ${SERVICE_USER} / 创建系统用户 ${SERVICE_USER} ..."
+	NOLOGIN="$(command -v nologin || echo /usr/sbin/nologin)"
+	useradd --system --home-dir "$INSTALL_DIR" --no-create-home --shell "$NOLOGIN" "$SERVICE_USER"
+fi
+
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+	msg "Stopping the running service for the upgrade / 停止正在运行的服务以便升级 ..."
+	systemctl stop "$SERVICE_NAME"
+fi
+
+msg "Installing to ${INSTALL_DIR} / 安装到 ${INSTALL_DIR} ..."
+mkdir -p "${INSTALL_DIR}/etc"
+install -m 0755 -o root -g root "$BINARY" "${INSTALL_DIR}/ppanel-server"
+LICENSE_FILE="${TMP}/extract/${ROOT}/LICENSE"
+[ ! -f "$LICENSE_FILE" ] || install -m 0644 -o root -g root "$LICENSE_FILE" "${INSTALL_DIR}/LICENSE"
+# The configuration holds the JWT secret and the database credentials once
+# it is completed: owner-only, and never overwritten by an upgrade.
+if [ ! -e "${INSTALL_DIR}/etc/ppanel.yaml" ]; then
+	install -m 0600 -o "$SERVICE_USER" -g "$SERVICE_USER" /dev/null "${INSTALL_DIR}/etc/ppanel.yaml"
+fi
+if [ -n "${PPANEL_DB:-}" ] && [ -n "${PPANEL_REDIS:-}" ]; then
+	msg "Writing PPANEL_DB and PPANEL_REDIS to etc/ppanel.env for the first start / 将 PPANEL_DB 与 PPANEL_REDIS 写入 etc/ppanel.env 供首次启动使用 ..."
+	install -m 0600 -o "$SERVICE_USER" -g "$SERVICE_USER" /dev/null "${INSTALL_DIR}/etc/ppanel.env"
+	printf 'PPANEL_DB=%s\nPPANEL_REDIS=%s\n' "$PPANEL_DB" "$PPANEL_REDIS" > "${INSTALL_DIR}/etc/ppanel.env"
+elif [ -n "${PPANEL_DB:-}" ] || [ -n "${PPANEL_REDIS:-}" ]; then
+	die "PPANEL_DB and PPANEL_REDIS must be set together / PPANEL_DB 与 PPANEL_REDIS 必须同时设置"
+fi
+chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" "${INSTALL_DIR}/etc"
+chmod 0750 "$INSTALL_DIR"
+
+# --- systemd unit / systemd 服务 -------------------------------------------
+
+msg "Writing ${UNIT_FILE} / 写入 systemd 服务文件 ..."
+cat > "$UNIT_FILE" <<EOF
 [Unit]
 Description=PPanel Server
+Documentation=https://github.com/${REPO}/blob/master/docs/guide/install.md
 After=network-online.target
 Wants=network-online.target
+
 [Service]
-WorkingDirectory=$install_dir
-ExecStart=$install_dir/ppanel-server run --config etc/ppanel.yaml
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${INSTALL_DIR}
+# Optional: PPANEL_DB and PPANEL_REDIS for a non-interactive first start.
+EnvironmentFile=-${INSTALL_DIR}/etc/ppanel.env
+ExecStart=${INSTALL_DIR}/ppanel-server run --config ${INSTALL_DIR}/etc/ppanel.yaml
 Restart=on-failure
-RestartSec=5
+RestartSec=5s
+# Shutdown drains HTTP, then the scheduler, the task worker and the trace
+# exporter, which can take up to about 18 s.
+TimeoutStopSec=25
+# The server writes only under its own directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=${INSTALL_DIR}
+
 [Install]
 WantedBy=multi-user.target
 EOF
+
 systemctl daemon-reload
-systemctl enable ppanel
-systemctl start ppanel
-printf 'Installed %s from %s. Configuration preserved in %s/etc/ppanel.yaml\n' "$RELEASE_TAG" "$RELEASE_REPO" "$install_dir"
+systemctl enable --quiet "$SERVICE_NAME"
+msg "Starting ${SERVICE_NAME} / 启动服务 ..."
+systemctl start "$SERVICE_NAME"
+sleep 2
+systemctl --no-pager --lines=0 status "$SERVICE_NAME" || true
+
+# --- next steps / 后续步骤 ---------------------------------------------------
+
+cat <<EOF
+
+PPanel server ${VERSION} is installed in ${INSTALL_DIR} and runs as ${SERVICE_USER} (systemd unit: ${SERVICE_NAME}).
+PPanel 服务端 ${VERSION} 已安装到 ${INSTALL_DIR}，以 ${SERVICE_USER} 用户运行（systemd 服务：${SERVICE_NAME}）。
+
+EOF
+
+if grep -q 'AccessSecret' "${INSTALL_DIR}/etc/ppanel.yaml" 2>/dev/null; then
+	cat <<EOF
+The configuration is complete; the API listens on the Host:Port of etc/ppanel.yaml (0.0.0.0:8080 by default).
+配置已完成，API 监听 etc/ppanel.yaml 中的 Host:Port（默认 0.0.0.0:8080）。
+  journalctl -u ${SERVICE_NAME} -f          # logs; the first administrator's password is printed once / 日志，首位管理员密码只打印一次
+  curl -fsS http://127.0.0.1:8080/readyz    # readiness / 就绪探针
+EOF
+else
+	cat <<EOF
+Finish the installation in ONE of two ways / 请用以下两种方式之一完成安装：
+
+1. Setup wizard. It listens on 127.0.0.1 of this server only, at the configured Port (8080
+   by default) and never on a public interface, so open an SSH tunnel from your computer and
+   use the browser there (administrator password: at least 8 characters):
+   安装向导只监听本机的 127.0.0.1（端口为配置的 Port，默认 8080，绝不监听公网），请在自己的电脑上
+   建立 SSH 隧道后用浏览器访问（管理员密码至少 8 个字符）：
+     ssh -L 8080:127.0.0.1:8080 root@<this-server>
+     http://127.0.0.1:8080/init
+
+2. Non-interactive. Write the connections to ${INSTALL_DIR}/etc/ppanel.env and restart;
+   the server completes etc/ppanel.yaml, migrates the database and prints the first
+   administrator's password once in the log:
+   无人值守：把连接信息写入 ${INSTALL_DIR}/etc/ppanel.env 后重启，服务会补全 etc/ppanel.yaml、执行迁移，
+   并在日志中打印一次首位管理员的密码：
+     install -m 0600 -o ${SERVICE_USER} -g ${SERVICE_USER} /dev/null ${INSTALL_DIR}/etc/ppanel.env
+     printf 'PPANEL_DB=%s\nPPANEL_REDIS=%s\n' 'user:password@tcp(127.0.0.1:3306)/ppanel' 'redis://:password@127.0.0.1:6379/0' > ${INSTALL_DIR}/etc/ppanel.env
+     systemctl restart ${SERVICE_NAME} && journalctl -u ${SERVICE_NAME} -f
+   PostgreSQL: PPANEL_DB=postgres://user:password@127.0.0.1:5432/ppanel?sslmode=require
+
+Documentation / 文档: https://github.com/${REPO}/blob/master/docs/guide/install.md
+EOF
+fi

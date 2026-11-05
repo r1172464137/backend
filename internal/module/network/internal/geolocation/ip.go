@@ -1,11 +1,14 @@
+// Package geolocation locates a server address through public IP
+// geolocation services, filling in a server's country and city.
 package geolocation
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -13,29 +16,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/pkg/errors"
 )
-
-// GetIP parses the input domain or IP address and returns the IP address.
-func GetIP(input string) ([]string, error) {
-	// Check if the input is already a valid IP address.
-	if net.ParseIP(input) != nil {
-		return []string{input}, nil
-	}
-
-	// Use net.LookupIP to resolve the domain name.
-	ips, err := net.LookupIP(input)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert IP addresses to string format.
-	var result []string
-	for _, ip := range ips {
-		result = append(result, ip.String())
-	}
-	return result, nil
-}
 
 const (
 	ipapi   = "ipapi.co"
@@ -54,13 +35,15 @@ var (
 	geoHTTPClient = &http.Client{Timeout: 4 * time.Second}
 )
 
-// GetRegionByIp queries the geolocation of an IP address using supported services.
-func GetRegionByIp(ip string) (*GeoLocationResponse, error) {
+// GetRegionByIp queries the geolocation of an IP address using supported
+// services, trying them in turn until one answers. Cancelling ctx aborts the
+// lookups.
+func GetRegionByIp(ctx context.Context, ip string) (*GeoLocationResponse, error) {
 	for service, enabled := range queryUrls {
 		if enabled {
-			response, err := fetchGeolocation(service, ip)
+			response, err := fetchGeolocation(ctx, service, ip)
 			if err != nil {
-				logger.Errorw("IP geolocation lookup failed", logger.Field("service", service), logger.Field("error", err))
+				logger.WithContext(ctx).Errorw("IP geolocation lookup failed", logger.Field("service", service), logger.Field("error", err))
 				continue
 			}
 			return response, nil
@@ -70,7 +53,7 @@ func GetRegionByIp(ip string) (*GeoLocationResponse, error) {
 }
 
 // fetchGeolocation sends a request to the specified service to retrieve geolocation data.
-func fetchGeolocation(service, ip string) (*GeoLocationResponse, error) {
+func fetchGeolocation(ctx context.Context, service, ip string) (*GeoLocationResponse, error) {
 	var apiURL string
 
 	// Construct the API URL based on the service.
@@ -88,9 +71,9 @@ func fetchGeolocation(service, ip string) (*GeoLocationResponse, error) {
 	}
 
 	// Create the HTTP request.
-	req, err := http.NewRequest("GET", apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	setHeaders(req, service)
@@ -98,9 +81,10 @@ func fetchGeolocation(service, ip string) (*GeoLocationResponse, error) {
 	// Create the HTTP client and send the request.
 	resp, err := geoHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %v", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	// The body is only read; closing it cannot lose data.
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("geolocation service returned HTTP %d", resp.StatusCode)
 	}
@@ -113,7 +97,7 @@ func fetchGeolocation(service, ip string) (*GeoLocationResponse, error) {
 	// Parse the JSON response into GeoLocationResponse.
 	var location GeoLocationResponse
 	if err := json.Unmarshal(body, &location); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
+		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	// Ensure compatibility between country fields.
@@ -141,6 +125,10 @@ func setHeaders(req *http.Request, host string) {
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 }
 
+// maxResponseSize bounds the decoded geolocation response, whatever its
+// encoding: a lookup answer is a few hundred bytes.
+const maxResponseSize = 1 << 20
+
 // decompressResponse decompresses the HTTP response body based on its Content-Encoding.
 func decompressResponse(resp *http.Response) ([]byte, error) {
 	var reader io.ReadCloser
@@ -154,20 +142,21 @@ func decompressResponse(resp *http.Response) ([]byte, error) {
 	case "zstd":
 		decoder, zstdErr := zstd.NewReader(resp.Body)
 		if zstdErr != nil {
-			return nil, fmt.Errorf("failed to create zstd decoder: %v", zstdErr)
+			return nil, fmt.Errorf("failed to create zstd decoder: %w", zstdErr)
 		}
 		defer decoder.Close()
-		return io.ReadAll(decoder)
+		return io.ReadAll(io.LimitReader(decoder, maxResponseSize))
 	default:
 		reader = resp.Body
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to create reader: %v", err)
+		return nil, fmt.Errorf("failed to create reader: %w", err)
 	}
-	defer reader.Close()
+	// The reader is only read; closing it cannot lose data.
+	defer func() { _ = reader.Close() }()
 
-	return io.ReadAll(io.LimitReader(reader, 1<<20))
+	return io.ReadAll(io.LimitReader(reader, maxResponseSize))
 }
 
 // GeoLocationResponse represents the geolocation data returned by the API.

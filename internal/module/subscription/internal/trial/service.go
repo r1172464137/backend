@@ -10,12 +10,17 @@ import (
 	"uuid"
 
 	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
+	"github.com/perfect-panel/server/internal/module/subscription/internal/period"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/timeutil"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
-const inboxTrialGrant = "subscription.trial_grant"
+// Consumer is the trial grant's consumer identity: the name it subscribes
+// to identity.user_registered with and its inbox markers' consumer. It is
+// persisted; renaming it would grant committed trials again.
+const Consumer = "subscription.trial_grant"
 
 // Policy is the per-call view of the runtime-mutable trial settings.
 type Policy struct {
@@ -29,10 +34,15 @@ type Policy struct {
 // them from the composition root.
 type Deps struct {
 	Plans repository.SubscribeRepo
-	Cache repository.UserCacheRepo
+	Cache CacheInvalidator
 	Store Store
 	// TrialPolicy snapshots the runtime-mutable trial settings per call.
 	TrialPolicy func() Policy
+}
+
+// CacheInvalidator drops cached subscription rows.
+type CacheInvalidator interface {
+	ClearSubscribeCache(ctx context.Context, data ...*usersub.Subscribe) error
 }
 
 // Service is the trial-grant entry point used by the subscription facade.
@@ -53,7 +63,7 @@ func (s *Service) GrantTrial(ctx context.Context, userID int64) error {
 	policy := s.deps.TrialPolicy()
 	var granted *usersub.Subscribe
 	err := s.deps.Store.InSubscriptionTx(ctx, func(store repository.SubscriptionStore) error {
-		mark, err := store.Inbox().Find(ctx, inboxTrialGrant, fmt.Sprintf("%d", userID))
+		mark, err := store.Inbox().Find(ctx, Consumer, fmt.Sprintf("%d", userID))
 		if err != nil {
 			return err
 		}
@@ -70,22 +80,36 @@ func (s *Service) GrantTrial(ctx context.Context, userID int64) error {
 				return err
 			}
 			now := timeutil.Now()
+			// A misconfigured trial unit fails the grant, and the event is
+			// retried once the setting is fixed, instead of granting a
+			// trial that ends where it starts.
+			unit, err := period.ParseUnit(policy.TimeUnit)
+			if err != nil {
+				return xerr.Wrapf(err, xerr.ERROR, "trial time unit")
+			}
+			expireTime, err := period.App().TermEnd(unit, policy.Duration, now)
+			if err != nil {
+				return xerr.Wrapf(err, xerr.ERROR, "trial term")
+			}
 			granted = &usersub.Subscribe{
 				UserId:      userID,
 				OrderId:     0,
 				SubscribeId: plan.Id,
 				StartTime:   now,
-				ExpireTime:  timeutil.AddTime(policy.TimeUnit, policy.Duration, now),
+				ExpireTime:  expireTime,
 				Traffic:     plan.Traffic,
-				Token:       usersub.TokenFromOrder(fmt.Sprintf("Trial-%v-%s", userID, uuid.NewV7().String())),
-				UUID:        uuid.NewV7().String(),
-				Status:      usersub.SubscribeStatusActive,
+				Token:       usersub.NewToken(),
+				// The node credential is random like every other
+				// subscription's: a time-ordered UUID would tell its issue
+				// time and leave fewer bits to guess.
+				UUID:   uuid.NewV4().String(),
+				Status: usersub.SubscribeStatusActive,
 			}
 			if err := store.UserSubscription().InsertSubscribe(ctx, granted); err != nil {
 				return err
 			}
 		}
-		return store.Inbox().Insert(ctx, inboxTrialGrant, fmt.Sprintf("%d", userID), "")
+		return store.Inbox().Insert(ctx, Consumer, fmt.Sprintf("%d", userID), "")
 	})
 	if err != nil {
 		return err

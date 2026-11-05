@@ -6,28 +6,15 @@ import (
 
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/internal/module/platform/entity/log"
-	"github.com/perfect-panel/server/internal/repository"
-	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type FilterServerTrafficLogLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// NewFilterServerTrafficLogLogic Filter server traffic log
-func newFilterServerTrafficLogLogic(ctx context.Context, deps Deps) *FilterServerTrafficLogLogic {
-	return &FilterServerTrafficLogLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-func (l *FilterServerTrafficLogLogic) FilterServerTrafficLog(req *dto.FilterServerTrafficLogRequest) (*dto.FilterServerTrafficLogResponse, error) {
+// FilterServerTrafficLog pages the servers' daily traffic: today's live
+// ranking first, then the archived days. The retention settings decide which
+// archived days still have their details.
+func (s *Service) FilterServerTrafficLog(ctx context.Context, req *dto.FilterServerTrafficLogRequest) (*dto.FilterServerTrafficLogResponse, error) {
 	now := timeutil.Now()
 	today := now.Format(time.DateOnly)
 	startDate, endDate := req.StartDate, req.EndDate
@@ -37,9 +24,9 @@ func (l *FilterServerTrafficLogLogic) FilterServerTrafficLog(req *dto.FilterServ
 	list := make([]dto.ServerTrafficLog, 0)
 	if (startDate == "" || startDate <= today) && (endDate == "" || endDate >= today) {
 		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, timeutil.Location())
-		traffic, err := l.deps.Traffic.QueryServerTrafficRanking(l.ctx, start, start.AddDate(0, 0, 1))
+		traffic, err := s.deps.Traffic.QueryServerTrafficRanking(ctx, start, start.AddDate(0, 0, 1))
 		if err != nil {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "today traffic query error: %s", err)
+			return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "today traffic query error: %s", err)
 		}
 		for _, row := range traffic {
 			if req.ServerId != 0 && row.ServerId != req.ServerId {
@@ -53,14 +40,14 @@ func (l *FilterServerTrafficLogLogic) FilterServerTrafficLog(req *dto.FilterServ
 	if endDate == "" || endDate > yesterday {
 		endDate = yesterday
 	}
-	page, size := repository.NormalizePage(req.Page, req.Size)
+	page, size := kernel.NormalizePage(req.Page, req.Size)
 	offset := (page - 1) * size
 	todayTotal := len(list)
 	historyOffset := max(0, offset-todayTotal)
 	params := &log.FilterParams{Page: historyOffset/size + 1, Size: size, Type: log.TypeServerTraffic.Uint8(), StartDate: startDate, EndDate: endDate, ObjectID: req.ServerId, Search: req.Search}
-	history, historyTotal, err := l.deps.Logs.FilterSystemLog(l.ctx, params)
+	history, historyTotal, err := s.deps.Logs.FilterSystemLog(ctx, params)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "history query error: %s", err)
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "history query error: %s", err)
 	}
 	list = list[min(offset, todayTotal):min(offset+size, todayTotal)]
 	// A mixed live/history page can begin partway through a database page.
@@ -69,9 +56,9 @@ func (l *FilterServerTrafficLogLogic) FilterServerTrafficLog(req *dto.FilterServ
 	if len(list)+len(history) < size && int64(historyOffset+len(history)) < historyTotal {
 		params.Page++
 		params.SkipCount = true
-		next, _, err := l.deps.Logs.FilterSystemLog(l.ctx, params)
+		next, _, err := s.deps.Logs.FilterSystemLog(ctx, params)
 		if err != nil {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "history query error: %s", err)
+			return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "history query error: %s", err)
 		}
 		history = append(history, next...)
 	}
@@ -81,10 +68,10 @@ func (l *FilterServerTrafficLogLogic) FilterServerTrafficLog(req *dto.FilterServ
 		}
 		var content log.ServerTraffic
 		if err := content.Unmarshal([]byte(item.Content)); err != nil {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "corrupt server traffic log %d: %v", item.Id, err)
+			return nil, xerr.Wrapf(err, xerr.ERROR, "corrupt server traffic log %d: %v", item.Id, err)
 		}
 		hasDetails := true
-		if autoClear, clearDays := l.deps.logRetention(); autoClear {
+		if autoClear, clearDays := s.deps.logRetention(); autoClear {
 			day, err := time.ParseInLocation(time.DateOnly, item.Date, timeutil.Location())
 			hasDetails = err == nil && !day.Before(now.AddDate(0, 0, -int(clearDays)))
 		}

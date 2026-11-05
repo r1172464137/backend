@@ -1,7 +1,6 @@
 package callbacks
 
 import (
-	"context"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
@@ -12,13 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	"github.com/perfect-panel/server/internal/module/billing/entity/payment"
-	"github.com/perfect-panel/server/internal/module/billing/internal/settle"
+	"github.com/perfect-panel/server/internal/module/billing/internal/gateway"
 )
 
-func signCryptomusTestPayload(t *testing.T, apiKey string, fields map[string]interface{}) []byte {
+func signCryptomusTestPayload(t *testing.T, apiKey string, fields map[string]any) []byte {
 	t.Helper()
 	unsigned, err := json.Marshal(fields)
 	if err != nil {
@@ -31,7 +29,7 @@ func signCryptomusTestPayload(t *testing.T, apiKey string, fields map[string]int
 
 func cryptomusPaidNotification(t *testing.T, apiKey string) []byte {
 	t.Helper()
-	return signCryptomusTestPayload(t, apiKey, map[string]interface{}{
+	return signCryptomusTestPayload(t, apiKey, map[string]any{
 		"type": "payment", "uuid": "uuid-1", "order_id": "order-1",
 		"amount": "10.00", "currency": "USD", "payer_currency": "USDT",
 		"status": "paid", "is_final": true,
@@ -44,26 +42,35 @@ func cryptomusInfoServer(t *testing.T, invoice string) *httptest.Server {
 		if r.URL.Path != "/v1/payment/info" {
 			t.Errorf("unexpected gateway path %s", r.URL.Path)
 		}
-		fmt.Fprint(w, invoice)
+		_, _ = fmt.Fprint(w, invoice)
 	}))
 }
 
-func cryptomusPaymentConfig(id int64, apiKey string) *payment.Payment {
+// The Cryptomus method the orders are bound to: its id and the API key its
+// callbacks are signed with.
+const (
+	cryptomusMethodID int64 = 11
+	cryptomusAPIKey         = "api-key"
+)
+
+// cryptomusPaymentConfig is the configured Cryptomus method.
+func cryptomusPaymentConfig() *payment.Payment {
 	return &payment.Payment{
-		Id:       id,
+		Id:       cryptomusMethodID,
 		Platform: "Cryptomus",
-		Config:   `{"merchant_id":"merchant-1","api_key":"` + apiKey + `"}`,
+		Config:   `{"merchant_id":"merchant-1","api_key":"` + cryptomusAPIKey + `"}`,
 	}
 }
 
-// withCryptomusGateway redirects the confirmation query to a test stub. The
-// production redirect knob was removed on purpose; the base URL is not part
-// of the database payment configuration.
-func withCryptomusGateway(t *testing.T, url string) {
-	t.Helper()
-	previous := cryptomusBaseURL
-	cryptomusBaseURL = url
-	t.Cleanup(func() { cryptomusBaseURL = previous })
+// cryptomusRegistry points the confirmation query at a test stub. The base
+// URL is a registry option only tests set; it is not part of the database
+// payment configuration.
+func cryptomusRegistry(url string) *gateway.Registry {
+	return gateway.NewRegistry(gateway.WithCryptomusBaseURL(url))
+}
+
+func cryptomusNotification(payload []byte) gateway.Notification {
+	return gateway.Notification{HTTPMethod: "POST", Body: payload}
 }
 
 func TestCryptomusNotifySettlesOnlyAfterSignedAndQueriedInvoiceMatch(t *testing.T) {
@@ -72,22 +79,21 @@ func TestCryptomusNotifySettlesOnlyAfterSignedAndQueriedInvoiceMatch(t *testing.
 	defer queryServer.Close()
 
 	queue := &fakeActivationQueue{}
-	orders := &callbackOrderRepo{order: &order.Order{
-		OrderNo: "order-1", PaymentId: 11, Method: "Cryptomus", Status: settle.StatusPending,
+	orders := &callbackOrders{order: &order.Order{
+		OrderNo: "order-1", PaymentId: cryptomusMethodID, Method: "Cryptomus", Status: order.StatusPending,
 		PaymentAmount: 1000, PaymentCurrency: "USD",
 	}}
-	withCryptomusGateway(t, queryServer.URL)
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyPayment, cryptomusPaymentConfig(11, "api-key"))
-	svc := NewService(orders, queue)
-	payload := cryptomusPaidNotification(t, "api-key")
+	ctx := paymentContext(cryptomusPaymentConfig())
+	svc := NewService(orders, queue, cryptomusRegistry(queryServer.URL))
+	payload := cryptomusNotification(cryptomusPaidNotification(t, cryptomusAPIKey))
 
-	if err := svc.CryptomusNotify(ctx, payload); err != nil {
+	if err := svc.Notify(ctx, payload); err != nil {
 		t.Fatalf("CryptomusNotify: %v", err)
 	}
-	if err := svc.CryptomusNotify(ctx, payload); err != nil {
+	if err := svc.Notify(ctx, payload); err != nil {
 		t.Fatalf("duplicate CryptomusNotify must be idempotent: %v", err)
 	}
-	if orders.markCount != 1 || orders.order.Status != settle.StatusPaid || orders.order.TradeNo != "uuid-1" {
+	if orders.markCount != 1 || orders.order.Status != order.StatusPaid || orders.order.TradeNo != "uuid-1" {
 		t.Fatalf("order was not settled exactly once: %+v, marks=%d", orders.order, orders.markCount)
 	}
 	if len(queue.enqueued) == 0 {
@@ -96,49 +102,49 @@ func TestCryptomusNotifySettlesOnlyAfterSignedAndQueriedInvoiceMatch(t *testing.
 }
 
 func TestCryptomusNotifyRejectsInvalidSignature(t *testing.T) {
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyPayment, cryptomusPaymentConfig(11, "api-key"))
-	svc := NewService(nil, nil)
+	ctx := paymentContext(cryptomusPaymentConfig())
+	svc := NewService(nil, nil, nil)
 
 	payload := cryptomusPaidNotification(t, "wrong-key")
-	if err := svc.CryptomusNotify(ctx, payload); err == nil || !strings.Contains(err.Error(), "verify sign failed") {
+	if err := svc.Notify(ctx, cryptomusNotification(payload)); err == nil || !strings.Contains(err.Error(), "verify sign failed") {
 		t.Fatalf("payload signed with another key must be rejected, got %v", err)
 	}
 
-	tampered := []byte(strings.Replace(string(cryptomusPaidNotification(t, "api-key")), `"10.00"`, `"1.00"`, 1))
-	if err := svc.CryptomusNotify(ctx, tampered); err == nil || !strings.Contains(err.Error(), "verify sign failed") {
+	tampered := []byte(strings.Replace(string(cryptomusPaidNotification(t, cryptomusAPIKey)), `"10.00"`, `"1.00"`, 1))
+	if err := svc.Notify(ctx, cryptomusNotification(tampered)); err == nil || !strings.Contains(err.Error(), "verify sign failed") {
 		t.Fatalf("tampered payload must be rejected, got %v", err)
 	}
 }
 
 func TestCryptomusNotifyRejectsWrongTypeAndAmountMismatch(t *testing.T) {
-	orders := &callbackOrderRepo{order: &order.Order{
-		OrderNo: "order-1", PaymentId: 11, Method: "Cryptomus", Status: settle.StatusPending,
+	orders := &callbackOrders{order: &order.Order{
+		OrderNo: "order-1", PaymentId: cryptomusMethodID, Method: "Cryptomus", Status: order.StatusPending,
 		PaymentAmount: 1000, PaymentCurrency: "USD",
 	}}
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyPayment, cryptomusPaymentConfig(11, "api-key"))
-	svc := NewService(orders, nil)
+	ctx := paymentContext(cryptomusPaymentConfig())
+	svc := NewService(orders, nil, nil)
 
-	walletTopup := signCryptomusTestPayload(t, "api-key", map[string]interface{}{
+	walletTopup := signCryptomusTestPayload(t, cryptomusAPIKey, map[string]any{
 		"type": "wallet", "uuid": "uuid-1", "order_id": "order-1",
 		"amount": "10.00", "currency": "USD", "status": "paid", "is_final": true,
 	})
-	if err := svc.CryptomusNotify(ctx, walletTopup); err == nil || !strings.Contains(err.Error(), "notification type") {
+	if err := svc.Notify(ctx, cryptomusNotification(walletTopup)); err == nil || !strings.Contains(err.Error(), "notification type") {
 		t.Fatalf("wallet webhooks must not settle orders, got %v", err)
 	}
 
-	underpaid := signCryptomusTestPayload(t, "api-key", map[string]interface{}{
+	underpaid := signCryptomusTestPayload(t, cryptomusAPIKey, map[string]any{
 		"type": "payment", "uuid": "uuid-1", "order_id": "order-1",
 		"amount": "9.00", "currency": "USD", "status": "paid", "is_final": true,
 	})
-	if err := svc.CryptomusNotify(ctx, underpaid); err == nil || !strings.Contains(err.Error(), "amount mismatch") {
+	if err := svc.Notify(ctx, cryptomusNotification(underpaid)); err == nil || !strings.Contains(err.Error(), "amount mismatch") {
 		t.Fatalf("amount below the payment expectation must be rejected, got %v", err)
 	}
 
-	wrongCurrency := signCryptomusTestPayload(t, "api-key", map[string]interface{}{
+	wrongCurrency := signCryptomusTestPayload(t, cryptomusAPIKey, map[string]any{
 		"type": "payment", "uuid": "uuid-1", "order_id": "order-1",
 		"amount": "10.00", "currency": "EUR", "status": "paid", "is_final": true,
 	})
-	if err := svc.CryptomusNotify(ctx, wrongCurrency); err == nil || !strings.Contains(err.Error(), "currency mismatch") {
+	if err := svc.Notify(ctx, cryptomusNotification(wrongCurrency)); err == nil || !strings.Contains(err.Error(), "currency mismatch") {
 		t.Fatalf("currency mismatch must be rejected, got %v", err)
 	}
 }
@@ -147,23 +153,22 @@ func TestCryptomusNotifyAcknowledgesNonPaidStatusesWithoutSettlement(t *testing.
 	statuses := []string{"check", "process", "confirm_check", "wrong_amount_waiting", "wrong_amount",
 		"cancel", "fail", "system_fail", "locked", "refund_process", "refund_fail", "refund_paid"}
 	for _, status := range statuses {
-		for _, localStatus := range []uint8{settle.StatusPending, settle.StatusPaid, settle.StatusFinished, 3} {
+		for _, localStatus := range []uint8{order.StatusPending, order.StatusPaid, order.StatusFinished, 3} {
 			t.Run(fmt.Sprintf("%s/local=%d", status, localStatus), func(t *testing.T) {
-				orders := &callbackOrderRepo{order: &order.Order{
-					OrderNo: "order-1", TradeNo: "uuid-1", PaymentId: 11, Method: "Cryptomus", Status: localStatus,
+				orders := &callbackOrders{order: &order.Order{
+					OrderNo: "order-1", TradeNo: "uuid-1", PaymentId: cryptomusMethodID, Method: "Cryptomus", Status: localStatus,
 					PaymentAmount: 1000, PaymentCurrency: "USD",
 				}}
 				queue := &fakeActivationQueue{}
-				svc := NewService(orders, queue)
-				ctx := context.WithValue(context.Background(), requestctx.CtxKeyPayment, cryptomusPaymentConfig(11, "api-key"))
-				payload := signCryptomusTestPayload(t, "api-key", map[string]interface{}{
+				// Non-settling events must not query the gateway or enqueue work.
+				svc := NewService(orders, queue, cryptomusRegistry(":invalid-gateway"))
+				ctx := paymentContext(cryptomusPaymentConfig())
+				payload := signCryptomusTestPayload(t, cryptomusAPIKey, map[string]any{
 					"type": "payment", "uuid": "uuid-1", "order_id": "order-1",
 					"amount": "10.00000000", "currency": "USD", "status": status,
 				})
-				// Non-settling events must not query the gateway or enqueue work.
-				withCryptomusGateway(t, ":invalid-gateway")
 				for range 2 {
-					if err := svc.CryptomusNotify(ctx, payload); err != nil {
+					if err := svc.Notify(ctx, cryptomusNotification(payload)); err != nil {
 						t.Fatalf("valid lifecycle event must be acknowledged: %v", err)
 					}
 				}
@@ -190,21 +195,21 @@ func TestCryptomusNonPaidNotificationStillRequiresAuthenticationAndBinding(t *te
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			orders := &callbackOrderRepo{order: &order.Order{
-				OrderNo: "order-1", TradeNo: "uuid-1", PaymentId: 11, Method: "Cryptomus", Status: settle.StatusPending,
+			orders := &callbackOrders{order: &order.Order{
+				OrderNo: "order-1", TradeNo: "uuid-1", PaymentId: cryptomusMethodID, Method: "Cryptomus", Status: order.StatusPending,
 				PaymentAmount: 1000, PaymentCurrency: "USD",
 			}}
-			fields := map[string]interface{}{
+			fields := map[string]any{
 				"type": "payment", "uuid": "uuid-1", "order_id": "order-1",
 				"amount": "10.00", "currency": "USD", "status": "confirm_check",
 			}
 			fields[test.field] = test.value
-			ctx := context.WithValue(context.Background(), requestctx.CtxKeyPayment, cryptomusPaymentConfig(11, "api-key"))
-			err := NewService(orders, nil).CryptomusNotify(ctx, signCryptomusTestPayload(t, "api-key", fields))
+			ctx := paymentContext(cryptomusPaymentConfig())
+			err := NewService(orders, nil, nil).Notify(ctx, cryptomusNotification(signCryptomusTestPayload(t, cryptomusAPIKey, fields)))
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expected %q, got %v", test.want, err)
 			}
-			if orders.markCount != 0 || orders.order.Status != settle.StatusPending {
+			if orders.markCount != 0 || orders.order.Status != order.StatusPending {
 				t.Fatal("rejected notification changed the order")
 			}
 		})
@@ -238,15 +243,14 @@ func TestCryptomusNotifyRejectsWhenGatewayDisagrees(t *testing.T) {
 			queryServer := cryptomusInfoServer(t, test.invoice)
 			defer queryServer.Close()
 
-			orders := &callbackOrderRepo{order: &order.Order{
-				OrderNo: "order-1", PaymentId: 11, Method: "Cryptomus", Status: settle.StatusPending,
+			orders := &callbackOrders{order: &order.Order{
+				OrderNo: "order-1", PaymentId: cryptomusMethodID, Method: "Cryptomus", Status: order.StatusPending,
 				PaymentAmount: 1000, PaymentCurrency: "USD",
 			}}
-			withCryptomusGateway(t, queryServer.URL)
-			ctx := context.WithValue(context.Background(), requestctx.CtxKeyPayment, cryptomusPaymentConfig(11, "api-key"))
-			svc := NewService(orders, &fakeActivationQueue{})
+			ctx := paymentContext(cryptomusPaymentConfig())
+			svc := NewService(orders, &fakeActivationQueue{}, cryptomusRegistry(queryServer.URL))
 
-			err := svc.CryptomusNotify(ctx, cryptomusPaidNotification(t, "api-key"))
+			err := svc.Notify(ctx, cryptomusNotification(cryptomusPaidNotification(t, cryptomusAPIKey)))
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expected %q error, got %v", test.want, err)
 			}
@@ -258,14 +262,14 @@ func TestCryptomusNotifyRejectsWhenGatewayDisagrees(t *testing.T) {
 }
 
 func TestCryptomusNotifyRequiresExactPaymentBinding(t *testing.T) {
-	orders := &callbackOrderRepo{order: &order.Order{
-		OrderNo: "order-1", PaymentId: 12, Method: "EPay", Status: settle.StatusPending,
+	orders := &callbackOrders{order: &order.Order{
+		OrderNo: "order-1", PaymentId: 12, Method: "EPay", Status: order.StatusPending,
 		PaymentAmount: 1000, PaymentCurrency: "USD",
 	}}
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyPayment, cryptomusPaymentConfig(11, "api-key"))
-	svc := NewService(orders, nil)
+	ctx := paymentContext(cryptomusPaymentConfig())
+	svc := NewService(orders, nil, nil)
 
-	err := svc.CryptomusNotify(ctx, cryptomusPaidNotification(t, "api-key"))
+	err := svc.Notify(ctx, cryptomusNotification(cryptomusPaidNotification(t, cryptomusAPIKey)))
 	if err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("order bound to another payment method must be rejected, got %v", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/go-telegram/bot/models"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 )
 
@@ -16,59 +15,47 @@ import (
 // and must never receive unescaped dynamic data — Telegram rejects the
 // whole message over one stray reserved character.
 type TelegramMessenger interface {
-	Send(chatID, threadID int64, message string) error
-	SendMarkdown(chatID, threadID int64, message string) error
+	Send(ctx context.Context, chatID, threadID int64, message string) error
+	SendMarkdown(ctx context.Context, chatID, threadID int64, message string) error
 }
 
 // TelegramAdminActionStore persists short-lived confirmations for destructive
-// administrator commands.
+// administrator commands. GetDel returns a key's value and removes the key in
+// one step, so concurrent readers cannot both receive it; a missing key reads
+// as redis.Nil.
 type TelegramAdminActionStore interface {
-	Get(ctx context.Context, key string) (string, error)
+	GetDel(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
 }
 
-// TelegramAdminDependencies contains only the collaborators used by Telegram
-// administrator commands. It intentionally does not accept Application.
-type TelegramAdminDependencies struct {
-	Messenger TelegramMessenger
-	Actions   TelegramAdminActionStore
-	// MirrorTicketStatus and MirrorTicketReply keep the ticket's forum
-	// topic in step with ticket mutations done through bot commands
-	// (/close, /reopen, /rp), which bypass the support module's notifier.
-	// Optional and best-effort.
-	MirrorTicketStatus func(ticketID int64, status uint8)
-	MirrorTicketReply  func(ticketID int64, content string)
-	Tickets            repository.TicketRepo
-	Orders             repository.OrderRepo
-	Users              repository.UserRepo
-	UserAuth           repository.UserAuthRepo
-	Subscriptions      repository.UserSubscriptionRepo
-	UserCache          repository.UserCacheRepo
-	Plans              repository.SubscribeRepo
-	Logs               repository.LogRepo
-	// Wallet is the billing-domain read port for balance display.
-	Wallet repository.WalletRepo
+// AdminDependencies contains only the collaborators used by the
+// administrator commands.
+type AdminDependencies struct {
+	Messenger     TelegramMessenger
+	Actions       TelegramAdminActionStore
+	Accounts      Accounts
+	Tickets       Tickets
+	Subscriptions Subscriptions
+	Billing       Billing
+	AuditLogs     AuditLogs
 }
 
-// TelegramAdmin handles administrative Telegram commands independently from
-// the general Telegram bot flow.
-type TelegramAdmin struct {
-	logger.Logger
-	ctx  context.Context
-	deps TelegramAdminDependencies
+// Admin runs the administrator commands of the admin group, independently
+// from the general update routing.
+type Admin struct {
+	deps AdminDependencies
 }
 
-func NewTelegramAdmin(ctx context.Context, deps TelegramAdminDependencies) *TelegramAdmin {
-	return &TelegramAdmin{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
+func NewAdmin(deps AdminDependencies) *Admin {
+	return &Admin{deps: deps}
 }
 
 // reply answers in the chat — and, inside the admin group, the same forum
-// topic — the command came from.
-func (a *TelegramAdmin) reply(msg *models.Message, message string) error {
-	return a.deps.Messenger.Send(msg.Chat.ID, int64(msg.MessageThreadID), message)
+// topic — the command came from. A failed delivery has nobody to tell but
+// the log.
+func (a *Admin) reply(ctx context.Context, msg *models.Message, message string) {
+	if err := a.deps.Messenger.Send(ctx, msg.Chat.ID, int64(msg.MessageThreadID), message); err != nil {
+		logger.WithContext(ctx).Errorw("[Telegram] admin reply failed", logger.Field("error", err.Error()))
+	}
 }

@@ -10,39 +10,31 @@ import (
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/slicesx"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetSubscribeDetailsLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get subscribe details
-func newGetSubscribeDetailsLogic(ctx context.Context, deps Deps) *GetSubscribeDetailsLogic {
-	return &GetSubscribeDetailsLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetSubscribeDetailsLogic) GetSubscribeDetails(req *dto.GetSubscribeDetailsRequest) (resp *dto.Subscribe, err error) {
-	sub, err := l.deps.Plans.FindOne(l.ctx, req.Id)
+// GetSubscribeDetails returns a plan with its discounts and node selection
+// decoded.
+func (s *Service) GetSubscribeDetails(ctx context.Context, req *dto.GetSubscribeDetailsRequest) (*dto.Subscribe, error) {
+	log := logger.WithContext(ctx)
+	sub, err := s.deps.Plans.FindOne(ctx, req.Id)
 	if err != nil {
-		l.Logger.Error("[GetSubscribeDetailsLogic] get subscribe details failed: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "get subscribe details failed: %v", err.Error())
+		log.Error("[GetSubscribeDetailsLogic] get subscribe details failed: ", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "get subscribe details failed: %v", err.Error())
 	}
-	resp = &dto.Subscribe{}
-	mapping.DeepCopy(resp, sub)
+	resp := &dto.Subscribe{}
+	if err := mapping.Copy(resp, sub); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "map plan %d", sub.Id)
+	}
 	if sub.Discount != "" {
-		err = json.Unmarshal([]byte(sub.Discount), &resp.Discount)
-		if err != nil {
-			l.Logger.Error("[GetSubscribeDetailsLogic] JSON unmarshal failed: ", logger.Field("error", err.Error()), logger.Field("discount", sub.Discount))
+		if err := json.Unmarshal([]byte(sub.Discount), &resp.Discount); err != nil {
+			log.Error("[GetSubscribeDetailsLogic] JSON unmarshal failed: ", logger.Field("error", err.Error()), logger.Field("discount", sub.Discount))
 		}
 	}
-	resp.Nodes = dto.StringInt64Slice(slicesx.StringToInt64Slice(sub.Nodes))
+	nodes, err := slicesx.ParseInt64CSV(sub.Nodes)
+	if err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "plan %d nodes: %v", sub.Id, err)
+	}
+	resp.Nodes = dto.StringInt64Slice(nodes)
 	resp.NodeTags = strings.Split(sub.NodeTags, ",")
 	return resp, nil
 }

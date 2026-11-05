@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
@@ -12,10 +13,15 @@ import (
 )
 
 func TestFindByNodeScopeIsUnpaginatedAndUsesORSemantics(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:subscribe-node-scope?mode=memory&cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "plans.db")), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	if err := db.AutoMigrate(&subscribe.Subscribe{}); err != nil {
 		t.Fatal(err)
 	}

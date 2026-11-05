@@ -13,6 +13,7 @@ import (
 	"github.com/perfect-panel/server/internal/module/network/internal/edge"
 	"github.com/perfect-panel/server/internal/module/network/internal/repo"
 	"github.com/perfect-panel/server/internal/module/network/internal/serverapi"
+	"github.com/perfect-panel/server/internal/module/network/internal/trafficstat"
 	"github.com/perfect-panel/server/internal/module/subscription"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/redis/go-redis/v9"
@@ -38,17 +39,34 @@ type Service interface {
 	ResetSortWithNode(ctx context.Context, req *dto.ResetSortRequest) error
 	QueryNodeTag(ctx context.Context) (*dto.QueryNodeTagResponse, error)
 
+	// Statistics serves the platform's reads of the node and traffic
+	// figures.
+	Statistics
+
 	// The node-facing server API. The ETag negotiation flows through
 	// RequestMeta/ResponseMeta; node authentication stays in the handlers.
 	GetServerUserList(ctx context.Context, req *dto.GetServerUserListRequest, meta RequestMeta) (*dto.GetServerUserListResponse, ResponseMeta, error)
 	QueryServerProtocolConfig(ctx context.Context, req *dto.QueryServerConfigRequest) (*dto.QueryServerConfigResponse, error)
 	PushOnlineUsers(ctx context.Context, req *dto.OnlineUsersRequest) error
+	GetServerAliveList(ctx context.Context, req *dto.GetServerUserListRequest) (*dto.GetServerAliveListResponse, error)
+	ClaimServerDevice(ctx context.Context, req *dto.ClaimServerDeviceRequest) (*dto.ClaimServerDeviceResponse, error)
 	ServerPushStatus(ctx context.Context, req *dto.ServerPushStatusRequest) error
 	InvalidateRoutingStatus(ctx context.Context, serverID int64) error
 	ServerPushUserTraffic(ctx context.Context, req *dto.ServerPushUserTrafficRequest) error
 
 	// EdgeManifest serves the token-authenticated edge client manifest.
 	EdgeManifest(ctx context.Context, token string) (*dto.EdgeManifestResponse, error)
+
+	// RecordDailyTrafficStatistics records the previous day's traffic
+	// statistics in the system log, once per day however often it runs.
+	RecordDailyTrafficStatistics(ctx context.Context) error
+	// PruneTrafficLogs deletes the raw traffic log older than before and
+	// returns how many rows it deleted.
+	PruneTrafficLogs(ctx context.Context, before time.Time) (int64, error)
+
+	// Access serves the other modules' reads and cache invalidation (see
+	// access.go).
+	Access
 }
 
 // ErrManifestNotFound re-exports the edge subdomain's not-found sentinel for
@@ -70,12 +88,11 @@ type Snapshot struct {
 }
 
 // Deps declares everything the module needs; the composition root
-// (internal/app) provides them. The module wraps the legacy store during
-// migration and will own its persistence once the domain data moves in
-// (ADR-001 step 5).
+// (internal/app) provides them.
 type Deps struct {
 	Store                Store
 	TrafficUsage         subscription.TrafficUsage
+	Subscription         SubscriptionReader
 	Redis                *redis.Client
 	ReadGlobalNodeConfig func(context.Context) (config.NodeConfig, error)
 	// Config snapshots the runtime-mutable settings per request.
@@ -83,6 +100,14 @@ type Deps struct {
 	// Multiplier returns the node traffic multiplier in effect at the given
 	// time; nil means no multiplier is configured.
 	Multiplier func(at time.Time) float32
+	// Accounts reads the subscription owners' account state from the
+	// identity domain.
+	Accounts Accounts
+	// Logs is the platform's system log, where the daily traffic statistics
+	// are recorded.
+	Logs repository.LogRepo
+	// Traffic is only used by scheduled traffic statistics.
+	Traffic repository.TrafficRepo
 }
 
 // NewRepoBuilder exports the module-owned repository implementations for
@@ -107,37 +132,41 @@ func NewRepoBuilder(rds *redis.Client) repository.NetworkBuilder {
 	}
 }
 
+// New assembles the module's service from deps.
 func New(deps Deps) Service {
+	nodes := deps.Store.Node()
+	routingAccounts, _ := deps.Accounts.(config.RoutingAccountLookup)
 	api := serverapi.NewService(serverapi.Deps{
-		TrafficUsage:         deps.TrafficUsage,
-		Store:                deps.Store,
-		Redis:                deps.Redis,
+		Store: deps.Store, TrafficUsage: deps.TrafficUsage, Redis: deps.Redis,
 		ReadGlobalNodeConfig: deps.ReadGlobalNodeConfig,
 		Config: func() serverapi.Snapshot {
 			cfg := deps.Config()
 			return serverapi.Snapshot{Node: cfg.Node, Subscribe: cfg.Subscribe}
 		},
-		Multiplier: deps.Multiplier,
+		Multiplier: deps.Multiplier, Servers: nodes, Overrides: nodes, Nodes: nodes, Caches: nodes,
+		Status: nodes, Online: nodes, Subscriptions: deps.Subscription, Accounts: deps.Accounts,
 	})
 	return &service{
+		statistics: statistics{store: deps.Store},
 		admin: adminserver.NewService(adminserver.Deps{
 			Store: deps.Store, Redis: deps.Redis, ReadGlobalNodeConfig: deps.ReadGlobalNodeConfig,
-			DesiredSnapshotID: api.DesiredSnapshotID,
+			DesiredSnapshotID: api.DesiredSnapshotID, Subscriptions: deps.Subscription, RoutingAccounts: routingAccounts,
+			Config: func() adminserver.Snapshot { return adminserver.Snapshot{Node: deps.Config().Node} },
 		}),
-		api: api,
-		edge: edge.NewService(edge.Deps{
-			Store: deps.Store,
-			Config: func() edge.Snapshot {
-				return edge.Snapshot{Subscribe: deps.Config().Subscribe}
-			},
-		}),
+		api:   api,
+		edge:  edge.NewService(edge.DepsFrom(deps.Store, deps.Subscription, deps.Accounts, func() edge.Snapshot { return edge.Snapshot{Subscribe: deps.Config().Subscribe} })),
+		stats: trafficstat.NewService(trafficstat.Deps{Traffic: deps.Traffic, Logs: deps.Logs}),
+		store: deps.Store,
 	}
 }
 
 type service struct {
+	statistics
 	admin *adminserver.Service
 	api   *serverapi.Service
 	edge  *edge.Service
+	stats *trafficstat.Service
+	store Store
 }
 
 func (s *service) CreateServer(ctx context.Context, req *dto.CreateServerRequest) (*dto.CreateServerResponse, error) {
@@ -212,6 +241,14 @@ func (s *service) PushOnlineUsers(ctx context.Context, req *dto.OnlineUsersReque
 	return s.api.PushOnlineUsers(ctx, req)
 }
 
+func (s *service) GetServerAliveList(ctx context.Context, req *dto.GetServerUserListRequest) (*dto.GetServerAliveListResponse, error) {
+	return s.api.GetServerAliveList(ctx, req)
+}
+
+func (s *service) ClaimServerDevice(ctx context.Context, req *dto.ClaimServerDeviceRequest) (*dto.ClaimServerDeviceResponse, error) {
+	return s.api.ClaimServerDevice(ctx, req)
+}
+
 func (s *service) ServerPushStatus(ctx context.Context, req *dto.ServerPushStatusRequest) error {
 	return s.api.ServerPushStatus(ctx, req)
 }
@@ -231,6 +268,16 @@ func (s *service) EdgeManifest(ctx context.Context, token string) (*dto.EdgeMani
 // unrelated repositories and application-wide transactions.
 type Store interface {
 	adminserver.Store
-	serverapi.Store
 	edge.Store
+	serverapi.Store
+	// TrafficLog serves the traffic-log reads of the other modules.
+	TrafficLog() repository.TrafficRepo
+}
+
+func (s *service) RecordDailyTrafficStatistics(ctx context.Context) error {
+	return s.stats.RecordDailyStatistics(ctx)
+}
+
+func (s *service) PruneTrafficLogs(ctx context.Context, before time.Time) (int64, error) {
+	return s.stats.PruneTrafficLogs(ctx, before)
 }

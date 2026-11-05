@@ -1,3 +1,7 @@
+// Package token signs and parses the HS256 JSON Web Tokens the server hands
+// out: the session tokens of package usersession and billing's order event
+// tickets. It checks only the signature and the expiry; what a token grants
+// is for the package that issued it to decide.
 package token
 
 import (
@@ -33,11 +37,16 @@ func NewJwtToken(secretKey string, iat, seconds int64, opt ...Option) (string, e
 	return token.SignedString([]byte(secretKey))
 }
 
-// ParseJwtToken Parse jwt token and return claims.
+// ParseJwtToken parses a token this package issued and returns its claims.
+// Only HS256 is accepted, the algorithm NewJwtToken signs with, so a token
+// declaring another algorithm ("none", an RSA one) is refused before its
+// signature is looked at; and an expiry is required, since every token this
+// package issues carries one, so a forged token cannot live forever by
+// leaving it out.
 func ParseJwtToken(tokenString, secretKey string) (jwt.MapClaims, error) {
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
 		return []byte(secretKey), nil
-	})
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired())
 	if err != nil {
 		return nil, err
 	}

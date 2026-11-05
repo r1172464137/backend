@@ -1,6 +1,15 @@
 package main
 
-import "github.com/perfect-panel/server/cmd"
+import (
+	// The Docker image is built from scratch and ships the Asia/Shanghai
+	// zone file only, so the binary carries the zone database itself for
+	// every other AppLocation. The time package consults the embedded copy
+	// after the system directories, so a system database still wins where
+	// one exists.
+	_ "time/tzdata"
+
+	"github.com/perfect-panel/server/cmd"
+)
 
 // @title PPanel API
 // @version 1.0

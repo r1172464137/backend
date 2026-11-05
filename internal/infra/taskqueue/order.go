@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 )
 
+// The order task types.
 const (
 	DeferCloseOrder                 = "defer:order:close"
 	ForthwithActivateOrder          = "forthwith:order:activate"
@@ -18,14 +19,20 @@ const (
 )
 
 type (
+	// DeferCloseOrderPayload names the unpaid order DeferCloseOrder closes.
 	DeferCloseOrderPayload struct {
 		OrderNo string `json:"order_no"`
 	}
+	// ForthwithActivateOrderPayload names the paid order to activate.
 	ForthwithActivateOrderPayload struct {
 		OrderNo string `json:"order_no"`
 	}
 )
 
+// ActivationTaskID is the task ID of an order's activation: every producer
+// (payment callback, reconciliation) enqueues under the same ID, so a paid
+// order has one activation task queued at a time, however often its payment
+// is reported.
 func ActivationTaskID(orderNo string) string {
 	digest := sha256.Sum256([]byte(orderNo))
 	return "order-activation:" + hex.EncodeToString(digest[:])

@@ -6,6 +6,7 @@ import (
 	"github.com/perfect-panel/server/internal/module/identity/internal/guestaccount"
 )
 
+// GuestAccountCommand is the account a paid guest order asks for.
 type GuestAccountCommand = guestaccount.Command
 
 // GuestAccounts is the identity-owned capability used by paid guest orders.
@@ -15,6 +16,7 @@ type GuestAccounts interface {
 	EnsureGuestAccount(context.Context, GuestAccountCommand) (int64, error)
 }
 
+// NewGuestAccounts builds the guest accounts over the store they persist to.
 func NewGuestAccounts(store guestaccount.Store) GuestAccounts {
 	return guestaccount.New(store)
 }

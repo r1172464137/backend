@@ -20,6 +20,8 @@ type TaskStore interface {
 }
 
 var (
+	// Manager is the process's worker manager, created by the first
+	// NewWorkerManager call.
 	Manager *WorkerManager
 	once    sync.Once
 	sendOne = make(chan struct{}, 1)
@@ -33,6 +35,8 @@ type WorkerManager struct {
 	cancels map[int64]context.CancelFunc
 }
 
+// NewWorkerManager returns the process's worker manager, creating it on the
+// first call.
 func NewWorkerManager() *WorkerManager {
 	if Manager != nil {
 		return Manager

@@ -1,3 +1,5 @@
+// Package ads holds the ads row (the ads table): an ad the public site shows
+// while it is enabled and inside its schedule.
 package ads
 
 import "time"
@@ -20,8 +22,12 @@ func (Ads) TableName() string {
 	return "ads"
 }
 
-// Filter ads 列表查询过滤条件
+// Filter selects a page of the ads list.
 type Filter struct {
 	Status *int
 	Search string
+	// ActiveAt keeps only ads scheduled to run at that instant. An unset
+	// bound (NULL, or the Unix epoch the admin API stores for an omitted
+	// time) leaves that side of the schedule open.
+	ActiveAt *time.Time
 }

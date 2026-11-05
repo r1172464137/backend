@@ -1,3 +1,5 @@
+// Package repo holds the network module's repository implementations: the
+// servers and nodes with their Redis caches, and the traffic log.
 package repo
 
 import (
@@ -5,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,7 +16,9 @@ import (
 	"github.com/perfect-panel/server/internal/repository"
 
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
+	"github.com/perfect-panel/server/internal/module/network/internal/onlinecache"
 	"github.com/perfect-panel/server/pkg/orm"
+	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -60,44 +65,47 @@ func NewNodeRepo(db *gorm.DB, cache *redis.Client, retriers ...*ServerCacheInval
 	}
 }
 
-// nodeInSet 支持多值 OR 查询
+// nodeInSet selects the rows whose comma-separated field holds any of the
+// values.
 func nodeInSet(field string, values []string) func(db *gorm.DB) *gorm.DB {
 	return orm.CommaSeparatedContains(field, values)
 }
 
-// NodeUserListCacheKeys resolves the server user-list cache keys for the
-// given node ids and node tags; the subscription bundle invalidates them
-// when a plan's node set changes (repository.NodeCacheKeyBridge).
-func (m *nodeRepo) NodeUserListCacheKeys(ctx context.Context, nodeIDs []int64, tags []string) ([]string, error) {
-	keys := make([]string, 0)
-	appendKeys := func(nodes []*node.Node) {
-		for _, n := range nodes {
-			keys = append(keys, fmt.Sprintf("%s%d", node.ServerUserListCacheKey, n.ServerId))
-			keys = append(keys, fmt.Sprintf("%s%d:%s", node.ServerUserListCacheKey, n.ServerId, n.Protocol))
+// ClearNodeUserListCaches drops the node-facing caches of every server
+// carrying a node the scope selects, an explicit node id or any of the tags,
+// enabled or not (repository.NodeCacheKeyBridge): the subscription bundle
+// calls it once a plan write that changes which subscriptions the servers
+// serve has committed. Each server goes through ClearServerCache, whose
+// generation fence rejects a user list a concurrent rebuild read before the
+// write; a plain DEL of the list keys let such a list be cached over the
+// invalidation. An empty scope clears nothing.
+func (m *nodeRepo) ClearNodeUserListCaches(ctx context.Context, nodeIDs []int64, tags []string) error {
+	tags = slices.DeleteFunc(slices.Clone(tags), func(tag string) bool { return tag == "" })
+	if len(nodeIDs) == 0 && len(tags) == 0 {
+		return nil
+	}
+	nodes, err := m.ListNodesByScope(ctx, nodeIDs, tags, nil, false)
+	if err != nil {
+		return err
+	}
+	serverIDs := make([]int64, 0, len(nodes))
+	for _, item := range nodes {
+		if item != nil && item.ServerId > 0 && !slices.Contains(serverIDs, item.ServerId) {
+			serverIDs = append(serverIDs, item.ServerId)
 		}
 	}
-	if len(nodeIDs) > 0 {
-		var nodes []*node.Node
-		if err := m.DB.WithContext(ctx).Model(&node.Node{}).Where("id IN (?)", nodeIDs).Find(&nodes).Error; err != nil {
-			return nil, err
+	slices.Sort(serverIDs)
+	var errs []error
+	for _, serverID := range serverIDs {
+		if err := m.ClearServerCache(ctx, serverID); err != nil {
+			errs = append(errs, fmt.Errorf("clear the caches of server %d: %w", serverID, err))
 		}
-		appendKeys(nodes)
 	}
-	if len(tags) > 0 {
-		var nodes []*node.Node
-		if err := m.DB.WithContext(ctx).Model(&node.Node{}).Scopes(nodeInSet("tags", tags)).Find(&nodes).Error; err != nil {
-			return nil, err
-		}
-		appendKeys(nodes)
-	}
-	return keys, nil
+	return errors.Join(errs...)
 }
 
-func (m *nodeRepo) InsertServer(ctx context.Context, data *node.Server, tx ...*gorm.DB) error {
+func (m *nodeRepo) InsertServer(ctx context.Context, data *node.Server) error {
 	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
-	}
 	return db.WithContext(ctx).Create(data).Error
 }
 
@@ -114,38 +122,37 @@ func (m *nodeRepo) FindOneServerForUpdate(ctx context.Context, id int64) (*node.
 	return &server, err
 }
 
-func (m *nodeRepo) UpdateServer(ctx context.Context, data *node.Server, tx ...*gorm.DB) error {
-	_, err := m.FindOneServer(ctx, data.Id)
-	if err != nil {
+// serverAdminColumns are the server columns an administrator's update
+// writes. last_reported_at is the nodes' heartbeat: a whole-row save wrote
+// back the value read at the start of the request over a heartbeat that
+// landed meanwhile.
+var serverAdminColumns = []string{"name", "country", "city", "address", "sort", "protocols"}
+
+// UpdateServer stores an administrator's changes to the server: its
+// settings columns, zero values included, and updated_at.
+func (m *nodeRepo) UpdateServer(ctx context.Context, data *node.Server) error {
+	if _, err := m.FindOneServer(ctx, data.Id); err != nil {
 		return err
 	}
-
-	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
-	}
-	return db.WithContext(ctx).Where("id = ?", data.Id).Save(data).Error
+	return m.DB.WithContext(ctx).Model(data).Select(serverAdminColumns).Updates(data).Error
 }
 
 // UpdateServerProtocolsIfCurrent persists node-reported protocol metadata
 // without running the full-row server update hooks. The compare-and-swap guard
 // prevents a heartbeat based on stale data from overwriting a concurrent admin
 // configuration change.
-func (m *nodeRepo) UpdateServerProtocolsIfCurrent(ctx context.Context, id int64, current, updated string, tx ...*gorm.DB) (bool, error) {
+func (m *nodeRepo) UpdateServerProtocolsIfCurrent(ctx context.Context, id int64, current, updated string) (bool, error) {
 	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
-	}
 	result := db.WithContext(ctx).Model(&node.Server{}).
 		Where("id = ? AND protocols = ?", id, current).
-		UpdateColumns(map[string]interface{}{
+		UpdateColumns(map[string]any{
 			"protocols":  updated,
-			"updated_at": time.Now(),
+			"updated_at": timeutil.Now(),
 		})
 	return result.RowsAffected == 1, result.Error
 }
 
-func (m *nodeRepo) BatchUpdateServerLastReportedAt(ctx context.Context, reports map[int64]time.Time, tx ...*gorm.DB) error {
+func (m *nodeRepo) BatchUpdateServerLastReportedAt(ctx context.Context, reports map[int64]time.Time) error {
 	if len(reports) == 0 {
 		return nil
 	}
@@ -163,19 +170,16 @@ func (m *nodeRepo) BatchUpdateServerLastReportedAt(ctx context.Context, reports 
 	})
 
 	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
-	}
 	expr, args := serverLastReportedAtExpr(db, ids, reports)
 	return db.WithContext(ctx).Model(&node.Server{}).Where("id IN ?", ids).
 		Update("last_reported_at", gorm.Expr(expr, args...)).Error
 }
 
-func serverLastReportedAtExpr(db *gorm.DB, ids []int64, reports map[int64]time.Time) (string, []interface{}) {
+func serverLastReportedAtExpr(db *gorm.DB, ids []int64, reports map[int64]time.Time) (string, []any) {
 	idColumn := serverColumn(db, "id")
 	targetColumn := serverColumn(db, "last_reported_at")
 	parts := make([]string, 0, len(ids))
-	args := make([]interface{}, 0, len(ids)*2)
+	args := make([]any, 0, len(ids)*2)
 	for _, id := range ids {
 		parts = append(parts, "WHEN ? THEN ?")
 		args = append(args, id, reports[id])
@@ -190,11 +194,8 @@ func serverColumn(db *gorm.DB, column string) string {
 	return (&node.Server{}).TableName() + "." + column
 }
 
-func (m *nodeRepo) DeleteServer(ctx context.Context, id int64, tx ...*gorm.DB) error {
+func (m *nodeRepo) DeleteServer(ctx context.Context, id int64) error {
 	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
-	}
 	return db.WithContext(ctx).Where("id = ?", id).Delete(&node.Server{}).Error
 }
 
@@ -235,19 +236,33 @@ func (m *nodeRepo) SaveServerRoutingOverride(ctx context.Context, data *node.Ser
 			DoUpdates: clause.AssignmentColumns([]string{"ip_strategy", "dns", "routing", "routing_revision", "updated_at"})}).Create(data).Error
 }
 
-func (m *nodeRepo) DeleteServerConfigOverride(ctx context.Context, serverId int64, tx ...*gorm.DB) error {
+func (m *nodeRepo) SaveServerConfigOverride(ctx context.Context, data *node.ServerConfigOverride) error {
 	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
+
+	var old node.ServerConfigOverride
+	err := db.WithContext(ctx).Model(&node.ServerConfigOverride{}).Where("server_id = ?", data.ServerId).First(&old).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
 	}
+	if err != nil {
+		return db.WithContext(ctx).Create(data).Error
+	}
+	data.Id = old.Id
+	data.CreatedAt = old.CreatedAt
+	return db.WithContext(ctx).Model(data).Select(serverConfigOverrideColumns).Updates(data).Error
+}
+
+// serverConfigOverrideColumns are the override values an update writes; a
+// nil value is written as NULL, which means inherit.
+var serverConfigOverrideColumns = []string{"ip_strategy", "dns", "block", "outbound"}
+
+func (m *nodeRepo) DeleteServerConfigOverride(ctx context.Context, serverId int64) error {
+	db := m.DB
 	return db.WithContext(ctx).Where("server_id = ?", serverId).Delete(&node.ServerConfigOverride{}).Error
 }
 
-func (m *nodeRepo) InsertNode(ctx context.Context, data *node.Node, tx ...*gorm.DB) error {
+func (m *nodeRepo) InsertNode(ctx context.Context, data *node.Node) error {
 	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
-	}
 	return db.WithContext(ctx).Create(data).Error
 }
 
@@ -257,40 +272,32 @@ func (m *nodeRepo) FindOneNode(ctx context.Context, id int64) (*node.Node, error
 	return &n, err
 }
 
-func (m *nodeRepo) UpdateNode(ctx context.Context, data *node.Node, tx ...*gorm.DB) error {
-	_, err := m.FindOneNode(ctx, data.Id)
-	if err != nil {
+// nodeAdminColumns are the node columns an administrator's update writes.
+var nodeAdminColumns = []string{"name", "tags", "port", "address", "server_id", "protocol", "enabled", "sort"}
+
+// UpdateNode stores an administrator's changes to the node: its settings
+// columns, zero values included, and updated_at; the loaded Server
+// association, if any, is left alone.
+func (m *nodeRepo) UpdateNode(ctx context.Context, data *node.Node) error {
+	if _, err := m.FindOneNode(ctx, data.Id); err != nil {
 		return err
 	}
-
-	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
-	}
-	return db.WithContext(ctx).Where("id = ?", data.Id).Save(data).Error
+	return m.DB.WithContext(ctx).Model(data).Select(nodeAdminColumns).Updates(data).Error
 }
 
-func (m *nodeRepo) DeleteNode(ctx context.Context, id int64, tx ...*gorm.DB) error {
+func (m *nodeRepo) DeleteNode(ctx context.Context, id int64) error {
 	db := m.DB
-	if len(tx) > 0 {
-		db = tx[0]
-	}
 	return db.WithContext(ctx).Where("id = ?", id).Delete(&node.Node{}).Error
 }
 
-// UpdateStatusCache Update server status to cache
+// UpdateStatusCache stores the status a server reported until it expires.
 func (m *nodeRepo) UpdateStatusCache(ctx context.Context, serverId int64, status *node.Status) error {
 	key := fmt.Sprintf(node.StatusCacheKey, serverId)
 	return m.Cache.Set(ctx, key, status.Marshal(), node.Expiry).Err()
 }
 
-// DeleteStatusCache Delete server status from cache
-func (m *nodeRepo) DeleteStatusCache(ctx context.Context, serverId int64) error {
-	key := fmt.Sprintf(node.StatusCacheKey, serverId)
-	return m.Cache.Del(ctx, key).Err()
-}
-
-// StatusCache Get server status from cache
+// StatusCache returns the status a server last reported, or a zero status
+// when none is cached.
 func (m *nodeRepo) StatusCache(ctx context.Context, serverId int64) (node.Status, error) {
 	var status node.Status
 	key := fmt.Sprintf(node.StatusCacheKey, serverId)
@@ -309,9 +316,34 @@ func (m *nodeRepo) StatusCache(ctx context.Context, serverId int64) (node.Status
 	return status, err
 }
 
-// OnlineUserSubscribe Get online user subscribe
+// OnlineUserSubscribe returns the subscriptions a server reports online over
+// the protocol, with their IPs.
 func (m *nodeRepo) OnlineUserSubscribe(ctx context.Context, serverId int64, protocol string) (node.OnlineUserSubscribe, error) {
 	key := fmt.Sprintf(node.OnlineUserCacheKeyWithSubscribe, serverId, protocol)
+	now, err := m.Cache.Time(ctx).Result()
+	if err != nil {
+		return nil, err
+	}
+	// ZRANGE BYSCORE requires Redis 6.2; preserve the supported Redis 6.0 baseline.
+	devices, err := m.Cache.Do(ctx, "ZRANGEBYSCORE", key+":devices", "("+strconv.FormatInt(now.Unix(), 10), "+inf").StringSlice()
+	if err != nil {
+		return nil, err
+	}
+	if exists, err := m.Cache.Exists(ctx, key+":devices").Result(); err != nil {
+		return nil, err
+	} else if exists != 0 {
+		result := make(node.OnlineUserSubscribe)
+		for _, device := range devices {
+			id, ip, ok := strings.Cut(device, ":")
+			sid, err := strconv.ParseInt(id, 10, 64)
+			if !ok || err != nil {
+				return nil, fmt.Errorf("invalid online device record")
+			}
+			result[sid] = append(result[sid], ip)
+		}
+		return result, nil
+	}
+	// Retain reads of pre-upgrade reports during a rolling deployment.
 	result, err := m.Cache.Get(ctx, key).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -327,44 +359,49 @@ func (m *nodeRepo) OnlineUserSubscribe(ctx context.Context, serverId int64, prot
 	return subscribe, err
 }
 
-// UpdateOnlineUserSubscribe Update online user subscribe
+// UpdateOnlineUserSubscribe stores the subscriptions a server reports online
+// over the protocol until the report expires.
 func (m *nodeRepo) UpdateOnlineUserSubscribe(ctx context.Context, serverId int64, protocol string, subscribe node.OnlineUserSubscribe) error {
 	key := fmt.Sprintf(node.OnlineUserCacheKeyWithSubscribe, serverId, protocol)
 	data, err := json.Marshal(subscribe)
 	if err != nil {
 		return err
 	}
-	return m.Cache.Set(ctx, key, data, node.Expiry).Err()
+	pipe := m.Cache.Pipeline()
+	pipe.Set(ctx, key, data, node.Expiry)
+	deviceKey := key + ":devices"
+	args := []any{int64(node.Expiry.Seconds())}
+	for sid, ips := range subscribe {
+		for _, ip := range ips {
+			args = append(args, fmt.Sprintf("%d:%s", sid, ip))
+		}
+	}
+	onlinecache.RenewScript.Eval(ctx, pipe, []string{deviceKey}, args...)
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
-// DeleteOnlineUserSubscribe Delete online user subscribe
-func (m *nodeRepo) DeleteOnlineUserSubscribe(ctx context.Context, serverId int64, protocol string) error {
-	key := fmt.Sprintf(node.OnlineUserCacheKeyWithSubscribe, serverId, protocol)
-	return m.Cache.Del(ctx, key).Err()
-}
-
-// OnlineUserSubscribeGlobal Get global online user subscribe count
+// OnlineUserSubscribeGlobal counts the subscriptions online on any server,
+// dropping the entries whose report expired.
 func (m *nodeRepo) OnlineUserSubscribeGlobal(ctx context.Context) (int64, error) {
 	now := time.Now().Unix()
-	// Clear expired data
 	if err := m.Cache.ZRemRangeByScore(ctx, node.OnlineUserSubscribeCacheKeyWithGlobal, "-inf", fmt.Sprintf("%d", now)).Err(); err != nil {
 		return 0, err
 	}
 	return m.Cache.ZCard(ctx, node.OnlineUserSubscribeCacheKeyWithGlobal).Result()
 }
 
-// UpdateOnlineUserSubscribeGlobal Update global online user subscribe count
+// UpdateOnlineUserSubscribeGlobal marks the subscriptions online for five
+// minutes in the global count, dropping the expired entries.
 func (m *nodeRepo) UpdateOnlineUserSubscribeGlobal(ctx context.Context, subscribe node.OnlineUserSubscribe) error {
 	now := time.Now()
-	expireTime := now.Add(5 * time.Minute).Unix() // set expire time 5 minutes later
+	expireTime := now.Add(5 * time.Minute).Unix()
 
 	pipe := m.Cache.Pipeline()
 
-	// Clear expired data
 	pipe.ZRemRangeByScore(ctx, node.OnlineUserSubscribeCacheKeyWithGlobal, "-inf", fmt.Sprintf("%d", now.Unix()))
-	// Add or update each subscribe with new expire time
+	// Each member's score is the time its entry expires.
 	for sub := range subscribe {
-		// Use ZAdd to add or update the member with new score (expire time)
 		pipe.ZAdd(ctx, node.OnlineUserSubscribeCacheKeyWithGlobal, redis.Z{
 			Score:  float64(expireTime),
 			Member: sub,
@@ -375,12 +412,8 @@ func (m *nodeRepo) UpdateOnlineUserSubscribeGlobal(ctx context.Context, subscrib
 	return err
 }
 
-// DeleteOnlineUserSubscribeGlobal Delete global online user subscribe count
-func (m *nodeRepo) DeleteOnlineUserSubscribeGlobal(ctx context.Context) error {
-	return m.Cache.Del(ctx, node.OnlineUserSubscribeCacheKeyWithGlobal).Err()
-}
-
-// FilterServerList Filter Server List
+// FilterServerList returns a page of the servers matching params, in sort
+// order, and how many match.
 func (m *nodeRepo) FilterServerList(ctx context.Context, params *node.FilterParams) (int64, []*node.Server, error) {
 	var servers []*node.Server
 	var total int64
@@ -431,7 +464,7 @@ func (m *nodeRepo) nodeListQuery(ctx context.Context, params *node.FilterNodePar
 	if params.Search != "" {
 		pattern := orm.LikePrefixPattern(params.Search)
 		condition := "(name LIKE ?" + orm.LikeEscapeClause() + " OR address LIKE ?" + orm.LikeEscapeClause() + " OR tags LIKE ?" + orm.LikeEscapeClause()
-		args := []interface{}{pattern, pattern, pattern}
+		args := []any{pattern, pattern, pattern}
 		if port, err := strconv.ParseUint(params.Search, 10, 16); err == nil {
 			condition += " OR port = ?"
 			args = append(args, uint16(port))
@@ -462,7 +495,8 @@ func (m *nodeRepo) nodeListQuery(ctx context.Context, params *node.FilterNodePar
 	return query
 }
 
-// FilterNodeList Filter Node List
+// FilterNodeList returns a page of the nodes matching params, in sort
+// order, and how many match.
 func (m *nodeRepo) FilterNodeList(ctx context.Context, params *node.FilterNodeParams) (int64, []*node.Node, error) {
 	if params == nil {
 		params = &node.FilterNodeParams{}
@@ -490,7 +524,7 @@ func (m *nodeRepo) ListNodes(ctx context.Context, params *node.FilterNodeParams)
 func (m *nodeRepo) ListNodesByScope(ctx context.Context, nodeIDs []int64, tags []string, enabled *bool, preload bool) ([]*node.Node, error) {
 	query := m.nodeListQuery(ctx, &node.FilterNodeParams{Enabled: enabled, Preload: preload})
 	conditions := make([]string, 0, 2)
-	args := make([]interface{}, 0, len(tags)+1)
+	args := make([]any, 0, len(tags)+1)
 	if len(nodeIDs) > 0 {
 		conditions = append(conditions, "id IN ?")
 		args = append(args, nodeIDs)
@@ -574,7 +608,7 @@ func (m *nodeRepo) ServerCacheGeneration(ctx context.Context, serverId int64) (i
 // SetServerCache stores a response only when the generation captured before
 // the database read still matches. This prevents pre-update readers from
 // repopulating stale data after ClearServerCache runs.
-func (m *nodeRepo) SetServerCache(ctx context.Context, serverId int64, key string, value interface{}, generation int64) error {
+func (m *nodeRepo) SetServerCache(ctx context.Context, serverId int64, key string, value any, generation int64) error {
 	if serverId <= 0 || key == "" {
 		return nil
 	}
@@ -585,25 +619,9 @@ func (m *nodeRepo) SetServerCache(ctx context.Context, serverId int64, key strin
 	return err
 }
 
-// ClearNodeCache Clear Node Cache
-func (m *nodeRepo) ClearNodeCache(ctx context.Context, params *node.FilterNodeParams) error {
-	nodes, err := m.ListNodes(ctx, params)
-	if err != nil {
-		return err
-	}
-	serverIDs := make(map[int64]struct{}, len(nodes))
-	for _, n := range nodes {
-		serverIDs[n.ServerId] = struct{}{}
-	}
-	for serverID := range serverIDs {
-		if err := m.ClearServerCache(ctx, serverID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ClearServerCache Clear Server Cache
+// ClearServerCache drops a server's node-facing response caches. With a
+// retrier, a Redis failure is retried in the background instead of being
+// returned.
 func (m *nodeRepo) ClearServerCache(ctx context.Context, serverId int64) error {
 	err := clearServerCache(ctx, m.Cache, serverId)
 	if err == nil || m.cacheRetrier == nil {
@@ -648,7 +666,7 @@ func clearServerCache(ctx context.Context, client *redis.Client, serverId int64)
 		}
 	}
 	cacheKeys = append(cacheKeys, fmt.Sprintf("%s%d", node.ServerUserListCacheKey, serverId))
-	args := make([]interface{}, len(cacheKeys))
+	args := make([]any, len(cacheKeys))
 	for i, key := range cacheKeys {
 		args[i] = key
 	}

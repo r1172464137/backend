@@ -64,7 +64,7 @@ func TestUserSubscribeTrafficIncrementExprSQL(t *testing.T) {
 			conn := db.Model(&usersub.Subscribe{})
 			downloadExpr, downloadArgs := userSubscribeTrafficIncrementExpr(conn, "download", deltas)
 			uploadExpr, uploadArgs := userSubscribeTrafficIncrementExpr(conn, "upload", deltas)
-			stmt := conn.Where("id IN ?", []int64{1, 2}).Updates(map[string]interface{}{
+			stmt := conn.Where("id IN ?", []int64{1, 2}).Updates(map[string]any{
 				"download": gorm.Expr(downloadExpr, downloadArgs...),
 				"upload":   gorm.Expr(uploadExpr, uploadArgs...),
 			}).Statement

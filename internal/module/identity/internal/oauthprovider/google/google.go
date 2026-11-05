@@ -1,3 +1,5 @@
+// Package google is the Google client of the Google sign-in method: the
+// OAuth configuration and the profile of the signed-in user.
 package google
 
 import (
@@ -5,11 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 
-	"github.com/perfect-panel/server/pkg/logger"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
+
+// userInfoURL is a variable so tests can point the client at a stub server.
+var userInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
 type Config struct {
 	ClientID     string
@@ -39,31 +44,38 @@ func New(config *Config) *Client {
 	}
 }
 
-func (c *Client) GetUserInfo(token string) (*UserInfo, error) {
-	client := c.Config.Client(context.Background(), &oauth2.Token{AccessToken: token})
-	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+// GetUserInfo fetches the profile of the access token's user. The request
+// is bound to ctx, which carries the caller's deadline.
+func (c *Client) GetUserInfo(ctx context.Context, token string) (*UserInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userInfoURL, nil)
 	if err != nil {
-		logger.Error("[Google OAuth 2.0] Get User Info", logger.Field("error", err.Error()))
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	resp, err := c.Client(ctx, &oauth2.Token{AccessToken: token}).Do(req)
 	if err != nil {
-		logger.Error("[Google OAuth 2.0] Read response body", logger.Field("error", err.Error()))
-		return nil, err
+		return nil, fmt.Errorf("google userinfo request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("google userinfo returned status %d", resp.StatusCode)
 	}
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read google userinfo: %w", err)
+	}
 	var raw struct {
-		ID            string      `json:"id"`
-		Email         string      `json:"email"`
-		Name          string      `json:"name"`
-		Picture       string      `json:"picture"`
-		VerifiedEmail interface{} `json:"verified_email"`
+		ID            string `json:"id"`
+		Email         string `json:"email"`
+		Name          string `json:"name"`
+		Picture       string `json:"picture"`
+		VerifiedEmail any    `json:"verified_email"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		logger.Error("[Google OAuth 2.0] Decode User Info", logger.Field("error", err.Error()))
-		return nil, err
+		return nil, fmt.Errorf("decode google userinfo: %w", err)
+	}
+	if raw.ID == "" {
+		return nil, fmt.Errorf("google userinfo returned no user id")
 	}
 
 	verified := false
@@ -81,23 +93,4 @@ func (c *Client) GetUserInfo(token string) (*UserInfo, error) {
 		Picture:       raw.Picture,
 		VerifiedEmail: verified,
 	}, nil
-}
-
-// parseInt64 safely converts an interface{} to int64, handling the common
-// string/number variations that can come from JSON.
-func parseInt64(v interface{}) (int64, error) {
-	switch val := v.(type) {
-	case float64:
-		return int64(val), nil
-	case string:
-		var n int64
-		if _, err := fmt.Sscanf(val, "%d", &n); err != nil {
-			return 0, fmt.Errorf("cannot parse %q as int64", val)
-		}
-		return n, nil
-	case json.Number:
-		return val.Int64()
-	default:
-		return 0, fmt.Errorf("unexpected type %T for int64 value", v)
-	}
 }

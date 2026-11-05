@@ -2,16 +2,19 @@ package checkout
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
+// policyUserSubs answers the single-subscription and quota policies and
+// counts their reads; the policies never read a user subscription's details.
 type policyUserSubs struct {
-	UserSubscriptionReader
 	blocking           bool
 	quotaCount         int64
 	subscription       *usersub.Subscribe
@@ -19,6 +22,8 @@ type policyUserSubs struct {
 	quotaCountCalls    int
 	findSubscribeCalls int
 }
+
+var _ UserSubscriptionReader = (*policyUserSubs)(nil)
 
 func (r *policyUserSubs) HasBlockingSubscription(_ context.Context, _ int64) (bool, error) {
 	r.hasBlockingCalls++
@@ -35,6 +40,10 @@ func (r *policyUserSubs) FindOneSubscribe(_ context.Context, _ int64) (*usersub.
 	return r.subscription, nil
 }
 
+func (*policyUserSubs) FindOneUserSubscribe(context.Context, int64) (*usersub.SubscribeDetails, error) {
+	return nil, errors.New("policyUserSubs: the policies do not read subscription details")
+}
+
 type policyPlans struct {
 	subscribe *subscribe.Subscribe
 }
@@ -48,9 +57,7 @@ func TestPurchaseSingleModelUsesBlockingSubscriptionPolicy(t *testing.T) {
 	svc := NewService(Deps{UserSubs: users, SingleModel: func() bool { return true }})
 
 	_, err := svc.Purchase(ownerContext(42), &dto.PurchaseOrderRequest{SubscribeId: 10})
-	if err == nil || !strings.Contains(err.Error(), "user has subscription") {
-		t.Fatalf("Purchase error = %v, want single-model rejection", err)
-	}
+	assertCode(t, err, xerr.UserSubscribeExist)
 	if users.hasBlockingCalls != 1 {
 		t.Fatalf("HasBlockingSubscription calls = %d, want 1", users.hasBlockingCalls)
 	}
@@ -81,9 +88,7 @@ func TestPurchaseAndPreCreateUseQuotaConsumingCount(t *testing.T) {
 		svc := NewService(Deps{UserSubs: users, Plans: policyPlans{subscribe: plan}, SingleModel: func() bool { return false }})
 
 		_, err := svc.Purchase(ownerContext(42), &dto.PurchaseOrderRequest{SubscribeId: 10})
-		if err == nil || !strings.Contains(err.Error(), "quota limit") {
-			t.Fatalf("Purchase error = %v, want quota rejection", err)
-		}
+		assertCode(t, err, xerr.SubscribeQuotaLimit)
 		if users.quotaCountCalls != 1 {
 			t.Fatalf("CountQuotaConsumingSubscriptions calls = %d, want 1", users.quotaCountCalls)
 		}
@@ -94,9 +99,7 @@ func TestPurchaseAndPreCreateUseQuotaConsumingCount(t *testing.T) {
 		svc := NewService(Deps{UserSubs: users, Plans: policyPlans{subscribe: plan}, SingleModel: func() bool { return false }})
 
 		_, err := svc.PreCreateOrder(ownerContext(42), &dto.PurchaseOrderRequest{SubscribeId: 10})
-		if err == nil || !strings.Contains(err.Error(), "quota limit") {
-			t.Fatalf("PreCreateOrder error = %v, want quota rejection", err)
-		}
+		assertCode(t, err, xerr.SubscribeQuotaLimit)
 		if users.quotaCountCalls != 1 {
 			t.Fatalf("CountQuotaConsumingSubscriptions calls = %d, want 1", users.quotaCountCalls)
 		}
@@ -139,6 +142,7 @@ func TestRenewalPreviewValidatesTargetBeforeSkippingQuota(t *testing.T) {
 		name         string
 		subscription *usersub.Subscribe
 		wantError    string
+		wantCode     uint32
 	}{
 		{
 			name: "foreign subscription",
@@ -149,6 +153,7 @@ func TestRenewalPreviewValidatesTargetBeforeSkippingQuota(t *testing.T) {
 				Status:      usersub.SubscribeStatusActive,
 			},
 			wantError: "does not belong to current user",
+			wantCode:  xerr.InvalidAccess,
 		},
 		{
 			name: "different plan",
@@ -159,6 +164,7 @@ func TestRenewalPreviewValidatesTargetBeforeSkippingQuota(t *testing.T) {
 				Status:      usersub.SubscribeStatusActive,
 			},
 			wantError: "does not match subscribe plan",
+			wantCode:  xerr.InvalidParams,
 		},
 		{
 			name: "deducted subscription",
@@ -168,7 +174,8 @@ func TestRenewalPreviewValidatesTargetBeforeSkippingQuota(t *testing.T) {
 				SubscribeId: 10,
 				Status:      usersub.SubscribeStatusDeducted,
 			},
-			wantError: "status does not allow renewal",
+			wantError: "refunded or stopped subscription cannot be renewed",
+			wantCode:  xerr.SubscribeNotAvailable,
 		},
 	}
 
@@ -191,6 +198,7 @@ func TestRenewalPreviewValidatesTargetBeforeSkippingQuota(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("PreCreateOrder error = %v, want %q", err, tt.wantError)
 			}
+			assertCode(t, err, tt.wantCode)
 			if users.quotaCountCalls != 0 {
 				t.Fatalf("CountQuotaConsumingSubscriptions calls = %d, want 0", users.quotaCountCalls)
 			}

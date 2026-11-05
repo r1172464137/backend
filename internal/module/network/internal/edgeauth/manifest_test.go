@@ -43,7 +43,7 @@ func TestVerifyManifestRequest(t *testing.T) {
 func TestClaimManifestRequestRejectsReplay(t *testing.T) {
 	mini := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	defer client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 
 	cfg := config.EdgeSubscribeConfig{MaxClockSkewSeconds: 60}
 	requestID := "f0a8cb72-7c5b-4df5-9935-3f0e67eac79e"

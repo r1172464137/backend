@@ -9,27 +9,12 @@ import (
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type QuerySubscribeListLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get subscribe list
-func newQuerySubscribeListLogic(ctx context.Context, deps Deps) *QuerySubscribeListLogic {
-	return &QuerySubscribeListLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *QuerySubscribeListLogic) QuerySubscribeList(req *dto.QuerySubscribeListRequest) (resp *dto.QuerySubscribeListResponse, err error) {
-
-	total, data, err := l.deps.Plans.FilterList(l.ctx, &subscribe.FilterParams{
+// QuerySubscribeList lists the plans on sale in the requested language,
+// falling back to the default-language plans when there are none.
+func (s *Service) QuerySubscribeList(ctx context.Context, req *dto.QuerySubscribeListRequest) (*dto.QuerySubscribeListResponse, error) {
+	total, data, err := s.deps.Plans.FilterList(ctx, &subscribe.FilterParams{
 		Page:            1,
 		Size:            9999,
 		Language:        req.Language,
@@ -37,25 +22,25 @@ func (l *QuerySubscribeListLogic) QuerySubscribeList(req *dto.QuerySubscribeList
 		DefaultLanguage: true,
 	})
 	if err != nil {
-		l.Errorw("[QuerySubscribeListLogic] Database Error", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "QuerySubscribeList error: %v", err.Error())
+		logger.WithContext(ctx).Errorw("[QuerySubscribeListLogic] Database Error", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "QuerySubscribeList error: %v", err.Error())
 	}
 
-	resp = &dto.QuerySubscribeListResponse{
-		Total: total,
-	}
 	list := make([]dto.Subscribe, len(data))
 	for i, item := range data {
 		var sub dto.Subscribe
-		mapping.DeepCopy(&sub, item)
+		if err := mapping.Copy(&sub, item); err != nil {
+			return nil, xerr.Wrapf(err, xerr.ERROR, "map plan %d", item.Id)
+		}
 		if item.Discount != "" {
 			var discount []dto.SubscribeDiscount
 			_ = json.Unmarshal([]byte(item.Discount), &discount)
 			sub.Discount = discount
-			list[i] = sub
 		}
 		list[i] = sub
 	}
-	resp.List = list
-	return
+	return &dto.QuerySubscribeListResponse{
+		Total: total,
+		List:  list,
+	}, nil
 }

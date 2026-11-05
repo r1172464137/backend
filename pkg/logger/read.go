@@ -9,18 +9,15 @@ import (
 	"path/filepath"
 )
 
-func ReadLastNLines(path string, n int) ([]string, error) {
-	return readLastNLinesFromFile(filepath.Join(path, accessFilename), n)
-}
-
-// ReadLastNLogLines returns recent entries from every active file sink. A
-// missing level file is normal (for example, a service may have no severe
-// events yet); an error is returned only when no current log file is readable.
+// ReadLastNLogLines returns the last n entries of each log file in path, the
+// directory of the file output, for the administrators' log view. A missing
+// file is skipped; an error is returned only when no log file is readable,
+// as when the logs go to the console.
 func ReadLastNLogLines(path string, n int) ([]string, error) {
 	if n <= 0 {
 		return []string{}, nil
 	}
-	filenames := []string{accessFilename, errorFilename, severeFilename, slowFilename, statFilename}
+	filenames := []string{accessFilename, errorFilename, slowFilename}
 	lines := make([]string, 0, n*len(filenames))
 	var readErrs []error
 	readable := false
@@ -50,7 +47,8 @@ func readLastNLinesFromFile(filename string, n int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	// The file is only read; closing it cannot lose data.
+	defer func() { _ = file.Close() }()
 
 	// Get file size
 	fileInfo, err := file.Stat()
@@ -84,14 +82,9 @@ func readLastNLinesFromFile(filename string, n int) ([]string, error) {
 		}
 		position -= readSize
 
-		// Read chunk from position
-		_, err := file.Seek(position, io.SeekStart)
-		if err != nil {
-			return nil, err
-		}
-
-		_, err = file.Read(buffer[:readSize])
-		if err != nil {
+		// Read the chunk at position; ReadAt fills the buffer or fails, where
+		// a plain Read may return a short chunk.
+		if _, err := file.ReadAt(buffer[:readSize], position); err != nil {
 			return nil, err
 		}
 
@@ -102,7 +95,7 @@ func readLastNLinesFromFile(filename string, n int) ([]string, error) {
 				if lineCount > n {
 					// We found more than n lines
 					// Need to adjust position to read only last n lines
-					position += int64(i) + 1
+					position += i + 1
 					break
 				}
 			}

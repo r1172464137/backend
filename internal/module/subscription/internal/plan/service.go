@@ -6,7 +6,6 @@ package plan
 import (
 	"context"
 
-	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/internal/repository"
 )
 
@@ -15,6 +14,8 @@ type SubscriptionTransactor interface {
 	InSubscriptionTx(ctx context.Context, fn func(repository.SubscriptionStore) error) error
 }
 
+// Deps declares the subdomain's dependencies; the module facade forwards
+// them from the composition root.
 type Deps struct {
 	Plans    repository.SubscribeRepo
 	UserSubs repository.UserSubscriptionRepo
@@ -29,62 +30,12 @@ func (d Deps) notifyPlanChanged() {
 	}
 }
 
+// Service is the plan-management entry point used by the subscription
+// facade.
 type Service struct {
 	deps Deps
 }
 
 func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
-}
-
-func (s *Service) CreateSubscribe(ctx context.Context, req *dto.CreateSubscribeRequest) error {
-	return newCreateSubscribeLogic(ctx, s.deps).CreateSubscribe(req)
-}
-
-func (s *Service) UpdateSubscribe(ctx context.Context, req *dto.UpdateSubscribeRequest) error {
-	return newUpdateSubscribeLogic(ctx, s.deps).UpdateSubscribe(req)
-}
-
-func (s *Service) DeleteSubscribe(ctx context.Context, req *dto.DeleteSubscribeRequest) error {
-	return newDeleteSubscribeLogic(ctx, s.deps).DeleteSubscribe(req)
-}
-
-func (s *Service) BatchDeleteSubscribe(ctx context.Context, req *dto.BatchDeleteSubscribeRequest) error {
-	return newBatchDeleteSubscribeLogic(ctx, s.deps).BatchDeleteSubscribe(req)
-}
-
-func (s *Service) GetSubscribeList(ctx context.Context, req *dto.GetSubscribeListRequest) (*dto.GetSubscribeListResponse, error) {
-	return newGetSubscribeListLogic(ctx, s.deps).GetSubscribeList(req)
-}
-
-func (s *Service) GetSubscribeDetails(ctx context.Context, req *dto.GetSubscribeDetailsRequest) (*dto.Subscribe, error) {
-	return newGetSubscribeDetailsLogic(ctx, s.deps).GetSubscribeDetails(req)
-}
-
-func (s *Service) SubscribeSort(ctx context.Context, req *dto.SubscribeSortRequest) error {
-	return newSubscribeSortLogic(ctx, s.deps).SubscribeSort(req)
-}
-
-func (s *Service) ResetAllSubscribeToken(ctx context.Context) (*dto.ResetAllSubscribeTokenResponse, error) {
-	return newResetAllSubscribeTokenLogic(ctx, s.deps).ResetAllSubscribeToken()
-}
-
-func (s *Service) CreateSubscribeGroup(ctx context.Context, req *dto.CreateSubscribeGroupRequest) error {
-	return newCreateSubscribeGroupLogic(ctx, s.deps).CreateSubscribeGroup(req)
-}
-
-func (s *Service) UpdateSubscribeGroup(ctx context.Context, req *dto.UpdateSubscribeGroupRequest) error {
-	return newUpdateSubscribeGroupLogic(ctx, s.deps).UpdateSubscribeGroup(req)
-}
-
-func (s *Service) DeleteSubscribeGroup(ctx context.Context, req *dto.DeleteSubscribeGroupRequest) error {
-	return newDeleteSubscribeGroupLogic(ctx, s.deps).DeleteSubscribeGroup(req)
-}
-
-func (s *Service) BatchDeleteSubscribeGroup(ctx context.Context, req *dto.BatchDeleteSubscribeGroupRequest) error {
-	return newBatchDeleteSubscribeGroupLogic(ctx, s.deps).BatchDeleteSubscribeGroup(req)
-}
-
-func (s *Service) GetSubscribeGroupList(ctx context.Context) (*dto.GetSubscribeGroupListResponse, error) {
-	return newGetSubscribeGroupListLogic(ctx, s.deps).GetSubscribeGroupList()
 }

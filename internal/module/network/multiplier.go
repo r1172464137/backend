@@ -7,6 +7,7 @@ import "github.com/perfect-panel/server/internal/module/network/internal/multipl
 type MultiplierManager = multiplier.Manager
 type MultiplierPeriod = multiplier.TimePeriod
 
+// NewMultiplierManager returns a manager applying the multipliers of periods.
 func NewMultiplierManager(periods []MultiplierPeriod) *MultiplierManager {
 	return multiplier.NewManager(periods)
 }

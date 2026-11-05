@@ -42,16 +42,19 @@ type (
 
 	// A RotateLogger is a Logger that can rotate log files with given rules.
 	RotateLogger struct {
-		filename    string
-		backup      string
-		fp          *os.File
-		channel     chan []byte
-		done        chan struct{}
-		rule        RotateRule
-		compress    bool
-		waitGroup   sync.WaitGroup
-		closeOnce   sync.Once
-		currentSize int64
+		filename  string
+		backup    string
+		fp        *os.File
+		channel   chan []byte
+		done      chan struct{}
+		rule      RotateRule
+		compress  bool
+		waitGroup sync.WaitGroup
+		// compressions tracks the background compression of rotated
+		// backups, which Close waits for.
+		compressions sync.WaitGroup
+		closeOnce    sync.Once
+		currentSize  int64
 	}
 
 	// A DailyRotateRule is a rule to daily rotate the log files.
@@ -71,12 +74,12 @@ type (
 	}
 )
 
-// DefaultRotateRule is a default log rotating rule, currently DailyRotateRule.
-func DefaultRotateRule(filename, delimiter string, days int, gzip bool) RotateRule {
+// defaultRotateRule is a default log rotating rule, currently DailyRotateRule.
+func defaultRotateRule(filename string, days int, gzip bool) RotateRule {
 	return &DailyRotateRule{
 		rotatedTime: getNowDate(),
 		filename:    filename,
-		delimiter:   delimiter,
+		delimiter:   backupFileDelimiter,
 		days:        days,
 		gzip:        gzip,
 	}
@@ -136,13 +139,13 @@ func (r *DailyRotateRule) ShallRotate(_ int64) bool {
 	return len(r.rotatedTime) > 0 && getNowDate() != r.rotatedTime
 }
 
-// NewSizeLimitRotateRule returns the rotation rule with size limit
-func NewSizeLimitRotateRule(filename, delimiter string, days, maxSize, maxBackups int, gzip bool) RotateRule {
+// newSizeLimitRotateRule returns the rotation rule with size limit
+func newSizeLimitRotateRule(filename string, days, maxSize, maxBackups int, gzip bool) RotateRule {
 	return &SizeLimitRotateRule{
 		DailyRotateRule: DailyRotateRule{
 			rotatedTime: getNowDateInRFC3339Format(),
 			filename:    filename,
-			delimiter:   delimiter,
+			delimiter:   backupFileDelimiter,
 			days:        days,
 			gzip:        gzip,
 		},
@@ -226,8 +229,8 @@ func (r *SizeLimitRotateRule) parseFilename() (prefix, ext string) {
 	return
 }
 
-// NewLogger returns a RotateLogger with given filename and rule, etc.
-func NewLogger(filename string, rule RotateRule, compress bool) (*RotateLogger, error) {
+// newRotateLogger returns a RotateLogger with given filename and rule, etc.
+func newRotateLogger(filename string, rule RotateRule, compress bool) (*RotateLogger, error) {
 	l := &RotateLogger{
 		filename: filename,
 		channel:  make(chan []byte, bufferSize),
@@ -250,6 +253,9 @@ func (l *RotateLogger) Close() error {
 	l.closeOnce.Do(func() {
 		close(l.done)
 		l.waitGroup.Wait()
+		// The worker may have rotated while draining; let the backups'
+		// compression finish so no half-written archive is left behind.
+		l.compressions.Wait()
 
 		if err = l.fp.Sync(); err != nil {
 			return
@@ -316,7 +322,7 @@ func (l *RotateLogger) maybeCompressFile(file string) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			ErrorStack(r)
+			errorStack(r)
 		}
 	}()
 
@@ -338,10 +344,10 @@ func (l *RotateLogger) maybeDeleteOutdatedFiles() {
 }
 
 func (l *RotateLogger) postRotate(file string) {
-	go func() {
+	l.compressions.Go(func() {
 		l.maybeCompressFile(file)
 		l.maybeDeleteOutdatedFiles()
-	}()
+	})
 }
 
 func (l *RotateLogger) rotate() error {

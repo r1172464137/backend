@@ -4,17 +4,19 @@ import (
 	"time"
 
 	"github.com/perfect-panel/server/internal/module/network"
-	"github.com/perfect-panel/server/internal/module/subscription"
 	"github.com/perfect-panel/server/internal/repository"
 )
 
-// newNetworkModule wires the network module against the legacy store; the
+// newNetworkModule wires the network module against the shared store; the
 // node/subscribe configuration is runtime-mutable, so the module receives a
 // per-request snapshot closure.
 func newNetworkModule(store repository.Store, srv *Application) network.Service {
 	return network.New(network.Deps{
 		Store:                store,
-		TrafficUsage:         subscription.NewTrafficUsage(store),
+		Logs:                 store.Log(),
+		Traffic:              store.TrafficLog(),
+		TrafficUsage:         srv.TrafficUsage,
+		Subscription:         srv.Subscription,
 		Redis:                srv.Redis,
 		ReadGlobalNodeConfig: srv.Platform.ReadNodeConfigSnapshot,
 		Config: func() network.Snapshot {
@@ -31,5 +33,7 @@ func newNetworkModule(store repository.Store, srv *Application) network.Service 
 			}
 			return manager.GetMultiplier(at)
 		},
+		// Identity is built before network (see NewApplication).
+		Accounts: srv.Identity,
 	})
 }

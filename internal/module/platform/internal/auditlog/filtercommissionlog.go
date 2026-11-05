@@ -5,67 +5,24 @@ import (
 
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/internal/module/platform/entity/log"
-	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type FilterCommissionLogLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// NewFilterCommissionLogLogic Filter commission log
-func newFilterCommissionLogLogic(ctx context.Context, deps Deps) *FilterCommissionLogLogic {
-	return &FilterCommissionLogLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *FilterCommissionLogLogic) FilterCommissionLog(req *dto.FilterCommissionLogRequest) (resp *dto.FilterCommissionLogResponse, err error) {
-	data, total, err := l.deps.Logs.FilterSystemLog(l.ctx, &log.FilterParams{
-		Page:      req.Page,
-		Size:      req.Size,
-		Data:      req.Date,
-		StartDate: req.StartDate,
-		EndDate:   req.EndDate,
-		Type:      log.TypeCommission.Uint8(),
-		ObjectID:  req.UserId,
+// FilterCommissionLog pages a user's commission movements.
+func (s *Service) FilterCommissionLog(ctx context.Context, req *dto.FilterCommissionLogRequest) (*dto.FilterCommissionLogResponse, error) {
+	params := filterParams(log.TypeCommission, req.UserId, req.FilterLogParams)
+	// The commission log is not searched.
+	params.Search = ""
+	total, list, err := logPage(ctx, s.deps.Logs, "commission", params, func(row *log.SystemLog, content *log.Commission) dto.CommissionLog {
+		return withRequestMetadata(&dto.CommissionLog{
+			UserId:    row.ObjectID,
+			Type:      content.Type,
+			Amount:    content.Amount,
+			OrderNo:   content.OrderNo,
+			Timestamp: content.Timestamp,
+		}, content.Metadata)
 	})
 	if err != nil {
-		l.Errorw("Query User Commission Log failed", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Query User Commission Log failed")
+		return nil, err
 	}
-	var list []dto.CommissionLog
-
-	for _, datum := range data {
-		var content log.Commission
-		if err = content.Unmarshal([]byte(datum.Content)); err != nil {
-			l.Errorf("unmarshal commission log content failed: %v", err.Error())
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "corrupt commission log %d: %v", datum.Id, err)
-		}
-		list = append(list, dto.CommissionLog{
-			UserId:           datum.ObjectID,
-			Type:             content.Type,
-			Amount:           content.Amount,
-			OrderNo:          content.OrderNo,
-			Timestamp:        content.Timestamp,
-			ClientIP:         content.ClientIP,
-			UserAgent:        content.UserAgent,
-			ActorID:          content.ActorID,
-			IPCountryCode:    content.IPCountryCode,
-			IPCountry:        content.IPCountry,
-			IPRegion:         content.IPRegion,
-			IPCity:           content.IPCity,
-			IPASN:            content.IPASN,
-			IPASOrganization: content.IPASOrganization,
-		})
-	}
-	return &dto.FilterCommissionLogResponse{
-		Total: total,
-		List:  list,
-	}, nil
+	return &dto.FilterCommissionLogResponse{Total: total, List: list}, nil
 }

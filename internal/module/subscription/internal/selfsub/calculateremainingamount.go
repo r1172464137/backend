@@ -2,51 +2,51 @@ package selfsub
 
 import (
 	"context"
+	"errors"
 
-	"github.com/perfect-panel/server/pkg/logger"
-
+	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
 	"github.com/perfect-panel/server/internal/module/subscription/internal/deduction"
+	"github.com/perfect-panel/server/internal/module/subscription/internal/period"
+	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-func CalculateRemainingAmount(ctx context.Context, deps Deps, userSubscribeId int64) (int64, error) {
-	// Find User Subscribe
-	userSubscribe, err := deps.UserSubs.FindOneUserSubscribe(ctx, userSubscribeId)
+// remainingAmount is the refund for cancelling the subscription now: the
+// unused share of what its order paid. A subscription without an order
+// refunds nothing. A provider-managed subscription, one whose plan is gone
+// or allows no deduction (outside single-subscription mode), and one that is
+// not active are refused.
+func (s *Service) remainingAmount(ctx context.Context, userSubscribeId int64) (int64, error) {
+	userSubscribe, err := s.deps.UserSubs.FindOneUserSubscribe(ctx, userSubscribeId)
 	if err != nil {
-		logger.WithContext(ctx).Error("[func CalculateRemainingAmount(ctx context.Context, deps Deps, userSubscribeId int64) (int64, error) {\n] FindOneUserSubscribe", logger.Field("err", err.Error()), logger.Field("id", userSubscribeId))
-		return 0, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindOneUserSubscribe failed, id: %d", userSubscribeId)
+		logger.WithContext(ctx).Error("[CalculateRemainingAmount] FindOneUserSubscribe", logger.Field("err", err.Error()), logger.Field("id", userSubscribeId))
+		return 0, xerr.Errorf(xerr.DatabaseQueryError, "FindOneUserSubscribe failed, id: %d", userSubscribeId)
+	}
+	if userSubscribe.EntitlementSource != "" {
+		return 0, usersub.ErrProviderManaged
 	}
 	if userSubscribe.OrderId == 0 {
 		return 0, nil
 	}
-	if !*userSubscribe.Subscribe.AllowDeduction && !deps.SingleModel() {
-		return 0, errors.New("The subscription package does not support deductions")
+	plan := userSubscribe.Subscribe
+	if plan == nil {
+		// The plan was deleted, and its refund rules with it.
+		return 0, xerr.Errorf(xerr.SubscribeNotAvailable, "plan %d of subscription %d no longer exists", userSubscribe.SubscribeId, userSubscribeId)
+	}
+	// An unset flag (a row from before the column had a default) allows no
+	// deduction, the safe reading.
+	if (plan.AllowDeduction == nil || !*plan.AllowDeduction) && !s.deps.SingleModel() {
+		return 0, xerr.Errorf(xerr.SubscribeNotAvailable, "plan %d does not allow deductions", plan.Id)
 	}
 
-	if userSubscribe.Status != 1 {
-		return 0, errors.New("The subscription package is not in use")
+	if userSubscribe.Status != usersub.SubscribeStatusActive {
+		return 0, errors.New("the subscription package is not in use")
 	}
-	// Find Order Details
-	orderDetails, err := deps.Orders.FindOneDetails(ctx, userSubscribe.OrderId)
+	orderDetails, err := s.deps.Orders.FindOneDetails(ctx, userSubscribe.OrderId)
 	if err != nil {
-		logger.WithContext(ctx).Error("[PreUnsubscribe] FindOneDetails", logger.Field("err", err.Error()), logger.Field("id", userSubscribe.OrderId))
-		return 0, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindOneDetails failed, id: %d", userSubscribe.OrderId)
+		logger.WithContext(ctx).Error("[CalculateRemainingAmount] FindOneDetails", logger.Field("err", err.Error()), logger.Field("id", userSubscribe.OrderId))
+		return 0, xerr.Errorf(xerr.DatabaseQueryError, "FindOneDetails failed, id: %d", userSubscribe.OrderId)
 	}
-	// Calculate Order Quantity
-	orderQuantity := orderDetails.Quantity
-	// Calculate Order Amount
-	orderAmount := orderDetails.Amount + orderDetails.GiftAmount
-
-	if len(orderDetails.SubOrders) > 0 {
-		for _, subOrder := range orderDetails.SubOrders {
-			if subOrder.Status == 2 || subOrder.Status == 5 {
-				orderAmount += subOrder.Amount + subOrder.GiftAmount
-				orderQuantity += subOrder.Quantity
-			}
-		}
-	}
-	// Calculate Remaining Amount
 	remainingAmount, err := deduction.CalculateRemainingAmount(
 		deduction.Subscribe{
 			StartTime:      userSubscribe.StartTime,
@@ -54,18 +54,14 @@ func CalculateRemainingAmount(ctx context.Context, deps Deps, userSubscribeId in
 			Traffic:        userSubscribe.Traffic,
 			Download:       userSubscribe.Download,
 			Upload:         userSubscribe.Upload,
-			UnitTime:       userSubscribe.Subscribe.UnitTime,
-			UnitPrice:      userSubscribe.Subscribe.UnitPrice,
-			ResetCycle:     userSubscribe.Subscribe.ResetCycle,
-			DeductionRatio: userSubscribe.Subscribe.DeductionRatio,
+			UnitTime:       period.Unit(plan.UnitTime),
+			ResetCycle:     period.Cycle(plan.ResetCycle),
+			DeductionRatio: plan.DeductionRatio,
 		},
-		deduction.Order{
-			Amount:   orderAmount,
-			Quantity: orderQuantity,
-		},
+		deduction.Order{Amount: orderDetails.RefundBasis()},
 	)
 	if err != nil {
-		return 0, errors.Wrapf(xerr.NewErrCode(500), "CalculateRemainingAmount failed, userSubscribeId: %d, err: %v", userSubscribeId, err)
+		return 0, xerr.Wrapf(err, xerr.ERROR, "calculate the refund of subscription %d: %v", userSubscribeId, err)
 	}
 	return remainingAmount, nil
 }

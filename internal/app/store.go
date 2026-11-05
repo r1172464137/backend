@@ -13,10 +13,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// NewStore assembles the shared store from the module-owned repo builders
-// (falling back to the repository package's legacy builders for
-// implementations that have not migrated yet). One connection pool, module-
-// owned persistence (ADR-001 step-6 preparation).
+// NewStore assembles the shared store from the module-owned repository
+// builders over one connection pool: each module owns its persistence, and a
+// module moved to its own database only points its builder at another
+// connection (ADR-001).
 func NewStore(db *gorm.DB, rds *redis.Client) *repository.GormStore {
 	return repository.NewGormStoreWithBuilders(db, rds, repository.Builders{
 		Platform:     platform.NewRepoBuilder(),

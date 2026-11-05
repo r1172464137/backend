@@ -52,14 +52,14 @@ func bindValues(destination any, values url.Values) error {
 		return nil
 	}
 	value := reflect.ValueOf(destination)
-	if value.Kind() != reflect.Ptr || value.IsNil() {
+	if value.Kind() != reflect.Pointer || value.IsNil() {
 		return fmt.Errorf("bind target must be a non-nil pointer")
 	}
 	return bindValue(value.Elem(), values)
 }
 
 func bindValue(value reflect.Value, values url.Values) error {
-	if value.Kind() == reflect.Ptr {
+	if value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			value.Set(reflect.New(value.Type().Elem()))
 		}
@@ -116,7 +116,7 @@ func setField(field reflect.Value, raw []string) error {
 	if !field.CanSet() {
 		return nil
 	}
-	if field.Kind() == reflect.Ptr {
+	if field.Kind() == reflect.Pointer {
 		if len(raw) == 0 || raw[0] == "" {
 			return nil
 		}

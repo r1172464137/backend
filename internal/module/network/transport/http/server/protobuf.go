@@ -104,8 +104,7 @@ func validateStatusJSON(body []byte) error {
 	if err := config.ValidateUniqueJSON(body); err != nil {
 		return err
 	}
-	var object func([]byte, map[string]bool) (map[string]json.RawMessage, error)
-	object = func(raw []byte, allowed map[string]bool) (map[string]json.RawMessage, error) {
+	object := func(raw []byte, allowed map[string]bool) (map[string]json.RawMessage, error) {
 		trimmed := bytes.TrimSpace(raw)
 		if len(trimmed) == 0 || trimmed[0] != '{' {
 			return nil, fmt.Errorf("expected status object")
@@ -415,7 +414,7 @@ func serverProtocolToProtobuf(protocol dto.Protocol) (*serverv1.ServerProtocol, 
 	}, nil
 }
 
-func valueToProtobufValue(value interface{}) (*structpb.Value, error) {
+func valueToProtobufValue(value any) (*structpb.Value, error) {
 	if value == nil {
 		return nil, nil
 	}

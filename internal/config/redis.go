@@ -8,6 +8,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// ParseRedisURI splits a redis:// URI, the form of the PPANEL_REDIS
+// environment variable, into the address (port 6379 when it names none), the
+// password and the database number of its path (0 without one). A path that
+// is not a number is an error.
 func ParseRedisURI(uri string) (addr, password string, database int, err error) {
 	parsedURI, err := url.Parse(uri)
 
@@ -35,11 +39,17 @@ func ParseRedisURI(uri string) (addr, password string, database int, err error) 
 	return
 }
 
-func RedisPing(addr, password string, database int) error {
+// RedisPing reports whether the Redis server at addr answers a PING with the
+// given password and database. It opens a client for this one ping and closes
+// it afterwards; ctx bounds the whole attempt, the client's dial retries
+// included.
+func RedisPing(ctx context.Context, addr, password string, database int) error {
 	rds := redis.NewClient(&redis.Options{
 		Addr:     addr,
 		Password: password,
 		DB:       database,
 	})
-	return rds.Ping(context.Background()).Err()
+	// The client did nothing but ping; a failed close has nothing to report.
+	defer func() { _ = rds.Close() }()
+	return rds.Ping(ctx).Err()
 }

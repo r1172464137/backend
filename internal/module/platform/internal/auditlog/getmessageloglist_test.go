@@ -8,9 +8,9 @@ import (
 )
 
 func TestGetMessageLogListRejectsNonMessageTypes(t *testing.T) {
-	logic := newGetMessageLogListLogic(context.Background(), Deps{})
+	svc := NewService(Deps{})
 	for _, typ := range []uint8{0, 20, 30, 33, 42} {
-		if _, err := logic.GetMessageLogList(&dto.GetMessageLogListRequest{Page: 1, Size: 10, Type: typ}); err == nil {
+		if _, err := svc.GetMessageLogList(context.Background(), &dto.GetMessageLogListRequest{Page: 1, Size: 10, Type: typ}); err == nil {
 			t.Fatalf("type %d was accepted", typ)
 		}
 	}

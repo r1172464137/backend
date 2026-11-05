@@ -37,8 +37,6 @@ func registerPublicOrderV2Routes(router *server.Hertz, deps Dependencies) {
 	streamGroup.Use(deps.optionalAuthMiddleware())
 	streamGroup.GET("/:orderNo/events", publicOrder.V2OrderEventsHandler(publicOrder.EventStreamDeps{
 		Billing: deps.Billing,
-		Redis:   deps.Redis,
-		Store:   deps.Store,
 	}))
 }
 

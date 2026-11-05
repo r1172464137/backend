@@ -1,3 +1,7 @@
+// Package ratelimit grants a limited number of permits per key and period.
+// The count lives in Redis, so every server instance draws on the same quota.
+// It throttles sending verification codes, registrations per client IP and
+// ticket creation.
 package ratelimit
 
 import (
@@ -65,13 +69,9 @@ func NewPeriodLimit(period, quota int, limitStore *redis.Client, keyPrefix strin
 	return limiter
 }
 
-// Take requests a permit, it returns the permit state.
-func (h *PeriodLimit) Take(key string) (int, error) {
-	return h.TakeCtx(context.Background(), key)
-}
-
-// TakeCtx requests a permit with context, it returns the permit state.
-func (h *PeriodLimit) TakeCtx(ctx context.Context, key string) (int, error) {
+// Take requests a permit for key and returns the permit state; ctx bounds the
+// Redis call.
+func (h *PeriodLimit) Take(ctx context.Context, key string) (int, error) {
 	resp, err := periodScript.Run(ctx, h.limitStore, []string{h.keyPrefix + key}, []string{
 		strconv.Itoa(h.quota),
 		strconv.Itoa(h.calcExpireSeconds()),

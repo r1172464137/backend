@@ -6,29 +6,19 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type UpdateTosConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-func newUpdateTosConfigLogic(ctx context.Context, deps Deps) *UpdateTosConfigLogic {
-	return &UpdateTosConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
+// UpdateTosConfig stores the terms of service. No running subsystem reads
+// them, so nothing is reloaded.
+func (s *Service) UpdateTosConfig(ctx context.Context, req *dto.TosConfig) error {
+	change := settingsChange{
+		category: "tos",
+		next:     convertedConfigFields(*req),
+		previous: previousFields(ctx, "tos", s.GetTosConfig, convertedConfigFields),
 	}
-}
-
-func (l *UpdateTosConfigLogic) UpdateTosConfig(req *dto.TosConfig) error {
-	err := updateConfigFields(l.ctx, l.deps, "tos", convertedConfigFields(*req))
-	if err != nil {
-		l.Errorw("[UpdateTosConfigLogic] update tos config error: ", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update tos config error: %v", err)
+	if err := updateConfigFields(ctx, s.deps, change); err != nil {
+		logger.WithContext(ctx).Errorw("[UpdateTosConfig] update tos config error", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update tos config error: %v", err)
 	}
-
 	return nil
 }

@@ -2,11 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
-	"encoding/json"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/route/param"
@@ -18,6 +18,7 @@ import (
 	"github.com/perfect-panel/server/internal/module/platform"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
+	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/protobuf/proto"
 	"gorm.io/driver/sqlite"
@@ -64,16 +65,17 @@ func TestV2SnapshotLifecycleAndDesired(t *testing.T) {
 	if err = db.Exec(`INSERT INTO user (id,enable) VALUES (42,1)`).Error; err != nil {
 		t.Fatal(err)
 	}
-	expiry := time.Now().Add(time.Hour).UTC()
+	// SQLite compares the stored wall clock; write it in the query's application zone.
+	expiry := timeutil.Now().Add(time.Hour)
 	if err = db.Exec(`INSERT INTO user_subscribe (id,user_id,subscribe_id,uuid,status,expire_time,traffic,download,upload) VALUES (1,42,?,?,1,?,0,0,0)`, plan.Id, "00000000-0000-4000-8000-000000000001", expiry).Error; err != nil {
 		t.Fatal(err)
 	}
 	mini := miniredis.RunT(t)
 	redisClient := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	defer redisClient.Close()
+	closeRoutingTestResource(t, redisClient)
 	store := NewStore(db, redisClient)
 	p := platform.New(platform.Deps{System: store.System(), Store: store})
-	svc := network.New(network.Deps{Store: store, Redis: redisClient, ReadGlobalNodeConfig: p.ReadNodeConfigSnapshot})
+	svc := network.New(network.Deps{Store: store, Redis: redisClient, Subscription: newSubscriptionModule(store, &Application{Store: store, Redis: redisClient}), ReadGlobalNodeConfig: p.ReadNodeConfigSnapshot})
 	ctx := context.Background()
 	get := func() *dto.QueryServerConfigResponse {
 		t.Helper()
@@ -88,6 +90,18 @@ func TestV2SnapshotLifecycleAndDesired(t *testing.T) {
 		t.Fatalf("snapshot %+v", first.IdentitySnapshot)
 	}
 	id := first.IdentitySnapshot.SnapshotID
+	fetch, etags := checkSnapshotWire(t, ctx, svc, server, id)
+	if v := get().IdentitySnapshot.SnapshotID; v != id {
+		t.Fatal("unchanged snapshot changed")
+	}
+	checkFilteredDesired(t, ctx, svc, server, id)
+	checkLifecycleEntitlements(t, ctx, db, svc, server, plan, expiry, id, get, fetch, etags)
+}
+
+type fetchSnapshot func(string, string, string) *app.RequestContext
+
+func checkSnapshotWire(t *testing.T, ctx context.Context, svc network.Service, server node.Server, id string) (fetchSnapshot, map[string]string) {
+	t.Helper()
 	handler := nodehttp.QueryServerProtocolConfigHandler(svc, func() string { return "test-secret" })
 	fetch := func(accept, capability, etag string) *app.RequestContext {
 		c := app.NewContext(0)
@@ -132,9 +146,11 @@ func TestV2SnapshotLifecycleAndDesired(t *testing.T) {
 			t.Fatalf("%s old node HTTP %d", accept, got)
 		}
 	}
-	if v := get().IdentitySnapshot.SnapshotID; v != id {
-		t.Fatal("unchanged snapshot changed")
-	}
+	return fetch, etags
+}
+
+func checkFilteredDesired(t *testing.T, ctx context.Context, svc network.Service, server node.Server, id string) {
+	t.Helper()
 	filtered, err := svc.QueryServerProtocolConfig(ctx, &dto.QueryServerConfigRequest{ServerID: server.Id, RoutingVersion: 2, Protocols: []string{"vless"}})
 	if err != nil || filtered.IdentitySnapshot.SnapshotID == id {
 		t.Fatalf("filter identity %v %v", filtered, err)
@@ -167,7 +183,11 @@ func TestV2SnapshotLifecycleAndDesired(t *testing.T) {
 	if err = svc.ServerPushStatus(ctx, status); err != nil {
 		t.Fatal(err)
 	}
-	if err = db.Exec(`UPDATE user_subscribe SET expire_time=? WHERE id=1`, expiry.Add(time.Hour)).Error; err != nil {
+}
+
+func checkLifecycleEntitlements(t *testing.T, ctx context.Context, db *gorm.DB, svc network.Service, server node.Server, plan subscribe.Subscribe, expiry time.Time, id string, get func() *dto.QueryServerConfigResponse, fetch fetchSnapshot, etags map[string]string) {
+	t.Helper()
+	if err := db.Exec(`UPDATE user_subscribe SET expire_time=? WHERE id=1`, expiry.Add(time.Hour)).Error; err != nil {
 		t.Fatal(err)
 	}
 	renewed := get().IdentitySnapshot.SnapshotID
@@ -179,7 +199,7 @@ func TestV2SnapshotLifecycleAndDesired(t *testing.T) {
 			t.Fatalf("%s stale ETag returned %d after renewal", accept, got)
 		}
 	}
-	admin, err = svc.GetServerNodeConfig(ctx, &dto.GetServerNodeConfigRequest{ServerID: server.Id})
+	admin, err := svc.GetServerNodeConfig(ctx, &dto.GetServerNodeConfigRequest{ServerID: server.Id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +231,7 @@ func TestV2SnapshotLifecycleAndDesired(t *testing.T) {
 	if err = db.Exec(`UPDATE user SET enable=1 WHERE id=42`).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err = db.Exec(`UPDATE user_subscribe SET expire_time=? WHERE id=1`, time.Now().Add(-time.Minute).UTC()).Error; err != nil {
+	if err = db.Exec(`UPDATE user_subscribe SET expire_time=? WHERE id=1`, timeutil.Now().Add(-time.Minute)).Error; err != nil {
 		t.Fatal(err)
 	}
 	expired := get()

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
+	"github.com/perfect-panel/server/internal/module/platform/entity/log"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/xerr"
@@ -23,6 +24,11 @@ type serializedPlatformView struct {
 }
 
 func (v serializedPlatformView) System() repository.SystemRepo { return v.system }
+
+type fakeAudit struct{ repository.LogRepo }
+
+func (fakeAudit) Insert(context.Context, *log.SystemLog) error { return nil }
+func (v serializedPlatformView) Log() repository.LogRepo       { return fakeAudit{} }
 func (s *serializedPlatformConfigStore) InPlatformTx(_ context.Context, fn func(repository.PlatformStore) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -72,7 +78,7 @@ func testPlatformStore() *serializedPlatformConfigStore {
 }
 func TestConcurrentGlobalOrderedRevision(t *testing.T) {
 	store := testPlatformStore()
-	deps := Deps{Store: store}
+	deps := Deps{Store: NewSettingsTransactor(store)}
 	bind := func(def string) *dto.NodeConfig {
 		var req dto.NodeConfig
 		body := `{"routing_revision":2,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"` + def + `"}}`
@@ -89,7 +95,7 @@ func TestConcurrentGlobalOrderedRevision(t *testing.T) {
 		go func(req *dto.NodeConfig) {
 			defer wg.Done()
 			<-start
-			errs <- newUpdateNodeConfigLogic(context.Background(), deps).UpdateNodeConfig(req)
+			errs <- NewService(deps).UpdateNodeConfig(context.Background(), req)
 		}(req)
 	}
 	close(start)

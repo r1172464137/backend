@@ -1,15 +1,18 @@
-// Service assembly for the authentication subdomain. The per-flow logic
-// keeps its explicit Dependencies structs from the earlier DI refactor; this
-// file builds them per request from the module's injected collaborators and
-// a runtime configuration snapshot.
-package auth
+// Package authn implements the authentication subdomain of the identity
+// module: account existence checks, password, code and device sign-in,
+// registration, password resets and, through its oauth subpackage, OAuth
+// sign-in. Every flow reads the client address and user agent from the
+// request metadata.
+package authn
 
 import (
 	"context"
 
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
+	"github.com/perfect-panel/server/internal/module/identity/internal/account"
 	"github.com/perfect-panel/server/internal/module/identity/internal/authn/oauth"
 	"github.com/perfect-panel/server/internal/module/identity/internal/authn/registerpolicy"
+	"github.com/perfect-panel/server/internal/module/identity/internal/oauthflow"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/redis/go-redis/v9"
 )
@@ -30,13 +33,13 @@ type Snapshot struct {
 
 	InviteForced      bool
 	OnlyFirstPurchase bool
-	TrialEnabled      bool
-	TrialSubscribeID  int64
-	TrialTime         int64
-	TrialTimeUnit     string
 
-	StopRegister            bool
+	StopRegister bool
+	// RegisterVerify, LoginVerify and ResetPasswordVerify switch the
+	// Turnstile challenge on for registration, sign-in and password reset.
 	RegisterVerify          bool
+	LoginVerify             bool
+	ResetPasswordVerify     bool
 	TurnstileSecret         string
 	EnableIpRegisterLimit   bool
 	IpRegisterLimit         int64
@@ -47,6 +50,26 @@ type Snapshot struct {
 	SiteHost string
 }
 
+func (s Snapshot) sessions() account.SessionConfig {
+	return account.SessionConfig{Secret: s.JWTAccessSecret, Lifetime: s.JWTAccessExpire}
+}
+
+func (s Snapshot) policy() registerpolicy.Snapshot {
+	return registerpolicy.Snapshot{
+		EmailEnabled:            s.EmailEnabled,
+		MobileEnabled:           s.MobileEnabled,
+		DeviceEnabled:           s.DeviceEnabled,
+		StopRegister:            s.StopRegister,
+		RegisterVerify:          s.RegisterVerify,
+		LoginVerify:             s.LoginVerify,
+		ResetPasswordVerify:     s.ResetPasswordVerify,
+		TurnstileSecret:         s.TurnstileSecret,
+		EnableIpRegisterLimit:   s.EnableIpRegisterLimit,
+		IpRegisterLimit:         s.IpRegisterLimit,
+		IpRegisterLimitDuration: s.IpRegisterLimitDuration,
+	}
+}
+
 // Deps declares the subdomain's dependencies; the identity facade forwards
 // them from the composition root.
 type Deps struct {
@@ -54,210 +77,79 @@ type Deps struct {
 	Redis *redis.Client
 	// Config snapshots the runtime-mutable settings per request.
 	Config func() Snapshot
+	// OAuth runs the OAuth provider round trips; built from Store and Redis
+	// when nil.
+	OAuth *oauthflow.Flow
+	// VerifyTurnstile overrides the Cloudflare Turnstile client; nil selects
+	// it.
+	VerifyTurnstile registerpolicy.TurnstileVerifier
+	// NotifyPasswordChanged tells the account, best effort, that its
+	// password was reset and which third-party sign-in methods stay bound;
+	// optional.
+	NotifyPasswordChanged func(ctx context.Context, userID int64, bindings []string) error
 }
 
 // Service is the authentication subdomain entry point used by the identity
 // facade.
 type Service struct {
 	deps   Deps
-	policy registerpolicy.ServicePolicy
+	policy registerpolicy.Policy
+	oauth  *oauth.Service
 }
 
+// NewService builds the subdomain with its account policy and, unless Deps
+// carries one, its OAuth round trip.
 func NewService(deps Deps) *Service {
+	policy := registerpolicy.New(registerpolicy.Deps{
+		Auths:           deps.Store.Auth(),
+		Redis:           deps.Redis,
+		Config:          func() registerpolicy.Snapshot { return deps.Config().policy() },
+		VerifyTurnstile: deps.VerifyTurnstile,
+	})
+	if deps.OAuth == nil {
+		deps.OAuth = oauthflow.New(oauthflow.Deps{
+			Auths:    deps.Store.Auth(),
+			Redis:    deps.Redis,
+			SiteHost: func() string { return deps.Config().SiteHost },
+		})
+	}
 	return &Service{
-		deps: deps,
-		policy: registerpolicy.New(registerpolicy.Deps{
-			Auths: deps.Store.Auth(),
-			Redis: deps.Redis,
-			Config: func() registerpolicy.Snapshot {
+		deps:   deps,
+		policy: policy,
+		oauth: oauth.NewService(oauth.Deps{
+			Store:  deps.Store,
+			Redis:  deps.Redis,
+			Policy: policy,
+			Flow:   deps.OAuth,
+			Config: func() oauth.Config {
 				cfg := deps.Config()
-				return registerpolicy.Snapshot{
-					EmailEnabled:            cfg.EmailEnabled,
-					MobileEnabled:           cfg.MobileEnabled,
-					DeviceEnabled:           cfg.DeviceEnabled,
-					StopRegister:            cfg.StopRegister,
-					RegisterVerify:          cfg.RegisterVerify,
-					TurnstileSecret:         cfg.TurnstileSecret,
-					EnableIpRegisterLimit:   cfg.EnableIpRegisterLimit,
-					IpRegisterLimit:         cfg.IpRegisterLimit,
-					IpRegisterLimitDuration: cfg.IpRegisterLimitDuration,
+				return oauth.Config{
+					InviteForced:            cfg.InviteForced,
+					OnlyFirstPurchase:       cfg.OnlyFirstPurchase,
+					EmailDomainSuffixList:   cfg.EmailDomainSuffixList,
+					EmailEnableDomainSuffix: cfg.EmailEnableDomainSuffix,
+					Sessions:                cfg.sessions(),
+					SiteHost:                cfg.SiteHost,
 				}
 			},
 		}),
 	}
 }
 
-// Policy exposes the register policy to sibling subdomains (the profile
-// flows gate method rebinding on the same switches).
-func (s *Service) Policy() registerpolicy.ServicePolicy { return s.policy }
+// Policy exposes the account policy to sibling subdomains (the profile and
+// verification-code flows gate on the same switches).
+func (s *Service) Policy() registerpolicy.Policy { return s.policy }
 
-func (s *Service) binder(ctx context.Context) *BindDeviceLogic {
-	return NewBindDeviceLogic(ctx, BindDeviceDependencies{Store: s.deps.Store})
+func (s *Service) OAuthLogin(ctx context.Context, req *dto.OAuthLoginRequest) (*dto.OAuthLoginResponse, error) {
+	return s.oauth.OAuthLogin(ctx, req)
 }
 
-func (s *Service) CheckUser(ctx context.Context, req *dto.CheckUserRequest) (*dto.CheckUserResponse, error) {
-	return NewCheckUserLogic(ctx, CheckUserDependencies{Store: s.deps.Store}).CheckUser(req)
-}
-
-func (s *Service) CheckUserTelephone(ctx context.Context, req *dto.TelephoneCheckUserRequest) (*dto.TelephoneCheckUserResponse, error) {
-	return NewCheckUserTelephoneLogic(ctx, CheckUserDependencies{Store: s.deps.Store}).CheckUserTelephone(req)
-}
-
-func (s *Service) UserLogin(ctx context.Context, req *dto.UserLoginRequest) (*dto.LoginResponse, error) {
-	cfg := s.deps.Config()
-	return NewUserLoginLogic(ctx, UserLoginDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Config: UserLoginConfig{
-			JWTAccessSecret: cfg.JWTAccessSecret,
-			JWTAccessExpire: cfg.JWTAccessExpire,
-		},
-		Policy:       s.policy,
-		DeviceBinder: s.binder(ctx),
-	}).UserLogin(req)
-}
-
-func (s *Service) UserRegister(ctx context.Context, req *dto.UserRegisterRequest) (*dto.LoginResponse, error) {
-	cfg := s.deps.Config()
-	return NewUserRegisterLogic(ctx, UserRegisterDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Config: UserRegisterConfig{
-			EmailDomainSuffixList:   cfg.EmailDomainSuffixList,
-			EmailEnableDomainSuffix: cfg.EmailEnableDomainSuffix,
-			EmailVerifyEnabled:      cfg.EmailVerifyEnabled,
-			InviteForced:            cfg.InviteForced,
-			OnlyFirstPurchase:       cfg.OnlyFirstPurchase,
-			TrialEnabled:            cfg.TrialEnabled,
-			TrialSubscribeID:        cfg.TrialSubscribeID,
-			TrialTime:               cfg.TrialTime,
-			TrialTimeUnit:           cfg.TrialTimeUnit,
-			JWTAccessSecret:         cfg.JWTAccessSecret,
-			JWTAccessExpire:         cfg.JWTAccessExpire,
-		},
-		Policy:       s.policy,
-		DeviceBinder: s.binder(ctx),
-	}).UserRegister(req)
-}
-
-func (s *Service) TelephoneLogin(ctx context.Context, req *dto.TelephoneLoginRequest, ip, userAgent string) (*dto.LoginResponse, error) {
-	cfg := s.deps.Config()
-	return NewTelephoneLoginLogic(ctx, TelephoneLoginDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Config: TelephoneLoginConfig{
-			JWTAccessSecret: cfg.JWTAccessSecret,
-			JWTAccessExpire: cfg.JWTAccessExpire,
-		},
-		Policy:       s.policy,
-		DeviceBinder: s.binder(ctx),
-	}).TelephoneLogin(req, ip, userAgent)
-}
-
-func (s *Service) TelephoneUserRegister(ctx context.Context, req *dto.TelephoneRegisterRequest) (*dto.LoginResponse, error) {
-	cfg := s.deps.Config()
-	return NewTelephoneUserRegisterLogic(ctx, TelephoneUserRegisterDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Config: TelephoneUserRegisterConfig{
-			InviteForced:      cfg.InviteForced,
-			OnlyFirstPurchase: cfg.OnlyFirstPurchase,
-			TrialEnabled:      cfg.TrialEnabled,
-			TrialSubscribeID:  cfg.TrialSubscribeID,
-			TrialTime:         cfg.TrialTime,
-			TrialTimeUnit:     cfg.TrialTimeUnit,
-			JWTAccessSecret:   cfg.JWTAccessSecret,
-			JWTAccessExpire:   cfg.JWTAccessExpire,
-		},
-		Policy:       s.policy,
-		DeviceBinder: s.binder(ctx),
-	}).TelephoneUserRegister(req)
-}
-
-func (s *Service) ResetPassword(ctx context.Context, req *dto.ResetPasswordRequest) (*dto.LoginResponse, error) {
-	cfg := s.deps.Config()
-	return NewResetPasswordLogic(ctx, ResetPasswordDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Config: ResetPasswordConfig{
-			JWTAccessSecret: cfg.JWTAccessSecret,
-			JWTAccessExpire: cfg.JWTAccessExpire,
-		},
-		Policy:       s.policy,
-		DeviceBinder: s.binder(ctx),
-	}).ResetPassword(req)
-}
-
-func (s *Service) TelephoneResetPassword(ctx context.Context, req *dto.TelephoneResetPasswordRequest) (*dto.LoginResponse, error) {
-	cfg := s.deps.Config()
-	return NewTelephoneResetPasswordLogic(ctx, TelephoneResetPasswordDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Config: TelephoneResetPasswordConfig{
-			JWTAccessSecret: cfg.JWTAccessSecret,
-			JWTAccessExpire: cfg.JWTAccessExpire,
-		},
-		Policy:       s.policy,
-		DeviceBinder: s.binder(ctx),
-	}).TelephoneResetPassword(req)
-}
-
-func (s *Service) DeviceLogin(ctx context.Context, req *dto.DeviceLoginRequest) (*dto.LoginResponse, error) {
-	cfg := s.deps.Config()
-	return NewDeviceLoginLogic(ctx, DeviceLoginDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Config: DeviceLoginConfig{
-			Enabled:           cfg.DeviceEnabled,
-			OnlyRealDevice:    cfg.DeviceOnlyReal,
-			InviteForced:      cfg.InviteForced,
-			OnlyFirstPurchase: cfg.OnlyFirstPurchase,
-			TrialEnabled:      cfg.TrialEnabled,
-			TrialSubscribeID:  cfg.TrialSubscribeID,
-			TrialTime:         cfg.TrialTime,
-			TrialTimeUnit:     cfg.TrialTimeUnit,
-			JWTAccessSecret:   cfg.JWTAccessSecret,
-			JWTAccessExpire:   cfg.JWTAccessExpire,
-		},
-		Policy: s.policy,
-	}).DeviceLogin(req)
-}
-
-func (s *Service) OAuthLogin(ctx context.Context, req *dto.OAthLoginRequest) (*dto.OAuthLoginResponse, error) {
-	return oauth.NewOAuthLoginLogic(ctx, oauth.OAuthLoginURLDependencies{
-		Store:    s.deps.Store,
-		Redis:    s.deps.Redis,
-		Policy:   s.policy,
-		SiteHost: s.deps.Config().SiteHost,
-	}).OAuthLogin(req)
-}
-
-func (s *Service) OAuthLoginGetToken(ctx context.Context, req *dto.OAuthLoginGetTokenRequest, ip, userAgent string) (*dto.LoginResponse, error) {
-	cfg := s.deps.Config()
-	return oauth.NewOAuthLoginGetTokenLogic(ctx, oauth.OAuthLoginDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Config: oauth.OAuthLoginConfig{
-			InviteForced:            cfg.InviteForced,
-			OnlyFirstPurchase:       cfg.OnlyFirstPurchase,
-			EmailDomainSuffixList:   cfg.EmailDomainSuffixList,
-			EmailEnableDomainSuffix: cfg.EmailEnableDomainSuffix,
-			TrialEnabled:            cfg.TrialEnabled,
-			TrialSubscribeID:        cfg.TrialSubscribeID,
-			TrialTime:               cfg.TrialTime,
-			TrialTimeUnit:           cfg.TrialTimeUnit,
-			JWTAccessSecret:         cfg.JWTAccessSecret,
-			JWTAccessExpire:         cfg.JWTAccessExpire,
-		},
-		Policy: s.policy,
-	}).OAuthLoginGetToken(req, ip, userAgent)
+func (s *Service) OAuthLoginGetToken(ctx context.Context, req *dto.OAuthLoginGetTokenRequest) (*dto.LoginResponse, error) {
+	return s.oauth.OAuthLoginGetToken(ctx, req)
 }
 
 func (s *Service) AppleLoginCallback(ctx context.Context, req *dto.AppleLoginCallbackRequest) (*oauth.AppleLoginRedirect, error) {
-	return oauth.NewAppleLoginCallbackLogic(ctx, oauth.AppleLoginCallbackDependencies{
-		Redis:            s.deps.Redis,
-		FallbackRedirect: s.deps.Config().SiteHost,
-	}).AppleLoginCallback(req)
+	return s.oauth.AppleLoginCallback(ctx, req)
 }
 
 // Store is the persistence capability required by this package. It excludes

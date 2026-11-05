@@ -1,12 +1,15 @@
+# GoReleaser only creates the GitHub release and writes its changelog; the
+# release workflow (.github/workflows/release.yml) builds and uploads the
+# binaries (releases-matrix) and images (build-docker) itself, with the ldflags
+# from script/ldflags.sh. The workflow installs the GoReleaser version pinned
+# in the Makefile (GORELEASER_VERSION), which requires this version 2 schema.
+version: 2
 project_name: ppanel
-version: 1
 release:
   prerelease: auto
 builds:
-  - # If true, skip the build.
-    # Useful for library projects.
-    # Default is false
-    skip: true
+  # Builds are skipped: releases-matrix produces the binaries.
+  - skip: true
 
 changelog:
   # Set it to true if you wish to skip the changelog generation.

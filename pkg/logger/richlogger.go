@@ -8,28 +8,12 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
-// WithCallerSkip returns a Logger with given caller skip.
-func WithCallerSkip(skip int) Logger {
-	if skip <= 0 {
-		return new(richLogger)
-	}
-
-	return &richLogger{
-		callerSkip: skip,
-	}
-}
-
-// WithContext sets ctx to log, for keeping tracing information.
+// WithContext returns a Logger whose entries carry ctx's trace and span IDs
+// and the fields ContextWithFields stored in ctx, so the entries of one
+// request or task can be found together.
 func WithContext(ctx context.Context) Logger {
 	return &richLogger{
 		ctx: ctx,
-	}
-}
-
-// WithDuration returns a Logger with given duration.
-func WithDuration(d time.Duration) Logger {
-	return &richLogger{
-		fields: []LogField{Field(durationKey, reprLogDuration(d))},
 	}
 }
 
@@ -52,12 +36,6 @@ func (l *richLogger) Debugf(format string, v ...any) {
 	}
 }
 
-func (l *richLogger) Debugv(v any) {
-	if shallLog(DebugLevel) {
-		l.debug(v)
-	}
-}
-
 func (l *richLogger) Debugw(msg string, fields ...LogField) {
 	if shallLog(DebugLevel) {
 		l.debug(msg, fields...)
@@ -74,12 +52,6 @@ func (l *richLogger) Error(v ...any) {
 func (l *richLogger) Errorf(format string, v ...any) {
 	if shallLog(ErrorLevel) {
 		l.err(fmt.Sprintf(format, v...))
-	}
-}
-
-func (l *richLogger) Errorv(v any) {
-	if shallLog(ErrorLevel) {
-		l.err(v)
 	}
 }
 
@@ -102,34 +74,9 @@ func (l *richLogger) Infof(format string, v ...any) {
 	}
 }
 
-func (l *richLogger) Infov(v any) {
-	if shallLog(InfoLevel) {
-		l.info(v)
-	}
-}
-
 func (l *richLogger) Infow(msg string, fields ...LogField) {
 	if shallLog(InfoLevel) {
 		l.info(msg, fields...)
-	}
-}
-
-func (l *richLogger) Slow(v ...any) {
-	if shallLog(ErrorLevel) {
-		msg, fields := splitLogArgs(v)
-		l.slow(msg, fields...)
-	}
-}
-
-func (l *richLogger) Slowf(format string, v ...any) {
-	if shallLog(ErrorLevel) {
-		l.slow(fmt.Sprintf(format, v...))
-	}
-}
-
-func (l *richLogger) Slowv(v any) {
-	if shallLog(ErrorLevel) {
-		l.slow(v)
 	}
 }
 
@@ -151,14 +98,6 @@ func (l *richLogger) WithCallerSkip(skip int) Logger {
 	}
 }
 
-func (l *richLogger) WithContext(ctx context.Context) Logger {
-	return &richLogger{
-		ctx:        ctx,
-		callerSkip: l.callerSkip,
-		fields:     l.fields,
-	}
-}
-
 func (l *richLogger) WithDuration(duration time.Duration) Logger {
 	fields := append(l.fields, Field(durationKey, reprLogDuration(duration)))
 
@@ -166,20 +105,6 @@ func (l *richLogger) WithDuration(duration time.Duration) Logger {
 		ctx:        l.ctx,
 		callerSkip: l.callerSkip,
 		fields:     fields,
-	}
-}
-
-func (l *richLogger) WithFields(fields ...LogField) Logger {
-	if len(fields) == 0 {
-		return l
-	}
-
-	f := append(l.fields, fields...)
-
-	return &richLogger{
-		ctx:        l.ctx,
-		callerSkip: l.callerSkip,
-		fields:     f,
 	}
 }
 

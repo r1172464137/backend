@@ -13,7 +13,11 @@ import (
 func TestStartupReconcilesLostInvalidationAndOrphanCaches(t *testing.T) {
 	mini := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	defer client.Close()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close redis: %v", err)
+		}
+	})
 	ctx := context.Background()
 	repo := NewNodeRepo(nil, client)
 	key := fmt.Sprintf("%s%d:vless", node.ServerUserListCacheKey, 7)

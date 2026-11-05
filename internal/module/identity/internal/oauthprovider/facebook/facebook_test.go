@@ -1,6 +1,7 @@
 package facebook
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -32,7 +33,7 @@ func TestGetUserInfoParsesGraphResponse(t *testing.T) {
 	userInfoURL = server.URL
 	t.Cleanup(func() { userInfoURL = original })
 
-	info, err := New(&Config{ClientSecret: "secret"}).GetUserInfo("token")
+	info, err := New(&Config{ClientSecret: "secret"}).GetUserInfo(context.Background(), "token")
 	if err != nil {
 		t.Fatalf("GetUserInfo error = %v", err)
 	}
@@ -50,7 +51,7 @@ func TestGetUserInfoRejectsMissingUserID(t *testing.T) {
 	userInfoURL = server.URL
 	t.Cleanup(func() { userInfoURL = original })
 
-	if _, err := New(&Config{ClientSecret: "secret"}).GetUserInfo("token"); err == nil {
+	if _, err := New(&Config{ClientSecret: "secret"}).GetUserInfo(context.Background(), "token"); err == nil {
 		t.Fatal("expected error for response without user id")
 	}
 }

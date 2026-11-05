@@ -1,12 +1,16 @@
+// Package alipay implements the Alipay face-to-face payment protocol: QR code
+// trade creation, trade query and close, and signed notification decoding.
 package alipay
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/perfect-panel/server/internal/module/billing/internal/payment"
-	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/pkg/errors"
 	"github.com/smartwalle/alipay/v3"
 )
 
@@ -21,6 +25,8 @@ type Config struct {
 	// hosts before, and tests point it at a local fake gateway. Ignored in
 	// production, where only the official gateway may receive credentials.
 	Gateway string
+	// HTTPClient sends the gateway requests; nil selects the SDK default.
+	HTTPClient *http.Client
 }
 
 type Notification struct {
@@ -67,46 +73,55 @@ type Client struct {
 	Config
 	client *alipay.Client
 }
+
+// Order is a face-to-face trade to create. Amount is in CNY minor units and
+// is sent to the gateway exactly, as FormatAmount renders it. NotifyURL
+// overrides the client's configured callback. ExpireAt is when the trade
+// stops accepting payment; the zero time falls back to the relative
+// fallbackTimeout counted from the pre-creation.
 type Order struct {
-	OrderNo string
-	Amount  int64
+	OrderNo   string
+	Amount    int64
+	NotifyURL string
+	ExpireAt  time.Time
 }
 
-func NewClient(c Config) *Client {
-	var opts []alipay.OptionFunc
+// fallbackTimeout is the relative payment window of a trade created without
+// an absolute expiry, the local payment window.
+const fallbackTimeout = "15m"
+
+// gatewayZone is the zone Alipay reads absolute times in (UTC+8), whatever
+// the server's zone; it is fixed so a host without tzdata renders it too.
+var gatewayZone = time.FixedZone("CST", 8*60*60)
+
+// FormatTimeExpire renders an absolute trade expiry as the gateway expects
+// it: yyyy-MM-dd HH:mm:ss in UTC+8.
+func FormatTimeExpire(at time.Time) string {
+	return at.In(gatewayZone).Format(time.DateTime)
+}
+
+// NewClient loads the merchant key and the Alipay public key; a key that
+// does not parse makes the method unusable.
+func NewClient(c Config) (*Client, error) {
+	opts := []alipay.OptionFunc{alipay.WithHTTPClient(c.HTTPClient)}
 	if c.Gateway != "" {
 		opts = append(opts, alipay.WithSandboxGateway(c.Gateway))
 	}
 	client, err := alipay.New(c.AppId, c.PrivateKey, !c.Sandbox, opts...)
 	if err != nil {
-		logger.Error("[Alipay] NewClient failed: ", logger.Field("errors", err), logger.Field("appId", c.AppId), logger.Field("sandbox", c.Sandbox))
-		return nil
+		return nil, fmt.Errorf("load Alipay merchant private key: %w", err)
 	}
-	err = client.LoadAliPayPublicKey(c.PublicKey)
-	if err != nil {
-		logger.Error("[Alipay] Load public key failed: ", logger.Field("errors", err), logger.Field("appId", c.AppId), logger.Field("sandbox", c.Sandbox))
-		return nil
+	if err := client.LoadAliPayPublicKey(c.PublicKey); err != nil {
+		return nil, fmt.Errorf("load Alipay public key: %w", err)
 	}
 	return &Client{
 		Config: c,
 		client: client,
-	}
+	}, nil
 }
 
 func (c *Client) PreCreateTrade(ctx context.Context, order Order) (string, error) {
-	amountString := payment.FormatFloat(float64(order.Amount)/float64(100), 2)
-	trade, err := c.client.TradePreCreate(ctx, alipay.TradePreCreate{
-		Trade: alipay.Trade{
-			OutTradeNo:  order.OrderNo,
-			TotalAmount: amountString,
-			Subject:     c.InvoiceName,
-			NotifyURL:   c.NotifyURL,
-			// Keep Alipay's payment window aligned with the local deferred
-			// close task.  Otherwise a QR code could still be paid after the
-			// order was closed and any reserved balance/inventory was restored.
-			TimeoutExpress: "15m",
-		},
-	})
+	trade, err := c.client.TradePreCreate(ctx, c.preCreateRequest(order))
 	if err != nil {
 		return "", err
 	}
@@ -114,6 +129,31 @@ func (c *Client) PreCreateTrade(ctx context.Context, order Order) (string, error
 		return "", errors.New("PreCreateTrade failed: " + trade.Msg)
 	}
 	return trade.QRCode, nil
+}
+
+// preCreateRequest is the alipay.trade.precreate request for order.
+func (c *Client) preCreateRequest(order Order) alipay.TradePreCreate {
+	notifyURL := order.NotifyURL
+	if notifyURL == "" {
+		notifyURL = c.NotifyURL
+	}
+	trade := alipay.Trade{
+		OutTradeNo:  order.OrderNo,
+		TotalAmount: payment.FormatAmount(order.Amount),
+		Subject:     c.InvoiceName,
+		NotifyURL:   notifyURL,
+	}
+	// The trade must stop accepting payment when the local order closes,
+	// or a QR code could be paid after the order was closed and its reserved
+	// gift credit, coupon use and inventory were restored. The absolute
+	// expiry is the order's own deadline; a relative timeout would run from
+	// the pre-creation, letting a checkout late in the window outlive it.
+	if order.ExpireAt.IsZero() {
+		trade.TimeoutExpress = fallbackTimeout
+	} else {
+		trade.TimeExpire = FormatTimeExpire(order.ExpireAt)
+	}
+	return alipay.TradePreCreate{Trade: trade}
 }
 
 func (c *Client) QueryTrade(ctx context.Context, orderNo string) (*Trade, error) {
@@ -148,7 +188,7 @@ func (c *Client) QueryTrade(ctx context.Context, orderNo string) (*Trade, error)
 	if trade.Status.Paid() {
 		amount, err := payment.ParseAmount(rsp.TotalAmount)
 		if err != nil {
-			return nil, errors.Wrap(err, "invalid trade amount")
+			return nil, fmt.Errorf("invalid trade amount: %w", err)
 		}
 		trade.Amount = amount
 	}
@@ -186,14 +226,17 @@ func asTradeNotExist(err error) error {
 	return err
 }
 
-func (c *Client) DecodeNotification(form url.Values) (*Notification, error) {
-	notify, err := c.client.DecodeNotification(form)
+// DecodeNotification verifies and decodes an asynchronous notification;
+// ctx bounds the SDK's fetch of Alipay's certificates when they are not
+// cached yet.
+func (c *Client) DecodeNotification(ctx context.Context, form url.Values) (*Notification, error) {
+	notify, err := c.client.DecodeNotification(ctx, form)
 	if err != nil {
 		return nil, err
 	}
 	amount, err := payment.ParseAmount(notify.TotalAmount)
 	if err != nil {
-		return nil, errors.Wrap(err, "invalid notification amount")
+		return nil, fmt.Errorf("invalid notification amount: %w", err)
 	}
 
 	return &Notification{

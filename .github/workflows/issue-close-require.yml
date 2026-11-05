@@ -3,6 +3,7 @@ name: Issue Close Require
 on:
   schedule:
     - cron: '0 0 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,37 +11,55 @@ permissions:
 jobs:
   issue-close-require:
     permissions:
-      issues: write # for actions-cool/issues-helper to update issues
-      pull-requests: write # for actions-cool/issues-helper to update PRs
+      issues: write # to comment on and close the issues
     runs-on: ubuntu-latest
     steps:
-      - name: need reproduce
-        uses: actions-cool/issues-helper@v3
+      # Closes the open issues that carry one of the labels below and have had
+      # no activity for 3 days, leaving the bilingual notice as a comment.
+      - name: close settled issues
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          actions: 'close-issues'
-          labels: '✅ Fixed'
-          inactive-day: 3
-          body: |
-            Since the issue was labeled with `✅ Fixed`, but no response in 3 days. This issue will be closed. If you have any questions, you can comment and reply.
-
-            由于该 issue 被标记为已修复，同时 3 天未收到回应。现关闭 issue，若有任何问题，可评论回复。
-      - name: need reproduce
-        uses: actions-cool/issues-helper@v3
-        with:
-          actions: 'close-issues'
-          labels: '🤔 Need Reproduce'
-          inactive-day: 3
-          body: |
-            Since the issue was labeled with `🤔 Need Reproduce`, but no response in 3 days. This issue will be closed. If you have any questions, you can comment and reply.
-
-            由于该 issue 被标记为需要更多信息，却 3 天未收到回应。现关闭 issue，若有任何问题，可评论回复。
-      - name: need reproduce
-        uses: actions-cool/issues-helper@v3
-        with:
-          actions: 'close-issues'
-          labels: "🙅🏻‍♀️ WON'T DO"
-          inactive-day: 3
-          body: |
-            Since the issue was labeled with `🙅🏻‍♀️ WON'T DO`, and no response in 3 days. This issue will be closed. If you have any questions, you can comment and reply.
-
-            由于该 issue 被标记为暂不处理，同时 3 天未收到回应。现关闭 issue，若有任何问题，可评论回复。
+          script: |
+            const inactiveDays = 3;
+            const rules = [
+              {
+                label: '✅ Fixed',
+                reason: 'completed',
+                body: "Since the issue was labeled with `✅ Fixed`, but no response in 3 days. This issue will be closed. If you have any questions, you can comment and reply.\n\n由于该 issue 被标记为已修复，同时 3 天未收到回应。现关闭 issue，若有任何问题，可评论回复。",
+              },
+              {
+                label: '🤔 Need Reproduce',
+                reason: 'not_planned',
+                body: "Since the issue was labeled with `🤔 Need Reproduce`, but no response in 3 days. This issue will be closed. If you have any questions, you can comment and reply.\n\n由于该 issue 被标记为需要更多信息，却 3 天未收到回应。现关闭 issue，若有任何问题，可评论回复。",
+              },
+              {
+                label: "🙅🏻‍♀️ WON'T DO",
+                reason: 'not_planned',
+                body: "Since the issue was labeled with `🙅🏻‍♀️ WON'T DO`, and no response in 3 days. This issue will be closed. If you have any questions, you can comment and reply.\n\n由于该 issue 被标记为暂不处理，同时 3 天未收到回应。现关闭 issue，若有任何问题，可评论回复。",
+              },
+            ];
+            const cutoff = Date.now() - inactiveDays * 24 * 60 * 60 * 1000;
+            for (const rule of rules) {
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                ...context.repo,
+                state: 'open',
+                labels: rule.label,
+                per_page: 100,
+              });
+              for (const issue of issues) {
+                if (issue.pull_request) continue;
+                if (Date.parse(issue.updated_at) > cutoff) continue;
+                await github.rest.issues.createComment({
+                  ...context.repo,
+                  issue_number: issue.number,
+                  body: rule.body,
+                });
+                await github.rest.issues.update({
+                  ...context.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                  state_reason: rule.reason,
+                });
+                core.info(`#${issue.number}: closed (${rule.label}, last activity ${issue.updated_at})`);
+              }
+            }

@@ -1,3 +1,10 @@
+// Package config defines the server's configuration: Config, whose boot half
+// is read from the configuration file at start-up and whose runtime half
+// administrators edit in the system settings table; the decoding of stored
+// settings into those structs; the Redis keys several modules share; and the
+// Redis helpers of start-up and installation. The composition root, the
+// transports and the modules all read these definitions, so a setting has one
+// name and one default everywhere.
 package config
 
 import (
@@ -8,49 +15,124 @@ import (
 	"github.com/perfect-panel/server/pkg/trace"
 )
 
+// Config is the server's whole configuration: the boot settings, read from
+// the configuration file once at startup, and the runtime settings, which
+// the system settings table overrides at startup and whenever an
+// administrator changes them. The two halves are embedded, so their fields
+// read as the Config's own; in the file they share one level.
 type Config struct {
-	Model         string              `yaml:"Model" default:"prod"`
-	Host          string              `yaml:"Host" default:"0.0.0.0"`
-	Port          int                 `yaml:"Port" default:"8080"`
-	Debug         bool                `yaml:"Debug" default:"false"`
-	AppLocation   string              `yaml:"AppLocation" default:"Asia/Shanghai"`
-	Transport     TransportConfig     `yaml:"Transport"`
-	TLS           TLS                 `yaml:"TLS"`
-	JwtAuth       JwtAuth             `yaml:"JwtAuth"`
-	Logger        logger.LogConf      `yaml:"Logger"`
-	Trace         trace.Config        `yaml:"Trace"`
-	Database      orm.Config          `yaml:"Database"`
-	MySQL         *orm.Config         `yaml:"MySQL,omitempty"` // Deprecated: use Database.
-	Redis         RedisConfig         `yaml:"Redis"`
-	Site          SiteConfig          `yaml:"Site"`
-	Node          NodeConfig          `yaml:"Node"`
-	Mobile        MobileConfig        `yaml:"Mobile"`
-	Email         EmailConfig         `yaml:"Email"`
-	Device        DeviceConfig        `yaml:"device"`
-	Verify        Verify              `yaml:"Verify"`
-	VerifyCode    VerifyCode          `yaml:"VerifyCode"`
-	Register      RegisterConfig      `yaml:"Register"`
-	Subscribe     SubscribeConfig     `yaml:"Subscribe"`
-	EdgeSubscribe EdgeSubscribeConfig `yaml:"EdgeSubscribe"`
-	Invite        InviteConfig        `yaml:"Invite"`
-	Telegram      Telegram            `yaml:"Telegram"`
-	Log           Log                 `yaml:"Log"`
-	Currency      Currency            `yaml:"Currency"`
-	Administrator AdministratorConfig `yaml:"Administrator"`
+	Boot    `yaml:",inline"`
+	Runtime `yaml:",inline"`
 }
 
-// AdministratorConfig includes an optional one-way staged hash for recovering
-// first installation if the process stops after schema creation.
+// Boot is the configuration fixed for the life of the process: the listener,
+// the connections and the secrets. Changing it takes a restart.
+type Boot struct {
+	Model string `yaml:"Model" default:"prod"`
+	Host  string `yaml:"Host" default:"0.0.0.0"`
+	Port  int    `yaml:"Port" default:"8080"`
+	Debug bool   `yaml:"Debug" default:"false"`
+	// TrustedProxies lists the reverse proxies (IP addresses or CIDRs) whose
+	// X-Forwarded-For and X-Real-IP headers name the real client. Empty means
+	// DefaultTrustedProxies; the entry "private" stands for those networks in a
+	// longer list, and ["none"] trusts no header at all.
+	TrustedProxies []string `yaml:"TrustedProxies"`
+	// AllowedOrigins lists the browser origins CORS admits, as scheme://host[:port].
+	// Empty keeps the permissive default of reflecting the request's Origin.
+	AllowedOrigins []string            `yaml:"AllowedOrigins"`
+	HTTP           HTTPConfig          `yaml:"HTTP"`
+	GeoIP          GeoIPConfig         `yaml:"GeoIP"`
+	AppLocation    string              `yaml:"AppLocation" default:"Asia/Shanghai"`
+	Transport      TransportConfig     `yaml:"Transport"`
+	TLS            TLS                 `yaml:"TLS"`
+	JwtAuth        JwtAuth             `yaml:"JwtAuth"`
+	Logger         logger.LogConf      `yaml:"Logger"`
+	Trace          trace.Config        `yaml:"Trace"`
+	Database       orm.Config          `yaml:"Database"`
+	MySQL          *orm.Config         `yaml:"MySQL,omitempty"` // Deprecated: use Database.
+	Redis          RedisConfig         `yaml:"Redis"`
+	EdgeSubscribe  EdgeSubscribeConfig `yaml:"EdgeSubscribe"`
+	Administrator  AdministratorConfig `yaml:"Administrator"`
+}
+
+// AdministratorConfig names the first administrator, whom the start seeds
+// into a database that holds no account yet. The setup wizard writes the
+// installer's email here, so an installation resumed after a failed
+// migration seeds the same account.
 type AdministratorConfig struct {
-	Email        string `yaml:"Email" default:"admin@ppanel.dev"`
-	Password     string `yaml:"Password" default:"password"`
+	Email string `yaml:"Email" default:"admin@ppanel.dev"`
+	// Password seeds the first administrator. Left empty, a random one is
+	// generated and printed once at the first start. Once the administrator
+	// exists it seeds nothing, only sits in the file in clear, and the start
+	// flags it: remove it from the file then.
+	Password     string `yaml:"Password,omitempty"`
 	PasswordHash string `yaml:"PasswordHash,omitempty"`
+}
+
+// Runtime is the configuration an administrator edits while the server runs.
+// The runtime state publishes it as immutable snapshots; a reload replaces a
+// section from the system settings table.
+type Runtime struct {
+	Site       SiteConfig      `yaml:"Site"`
+	Node       NodeConfig      `yaml:"Node"`
+	Mobile     MobileConfig    `yaml:"Mobile"`
+	Email      EmailConfig     `yaml:"Email"`
+	Device     DeviceConfig    `yaml:"device"`
+	Verify     Verify          `yaml:"Verify"`
+	VerifyCode VerifyCode      `yaml:"VerifyCode"`
+	Register   RegisterConfig  `yaml:"Register"`
+	Subscribe  SubscribeConfig `yaml:"Subscribe"`
+	Invite     InviteConfig    `yaml:"Invite"`
+	Telegram   Telegram        `yaml:"Telegram"`
+	Log        Log             `yaml:"Log"`
+	Currency   Currency        `yaml:"Currency"`
 }
 
 type RedisConfig struct {
 	Host string `yaml:"Host" default:"localhost:6379"`
 	Pass string `yaml:"Pass" default:""`
 	DB   int    `yaml:"DB" default:"0"`
+	// QueueDB is the Redis database of the asynq task queue, shared by the
+	// producer, the consumer and the scheduler. It defaults to the database
+	// the server always used, so an upgrade keeps its queued tasks; give
+	// every deployment sharing one Redis its own value.
+	QueueDB int `yaml:"QueueDB" default:"5"`
+}
+
+// DefaultTrustedProxies are the networks trusted as reverse proxies when
+// TrustedProxies is empty: the loopback interface and the private ranges, so
+// nginx on the same host, a Docker bridge or an internal load balancer is
+// trusted without configuration. Clients reach a proxy panel over the public
+// network, so a peer from these ranges is a proxy, not a client; a server its
+// clients reach directly from a private network sets TrustedProxies to
+// ["none"].
+var DefaultTrustedProxies = []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
+
+// HTTPConfig bounds the API listener. The defaults are the values the server
+// ran with before they were configurable.
+type HTTPConfig struct {
+	ReadTimeoutSeconds int `yaml:"ReadTimeoutSeconds" default:"180"`
+	// WriteTimeoutSeconds 0 leaves response writes unbounded, which the
+	// streaming endpoints (order events over SSE, WebSocket) need.
+	WriteTimeoutSeconds int `yaml:"WriteTimeoutSeconds" default:"0"`
+	IdleTimeoutSeconds  int `yaml:"IdleTimeoutSeconds" default:"180"`
+	MaxRequestBodyMB    int `yaml:"MaxRequestBodyMB" default:"4"`
+}
+
+// GeoIPConfig locates the MaxMind city database that enriches the audit
+// logs with a location.
+type GeoIPConfig struct {
+	// Path of the GeoLite2-City.mmdb file.
+	Path string `yaml:"Path" default:"./cache/GeoLite2-City.mmdb"`
+	// Download fetches the database from DownloadURL (the built-in mirror when
+	// empty) when Path is missing.
+	Download    bool   `yaml:"Download" default:"true"`
+	DownloadURL string `yaml:"DownloadURL" default:""`
+	// SHA256 is the hex digest the file must have; empty skips the check.
+	SHA256 string `yaml:"SHA256" default:""`
+	// Required makes a missing or invalid database fatal at start-up; by
+	// default the server starts without geolocation and logs the reason.
+	Required bool `yaml:"Required" default:"false"`
 }
 
 type TransportConfig struct {
@@ -122,9 +204,10 @@ type EmailConfig struct {
 	ExpirationEmailTemplate    string `yaml:"expiration_email_template"`
 	MaintenanceEmailTemplate   string `yaml:"maintenance_email_template"`
 	TrafficExceedEmailTemplate string `yaml:"traffic_exceed_email_template"`
-	// Subjects pair with the templates above and hydrate from the email auth
-	// config by field name (tool.DeepCopy); empty means the queued fallback
-	// subject is used.
+	// Subjects pair with the templates above. They are copied from the email
+	// auth method config by field name (internal/infra/mapping), so the
+	// fields must keep the names they have there; empty means the queued
+	// fallback subject is used.
 	VerifyEmailSubject        string `yaml:"verify_email_subject"`
 	ExpirationEmailSubject    string `yaml:"expiration_email_subject"`
 	MaintenanceEmailSubject   string `yaml:"maintenance_email_subject"`
@@ -272,18 +355,26 @@ func (n *NodeOutbound) Marshal() ([]byte, error) {
 }
 
 type File struct {
-	Host          string               `yaml:"Host" default:"0.0.0.0"`
-	Port          int                  `yaml:"Port" default:"8080"`
-	Transport     TransportConfig      `yaml:"Transport"`
-	TLS           TLS                  `yaml:"TLS"`
-	Debug         bool                 `yaml:"Debug" default:"true"`
-	JwtAuth       JwtAuth              `yaml:"JwtAuth"`
-	Logger        logger.LogConf       `yaml:"Logger"`
-	Trace         trace.Config         `yaml:"Trace"`
-	Database      orm.Config           `yaml:"Database"`
-	MySQL         *orm.Config          `yaml:"MySQL,omitempty"` // Deprecated: use Database.
-	Redis         RedisConfig          `yaml:"Redis"`
-	EdgeSubscribe EdgeSubscribeConfig  `yaml:"EdgeSubscribe"`
+	Model          string              `yaml:"Model,omitempty"`
+	Host           string              `yaml:"Host" default:"0.0.0.0"`
+	Port           int                 `yaml:"Port" default:"8080"`
+	Transport      TransportConfig     `yaml:"Transport"`
+	TLS            TLS                 `yaml:"TLS"`
+	Debug          bool                `yaml:"Debug" default:"false"`
+	TrustedProxies []string            `yaml:"TrustedProxies"`
+	AllowedOrigins []string            `yaml:"AllowedOrigins"`
+	HTTP           HTTPConfig          `yaml:"HTTP"`
+	GeoIP          GeoIPConfig         `yaml:"GeoIP"`
+	JwtAuth        JwtAuth             `yaml:"JwtAuth"`
+	Logger         logger.LogConf      `yaml:"Logger"`
+	Trace          trace.Config        `yaml:"Trace"`
+	Database       orm.Config          `yaml:"Database"`
+	MySQL          *orm.Config         `yaml:"MySQL,omitempty"` // Deprecated: use Database.
+	Redis          RedisConfig         `yaml:"Redis"`
+	EdgeSubscribe  EdgeSubscribeConfig `yaml:"EdgeSubscribe"`
+	// AppLocation survives the installation's rewrite of the file: the new
+	// database's session zone is set from it.
+	AppLocation   string               `yaml:"AppLocation" default:"Asia/Shanghai"`
 	Administrator *AdministratorConfig `yaml:"Administrator,omitempty"`
 }
 
@@ -367,8 +458,13 @@ type NodeDBConfig struct {
 	DNS                    string
 }
 
+// Currency is the site currency: the ISO code prices are in and the symbol
+// shown next to them. The defaults are the values the settings seed stores
+// (CurrencyUnit USD, CurrencySymbol $), so a runtime configuration not yet
+// loaded from the table agrees with a fresh installation; they used to
+// disagree with each other (a CNY unit with a "USD" symbol).
 type Currency struct {
-	Unit      string `yaml:"Unit" default:"CNY"`
-	Symbol    string `yaml:"Symbol" default:"USD"`
+	Unit      string `yaml:"Unit" default:"USD"`
+	Symbol    string `yaml:"Symbol" default:"$"`
 	AccessKey string `yaml:"AccessKey" default:""`
 }

@@ -2,50 +2,45 @@ package portal
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/json"
-	"fmt"
 
 	"github.com/perfect-panel/server/internal/infra/mapping"
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
-
-// Centralized error handler for database issues
-func wrapDatabaseError(err error) error {
-	return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Database Query Error: %v", err.Error())
-}
 
 // QueryPurchaseOrder returns the guest order's status snapshot and, once the
 // account exists, the exchanged session token.
 func (s *Service) QueryPurchaseOrder(ctx context.Context, req *dto.QueryPurchaseOrderRequest) (*dto.QueryPurchaseOrderResponse, error) {
-	orderInfo, err := s.deps.Orders.FindOneByOrderNo(ctx, req.OrderNo)
+	orderInfo, err := s.findOrder(ctx, req.OrderNo)
 	if err != nil {
-		return nil, wrapDatabaseError(err)
-	}
-	if err := s.authorizePurchaseOrder(ctx, orderInfo, req); err != nil {
 		return nil, err
 	}
-	// Handle temporary orders if applicable
+	byOwner, err := s.authorizePurchaseOrder(ctx, orderInfo, req.CheckoutToken)
+	if err != nil {
+		return nil, err
+	}
 	var token string
-	if orderInfo.Status == 2 || orderInfo.Status == 5 {
+	if order.IsSettled(orderInfo.Status) {
 		if orderInfo.UserId == 0 {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.OrderStatusError), "guest account is not ready")
+			return nil, xerr.Errorf(xerr.OrderStatusError, "guest account is not ready")
 		}
-		if token, err = s.IssueSession(ctx, orderInfo.UserId); err != nil {
+		// The authenticated owner already holds a session; only the guest
+		// capability is an exchange, bound by the shared rule.
+		if byOwner {
+			token, err = s.IssueSession(ctx, orderInfo.UserId)
+		} else {
+			token, err = s.ExchangeGuestSession(ctx, orderInfo)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
-	// Fetch subscription and payment information
 	subscribeInfo, paymentInfo, err := s.fetchOrderDetails(ctx, orderInfo)
 	if err != nil {
 		return nil, err
 	}
-
 	return &dto.QueryPurchaseOrderResponse{
 		OrderNo:        orderInfo.OrderNo,
 		Subscribe:      subscribeInfo,
@@ -65,57 +60,32 @@ func (s *Service) QueryPurchaseOrder(ctx context.Context, req *dto.QueryPurchase
 
 // authorizePurchaseOrder accepts either the authenticated owner of a completed
 // guest order or the unguessable checkout capability issued when that order was
-// created.  An email/identifier is not authentication and must never be used to
-// mint a session token.
-func (s *Service) authorizePurchaseOrder(ctx context.Context, orderInfo *order.Order, req *dto.QueryPurchaseOrderRequest) error {
+// created, and reports which of the two it accepted.  An email/identifier is
+// not authentication and must never be used to mint a session token.
+func (s *Service) authorizePurchaseOrder(ctx context.Context, orderInfo *order.Order, checkoutToken string) (byOwner bool, err error) {
 	if orderInfo.UserId != 0 {
-		if currentUser, ok := ctx.Value(requestctx.CtxKeyUser).(*user.User); ok && currentUser.Id == orderInfo.UserId {
-			return nil
+		if currentUser, ok := user.FromContext(ctx); ok && currentUser.Id == orderInfo.UserId {
+			return true, nil
 		}
 	}
-	if req.CheckoutToken == "" {
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "guest checkout token is required")
-	}
-	if orderInfo.GuestCheckoutTokenHash != "" {
-		if subtle.ConstantTimeCompare([]byte(orderInfo.GuestCheckoutTokenHash), []byte(order.CheckoutTokenHash(req.CheckoutToken))) != 1 {
-			return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "guest checkout token is invalid")
-		}
-		return nil
-	}
-	// Compatibility for orders created before guest details were made durable.
-	cacheKey := fmt.Sprintf(order.TempOrderCacheKey, orderInfo.OrderNo)
-	cacheValue, err := s.deps.GuestCheckoutCache.Get(ctx, cacheKey).Result()
-	if err != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "guest checkout token is invalid")
-	}
-	var tempOrder order.TemporaryOrderInfo
-	if err := json.Unmarshal([]byte(cacheValue), &tempOrder); err != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "guest checkout token is invalid")
-	}
-	if tempOrder.OrderNo != orderInfo.OrderNo || tempOrder.CheckoutToken == "" ||
-		subtle.ConstantTimeCompare([]byte(tempOrder.CheckoutToken), []byte(req.CheckoutToken)) != 1 {
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "guest checkout token is invalid")
-	}
-	return nil
+	return false, s.authorizeGuest(ctx, orderInfo, checkoutToken)
 }
 
-// fetchOrderDetails retrieves subscription and payment details
+// fetchOrderDetails reads the plan and the payment method of the order for
+// its status snapshot.
 func (s *Service) fetchOrderDetails(ctx context.Context, orderInfo *order.Order) (dto.BillingSubscribeSnapshot, dto.PaymentMethod, error) {
 	sub, err := s.deps.Plans.FindOne(ctx, orderInfo.SubscribeId)
 	if err != nil {
-		return dto.BillingSubscribeSnapshot{}, dto.PaymentMethod{}, wrapDatabaseError(err)
+		return dto.BillingSubscribeSnapshot{}, dto.PaymentMethod{}, xerr.Wrapf(err, xerr.DatabaseQueryError, "find subscribe %d", orderInfo.SubscribeId)
 	}
-
 	var subscribeInfo dto.BillingSubscribeSnapshot
-	mapping.DeepCopy(&subscribeInfo, sub)
-
-	payment, err := s.deps.Payments.FindOne(ctx, orderInfo.PaymentId)
-	if err != nil {
-		return dto.BillingSubscribeSnapshot{}, dto.PaymentMethod{}, wrapDatabaseError(err)
+	if err := mapping.Copy(&subscribeInfo, sub); err != nil {
+		return dto.BillingSubscribeSnapshot{}, dto.PaymentMethod{}, xerr.Wrapf(err, xerr.ERROR, "map subscribe %d", orderInfo.SubscribeId)
 	}
 
-	var paymentInfo dto.PaymentMethod
-	mapping.DeepCopy(&paymentInfo, payment)
-
-	return subscribeInfo, paymentInfo, nil
+	method, err := s.deps.Payments.FindOne(ctx, orderInfo.PaymentId)
+	if err != nil {
+		return dto.BillingSubscribeSnapshot{}, dto.PaymentMethod{}, xerr.Wrapf(err, xerr.DatabaseQueryError, "find payment method %d", orderInfo.PaymentId)
+	}
+	return subscribeInfo, paymentMethodDTO(method), nil
 }

@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 )
 
-// TempOrderCacheKey Cache to Redis Key
-// eg: temp_order:order_no
+// TempOrderCacheKey is the Redis key format of the temporary guest order
+// older releases kept until payment: temp_order:<order no>.
 const TempOrderCacheKey = "temp_order:%s"
 
 // CheckoutTokenHash returns the durable representation of the guest checkout

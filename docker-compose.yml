@@ -1,5 +1,13 @@
-version: '3'
-
+# Before the first `docker compose up`, ./etc/ppanel.yaml must exist as a FILE:
+# Docker creates a directory of that name when the path does not exist, and
+# the server then fails to read its configuration. Either pre-fill it
+# (docs/guide/config.md) or leave it empty and set PPANEL_DB and PPANEL_REDIS
+# below, so the server completes it on the first start. The setup wizard
+# listens on 127.0.0.1 inside the container and is not reachable through the
+# published port, so one of the two is required for a container deployment.
+# The container runs as uid 65532, which has to be able to write the file on
+# that first start:
+#   mkdir -p etc && touch etc/ppanel.yaml && chown 65532:65532 etc/ppanel.yaml
 services:
   ppanel:
     container_name: ppanel-server
@@ -10,4 +18,19 @@ services:
       - "8080:8080"
     volumes:
       - ./etc/ppanel.yaml:/app/etc/ppanel.yaml
+    # Non-interactive installation (docs/guide/config.md, "Environment
+    # variables"); both are needed, and they are only read while the file has
+    # no JwtAuth.AccessSecret yet.
+    # environment:
+    #   PPANEL_DB: "ppanel:password@tcp(db:3306)/ppanel"
+    #   PPANEL_REDIS: "redis://:password@redis:6379/0"
+    healthcheck:
+      test: ["CMD", "/app/ppanel", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # Shutdown drains HTTP, then the scheduler, the task worker and the trace
+    # exporter, up to about 18 s; Docker's default 10 s would kill it midway.
+    stop_grace_period: 20s
     restart: always

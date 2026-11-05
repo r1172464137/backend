@@ -1,10 +1,15 @@
 package logger
 
-// A LogConf is a logging config.
+// A LogConf is a logging config. The defaults below are the ones the
+// configuration loader fills in for a missing key (the default tags); a
+// LogConf built in code without them keeps the zero-value behaviour noted
+// where it differs.
 type LogConf struct {
-	// ServiceName represents the service name.
+	// ServiceName represents the service name, default is `PPanel`. In
+	// `volume` mode it names the log directory.
 	ServiceName string `yaml:"ServiceName" default:"PPanel"`
-	// Mode represents the logging mode, default is `console`.
+	// Mode represents the logging mode, default is `file`; an empty mode
+	// logs to the console.
 	// console: log to console.
 	// file: log to file.
 	// volume: used in k8s, prepend the hostname to the log file name.
@@ -13,17 +18,22 @@ type LogConf struct {
 	// json: json encoding.
 	// plain: plain text encoding, typically used in development.
 	Encoding string `yaml:"Encoding" default:"json"`
-	// TimeFormat represents the time format, default is `2006-01-02T15:04:05.000Z07:00`.
+	// TimeFormat represents the time format of log entries, default is
+	// `2006-01-02 15:04:05.000`; an empty format keeps
+	// `2006-01-02T15:04:05.000Z07:00`.
 	TimeFormat string `yaml:"TimeFormat" default:"2006-01-02 15:04:05.000"`
 	// Path represents the log file path, default is `logs`.
 	Path string `yaml:"Path" default:"logs"`
-	// Level represents the log level, default is `info`.
+	// Level represents the log level, default is `info`; an empty level
+	// logs everything, debug included.
 	Level string `yaml:"Level" default:"info"`
-	// MaxContentLength represents the max bytes per textual log value.
+	// MaxContentLength represents the max bytes per textual log value,
+	// default is 16384; zero does not truncate.
 	MaxContentLength uint32 `yaml:"MaxContentLength" default:"16384"`
 	// Compress represents whether to compress the log file, default is `false`.
 	Compress bool `yaml:"Compress" default:"false"`
-	// Stat represents whether to log statistics, default is `true`.
+	// Stat is kept so existing configuration files still load; the server
+	// writes no statistics logs, so it has no effect.
 	Stat bool `yaml:"Stat" default:"true"`
 	// KeepDays represents how many days the log files will be kept. Defaults to 30 days.
 	// Only take effect when Mode is `file` or `volume`, both work when Rotation is `daily` or `size`.

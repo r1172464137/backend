@@ -17,33 +17,21 @@ import (
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
-	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/slicesx"
+	"github.com/perfect-panel/server/pkg/timeutil"
+	"github.com/perfect-panel/server/pkg/xerr"
 	"gorm.io/gorm"
 )
 
+// ErrManifestNotFound reports a token that yields no manifest: an unknown
+// token, or a subscription whose owner is deleted or disabled. The handler
+// answers it like a failed credential.
 var ErrManifestNotFound = errors.New("edge manifest not found")
 
-// ManifestLogic builds an edge contract from the domain model. It intentionally
-// does not invoke adapter.NewAdapter or the legacy subscription logic.
-type ManifestLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-	now  func() time.Time
-}
-
-func newManifestLogic(ctx context.Context, deps Deps) *ManifestLogic {
-	return &ManifestLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-		now:    time.Now,
-	}
-}
-
-func (l *ManifestLogic) Manifest(token string) (*dto.EdgeManifestResponse, error) {
-	userSubscribe, err := l.deps.Store.UserSubscription().FindOneSubscribeByToken(l.ctx, token)
+// Manifest builds the edge contract of the subscription behind token from
+// the domain model. It intentionally does not reuse the client subscription
+// rendering.
+func (s *Service) Manifest(ctx context.Context, token string) (*dto.EdgeManifestResponse, error) {
+	userSubscribe, err := s.deps.Subscriptions.SubscriptionByToken(ctx, token)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrManifestNotFound
@@ -53,7 +41,7 @@ func (l *ManifestLogic) Manifest(token string) (*dto.EdgeManifestResponse, error
 	if userSubscribe == nil {
 		return nil, ErrManifestNotFound
 	}
-	account, err := l.deps.Store.User().FindAccountState(l.ctx, userSubscribe.UserId)
+	account, err := s.deps.Accounts.FindAccountState(ctx, userSubscribe.UserId)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrManifestNotFound
@@ -63,22 +51,22 @@ func (l *ManifestLogic) Manifest(token string) (*dto.EdgeManifestResponse, error
 	if account == nil || account.DeletedAt.Valid || account.Enable == nil || !*account.Enable {
 		return nil, ErrManifestNotFound
 	}
-	plan, err := l.deps.Store.Subscribe().FindOne(l.ctx, userSubscribe.SubscribeId)
+	plan, err := s.deps.Plans.PlanByID(ctx, userSubscribe.SubscribeId)
 	if err != nil {
 		return nil, err
 	}
 
-	now := l.now().UTC()
+	now := timeutil.Now().UTC()
 	state := subscriptionState(userSubscribe, now)
 	manifest := &dto.EdgeManifestResponse{
 		SchemaVersion: "1.0",
 		GeneratedAt:   now.Format(time.RFC3339),
-		Subscription:  subscriptionDTO(plan, userSubscribe, state, l.deps.Config().Subscribe),
+		Subscription:  subscriptionDTO(plan, userSubscribe, state, s.deps.Config().Subscribe),
 		Proxies:       make([]dto.EdgeManifestProxy, 0),
 		Notices:       make([]string, 0),
 	}
 	if state == "active" {
-		proxies, notices, err := l.proxies(userSubscribe, plan)
+		proxies, notices, err := s.proxies(ctx, userSubscribe, plan)
 		if err != nil {
 			return nil, err
 		}
@@ -91,14 +79,19 @@ func (l *ManifestLogic) Manifest(token string) (*dto.EdgeManifestResponse, error
 	return manifest, nil
 }
 
-func (l *ManifestLogic) proxies(userSubscribe *usersub.Subscribe, plan *subscribe.Subscribe) ([]dto.EdgeManifestProxy, []string, error) {
-	nodeIDs := slicesx.StringToInt64Slice(plan.Nodes)
-	tags := cleanTags(strings.Split(plan.NodeTags, ","))
+// proxies lists the plan's enabled nodes the Worker supports as proxies for
+// the subscription, in sort order, with a notice for each node it cannot
+// offer.
+func (s *Service) proxies(ctx context.Context, userSubscribe *usersub.Subscribe, plan *subscribe.Subscribe) ([]dto.EdgeManifestProxy, []string, error) {
+	nodeIDs, tags, err := plan.NodeScope()
+	if err != nil {
+		return nil, nil, xerr.Wrapf(err, xerr.ERROR, "plan nodes: %v", err)
+	}
 	if len(nodeIDs) == 0 && len(tags) == 0 {
 		return []dto.EdgeManifestProxy{}, nil, nil
 	}
 	enabled := true
-	nodes, err := l.deps.Store.Node().ListNodesByScope(l.ctx, nodeIDs, tags, &enabled, true)
+	nodes, err := s.deps.Nodes.ListNodesByScope(ctx, nodeIDs, tags, &enabled, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -133,7 +126,7 @@ func subscriptionDTO(plan *subscribe.Subscribe, userSubscribe *usersub.Subscribe
 		Download:     userSubscribe.Download,
 		WebPageURL:   strings.TrimSpace(cfg.ProfileWebPageURL),
 	}
-	if userSubscribe.ExpireTime.Unix() > 0 {
+	if !usersub.NoExpiry(userSubscribe.ExpireTime) {
 		result.ExpiresAt = userSubscribe.ExpireTime.UTC().Format(time.RFC3339)
 	}
 	if cfg.ProfileUpdateInterval > 0 {
@@ -142,29 +135,27 @@ func subscriptionDTO(plan *subscribe.Subscribe, userSubscribe *usersub.Subscribe
 	return result
 }
 
+// subscriptionState is the manifest state of the subscription at now. Only
+// "active" lists proxies, by the rule the node user list and delivery apply
+// (usersub.AvailabilityAt), so the Worker never offers a node that refuses
+// the user.
 func subscriptionState(item *usersub.Subscribe, now time.Time) string {
 	if item == nil {
 		return "disabled"
 	}
-	switch item.Status {
-	case 0, 4:
-		return "disabled"
-	case 2, 3:
-		return "expired"
-	case 5:
+	switch item.AvailabilityAt(now) {
+	case usersub.Available:
+		return "active"
+	case usersub.Stopped:
 		return "suspended"
-	case 1:
-		// Continue with expiration and traffic checks below.
+	case usersub.Expired:
+		return "expired"
+	case usersub.TrafficExhausted:
+		return "traffic_exhausted"
 	default:
+		// Refunded, or a status no rule serves.
 		return "disabled"
 	}
-	if item.ExpireTime.Unix() > 0 && !item.ExpireTime.After(now) {
-		return "expired"
-	}
-	if item.Traffic > 0 && item.Upload+item.Download >= item.Traffic {
-		return "traffic_exhausted"
-	}
-	return "active"
 }
 
 func stateNotice(state string) string {
@@ -180,6 +171,9 @@ func stateNotice(state string) string {
 	}
 }
 
+// proxyFromNode is the proxy of a node for the subscription credential
+// userSecret, through the server protocol the node names; without one it
+// reports why the node is not offered.
 func proxyFromNode(item *node.Node, userSecret string) (dto.EdgeManifestProxy, bool, string) {
 	if item == nil || item.Server == nil {
 		return dto.EdgeManifestProxy{}, false, "node server is missing"
@@ -281,6 +275,8 @@ func cleanTags(values []string) []string {
 	return result
 }
 
+// uniqueProxyName names a proxy after its node, suffixing the node id to a
+// name an earlier proxy already took.
 func uniqueProxyName(name string, nodeID int64, used map[string]int) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -293,6 +289,9 @@ func uniqueProxyName(name string, nodeID int64, used map[string]int) string {
 	return name + " #" + strconv.FormatInt(nodeID, 10)
 }
 
+// revision is a digest of what the manifest shows and of the records behind
+// it, leaving out the credentials, so that equal revisions mean an unchanged
+// manifest.
 func revision(account *user.AccountState, userSubscribe *usersub.Subscribe, plan *subscribe.Subscribe, subscription dto.EdgeManifestSubscription, proxies []dto.EdgeManifestProxy, notices []string) string {
 	type proxySource struct {
 		Name      string                     `json:"name"`

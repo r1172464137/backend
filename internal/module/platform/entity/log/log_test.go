@@ -40,7 +40,7 @@ func TestSecurityLogMarshalKeepsRiskMetadataAndRedactsSecrets(t *testing.T) {
 				return (&Message{
 					To:       "person@example.com",
 					Subject:  "Hello person@example.com",
-					Content:  map[string]interface{}{"code": "123456", "body": "private body"},
+					Content:  map[string]any{"code": "123456", "body": "private body"},
 					Template: "private template",
 					Status:   1,
 				}).Marshal()

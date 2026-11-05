@@ -1,7 +1,6 @@
 package delivery
 
 import (
-	"context"
 	"testing"
 )
 
@@ -19,10 +18,8 @@ func TestSubscribeURLPreservesRequestURI(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logic := newSubscribeLogic(context.Background(), Deps{
-				ConfigSnapshot: func() Config { return Config{SubscribeDomain: tt.domain} },
-			}, RequestMeta{Host: "request.example.test", RequestURI: tt.uri})
-			if got := logic.getSubscribeV2URL(); got != tt.want {
+			cfg := Deps{ConfigSnapshot: func() Config { return Config{SubscribeDomain: tt.domain} }}.config()
+			if got := getSubscribeV2URL(cfg, RequestMeta{Host: "request.example.test", RequestURI: tt.uri}); got != tt.want {
 				t.Fatalf("getSubscribeV2URL = %q, want %q", got, tt.want)
 			}
 		})

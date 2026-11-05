@@ -1,24 +1,35 @@
+// Package mysql2postgres copies the data of a MySQL or MariaDB installation
+// into a PostgreSQL database whose schema the migrations created: the rows of
+// the tables and columns both databases have, in foreign-key order, for the
+// migrate mysql2postgres command.
 package mysql2postgres
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	mysqlDriver "github.com/go-sql-driver/mysql"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/perfect-panel/server/pkg/orm"
 )
 
 const schemaMigrationsTable = "schema_migrations"
 
+// Config is a migration run, as the command's flags set it.
 type Config struct {
 	MySQLDSN    string
 	PostgresDSN string
@@ -29,6 +40,12 @@ type Config struct {
 	Yes         bool
 	DryRun      bool
 	BatchSize   int
+	// Location is the IANA zone the MySQL DATETIME values are in: the
+	// panel's AppLocation (the session zone of its MySQL connection). A
+	// MySQL DSN without a loc parameter reads them in this zone, and
+	// timestamps that arrive as text are parsed in it, so the copied
+	// instants are right; the process's own zone plays no part.
+	Location string
 }
 
 type postgresColumn struct {
@@ -46,6 +63,8 @@ type tablePlan struct {
 	Columns      []postgresColumn
 	OrderColumns []string
 	RowCount     int64
+	// Location is the zone timestamps that arrive as text are parsed in.
+	Location *time.Location
 }
 
 type foreignKey struct {
@@ -53,10 +72,14 @@ type foreignKey struct {
 	ParentTable string
 }
 
+// DefaultConfig is the configuration before the flags apply: the public
+// schema, a progress line every 1000 rows and the application's default
+// zone.
 func DefaultConfig() Config {
-	return Config{Schema: "public", BatchSize: 1000}
+	return Config{Schema: "public", BatchSize: 1000, Location: orm.DefaultLocation}
 }
 
+// Run parses the command-line arguments and migrates.
 func Run(ctx context.Context, args []string) error {
 	cfg, err := ParseFlags(args)
 	if err != nil {
@@ -65,6 +88,9 @@ func Run(ctx context.Context, args []string) error {
 	return Migrate(ctx, cfg)
 }
 
+// Migrate copies the rows of every table and column the MySQL source and the
+// PostgreSQL target share, then advances the target's sequences past the
+// copied ids. A dry run only prints the plan.
 func Migrate(ctx context.Context, cfg Config) error {
 	if cfg.MySQLDSN == "" || cfg.PostgresDSN == "" {
 		return errors.New("both --mysql and --postgres are required")
@@ -75,26 +101,30 @@ func Migrate(ctx context.Context, cfg Config) error {
 	if cfg.Truncate && !cfg.Yes && !cfg.DryRun {
 		return errors.New("--truncate is destructive; pass --yes to confirm")
 	}
+	location, err := time.LoadLocation(cfg.Location)
+	if err != nil || cfg.Location == "" || cfg.Location == "Local" {
+		return fmt.Errorf("--location %q is not an IANA time zone; pass the panel's AppLocation", cfg.Location)
+	}
 
-	mysqlDB, err := sql.Open("mysql", normalizeMySQLDSN(cfg.MySQLDSN))
+	mysqlDB, err := sql.Open("mysql", normalizeMySQLDSN(cfg.MySQLDSN, location))
 	if err != nil {
 		return fmt.Errorf("open mysql: %w", err)
 	}
-	defer mysqlDB.Close()
+	defer closeDatabase("mysql", mysqlDB)
 	if err := mysqlDB.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping mysql: %w", err)
 	}
 
-	postgresDB, err := sql.Open("postgres", cfg.PostgresDSN)
+	postgresDB, err := sql.Open("pgx", cfg.PostgresDSN)
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
 	}
-	defer postgresDB.Close()
+	defer closeDatabase("postgres", postgresDB)
 	if err := postgresDB.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping postgres: %w", err)
 	}
 
-	plans, err := buildPlans(ctx, mysqlDB, postgresDB, cfg)
+	plans, err := buildPlans(ctx, mysqlDB, postgresDB, cfg, location)
 	if err != nil {
 		return err
 	}
@@ -123,13 +153,32 @@ func Migrate(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	if err := resetSequences(ctx, postgresDB, cfg.Schema); err != nil {
+	if err := resetSequences(ctx, postgresDB, cfg.Schema, plans); err != nil {
 		return err
 	}
 	log.Printf("migration completed")
 	return nil
 }
 
+// closeDatabase releases a connection pool once the migration is done with
+// it. Every copied table has committed by then, so a failure is reported but
+// does not turn a completed migration into a failed one.
+func closeDatabase(name string, db io.Closer) {
+	if err := db.Close(); err != nil {
+		log.Printf("close %s connection: %v", name, err)
+	}
+}
+
+// closeRows closes rows and adds a close failure to *err, next to any error
+// the function is already returning.
+func closeRows(rows io.Closer, err *error) {
+	if closeErr := rows.Close(); closeErr != nil {
+		*err = errors.Join(*err, fmt.Errorf("close rows: %w", closeErr))
+	}
+}
+
+// ParseFlags reads the migration's configuration from command-line
+// arguments.
 func ParseFlags(args []string) (Config, error) {
 	cfg := DefaultConfig()
 	fs := flag.NewFlagSet("mysql2postgres", flag.ContinueOnError)
@@ -142,6 +191,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.BoolVar(&cfg.Yes, "yes", false, "confirm destructive operations")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "print plan without copying data")
 	fs.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "rows per progress log")
+	fs.StringVar(&cfg.Location, "location", cfg.Location, "IANA zone the MySQL DATETIME values are in: the panel's AppLocation")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -153,12 +203,20 @@ func ParseFlags(args []string) (Config, error) {
 	return cfg, nil
 }
 
-func normalizeMySQLDSN(dsn string) string {
+// normalizeMySQLDSN makes the source connection return DATETIME values as
+// time.Time (parseTime) in location when the DSN names no loc of its own:
+// the driver's default is UTC, which labelled every value with the wrong
+// zone and shifted the timestamptz target columns by the panel's offset. A
+// DSN that names loc keeps it.
+func normalizeMySQLDSN(dsn string, location *time.Location) string {
 	cfg, err := mysqlDriver.ParseDSN(dsn)
 	if err != nil {
 		return dsn
 	}
 	cfg.ParseTime = true
+	if !dsnNamesLocation(dsn) && location != nil {
+		cfg.Loc = location
+	}
 	if cfg.Params == nil {
 		cfg.Params = make(map[string]string)
 	}
@@ -168,7 +226,27 @@ func normalizeMySQLDSN(dsn string) string {
 	return cfg.FormatDSN()
 }
 
-func buildPlans(ctx context.Context, mysqlDB, postgresDB *sql.DB, cfg Config) ([]tablePlan, error) {
+// dsnNamesLocation reports whether a MySQL DSN's parameters, the part after
+// the database name, set loc. The database name follows the last slash;
+// searching the whole DSN for the question mark would misread a password.
+func dsnNamesLocation(dsn string) bool {
+	databaseSeparator := strings.LastIndex(dsn, "/")
+	if databaseSeparator < 0 {
+		return false
+	}
+	querySeparator := strings.IndexByte(dsn[databaseSeparator+1:], '?')
+	if querySeparator < 0 {
+		return false
+	}
+	params, err := url.ParseQuery(dsn[databaseSeparator+querySeparator+2:])
+	if err != nil {
+		return false
+	}
+	_, ok := params["loc"]
+	return ok
+}
+
+func buildPlans(ctx context.Context, mysqlDB, postgresDB *sql.DB, cfg Config, location *time.Location) ([]tablePlan, error) {
 	sourceTables, err := listMySQLTables(ctx, mysqlDB)
 	if err != nil {
 		return nil, err
@@ -237,6 +315,7 @@ func buildPlans(ctx context.Context, mysqlDB, postgresDB *sql.DB, cfg Config) ([
 			Columns:      commonCols,
 			OrderColumns: orderColumns,
 			RowCount:     rowCount,
+			Location:     location,
 		})
 	}
 	dependencies, err := listPostgresForeignKeys(ctx, postgresDB, cfg.Schema)
@@ -257,7 +336,7 @@ func parseTableSet(input string) map[string]struct{} {
 	return result
 }
 
-func listMySQLTables(ctx context.Context, db *sql.DB) (map[string]struct{}, error) {
+func listMySQLTables(ctx context.Context, db *sql.DB) (_ map[string]struct{}, err error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT table_name
 FROM information_schema.tables
@@ -267,11 +346,11 @@ ORDER BY table_name`)
 	if err != nil {
 		return nil, fmt.Errorf("list mysql tables: %w", err)
 	}
-	defer rows.Close()
+	defer closeRows(rows, &err)
 	return scanNameSet(rows)
 }
 
-func listPostgresTables(ctx context.Context, db *sql.DB, schema string) (map[string]struct{}, error) {
+func listPostgresTables(ctx context.Context, db *sql.DB, schema string) (_ map[string]struct{}, err error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT table_name
 FROM information_schema.tables
@@ -281,7 +360,7 @@ ORDER BY table_name`, schema)
 	if err != nil {
 		return nil, fmt.Errorf("list postgres tables: %w", err)
 	}
-	defer rows.Close()
+	defer closeRows(rows, &err)
 	return scanNameSet(rows)
 }
 
@@ -297,7 +376,7 @@ func scanNameSet(rows *sql.Rows) (map[string]struct{}, error) {
 	return result, rows.Err()
 }
 
-func listMySQLColumns(ctx context.Context, db *sql.DB, table string) (map[string]struct{}, error) {
+func listMySQLColumns(ctx context.Context, db *sql.DB, table string) (_ map[string]struct{}, err error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT column_name
 FROM information_schema.columns
@@ -307,12 +386,13 @@ ORDER BY ordinal_position`, table)
 	if err != nil {
 		return nil, fmt.Errorf("list mysql columns for %s: %w", table, err)
 	}
-	defer rows.Close()
+	defer closeRows(rows, &err)
 	return scanNameSet(rows)
 }
 
-func listMySQLPrimaryKeyColumns(ctx context.Context, db *sql.DB, table string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func listMySQLPrimaryKeyColumns(ctx context.Context, db *sql.DB, table string) (_ []string, err error) {
+	rows, err := db.QueryContext(ctx, //nolint:sqlclosecheck // closed by closeRows, which folds the close error into err
+		`
 SELECT column_name
 FROM information_schema.key_column_usage
 WHERE table_schema = DATABASE()
@@ -322,7 +402,7 @@ ORDER BY ordinal_position`, table)
 	if err != nil {
 		return nil, fmt.Errorf("list mysql primary keys for %s: %w", table, err)
 	}
-	defer rows.Close()
+	defer closeRows(rows, &err)
 
 	var result []string
 	for rows.Next() {
@@ -335,8 +415,9 @@ ORDER BY ordinal_position`, table)
 	return result, rows.Err()
 }
 
-func listPostgresColumns(ctx context.Context, db *sql.DB, schema, table string) ([]postgresColumn, error) {
-	rows, err := db.QueryContext(ctx, `
+func listPostgresColumns(ctx context.Context, db *sql.DB, schema, table string) (_ []postgresColumn, err error) {
+	rows, err := db.QueryContext(ctx, //nolint:sqlclosecheck // closed by closeRows, which folds the close error into err
+		`
 SELECT column_name,
        data_type,
        udt_name,
@@ -351,7 +432,7 @@ ORDER BY ordinal_position`, schema, table)
 	if err != nil {
 		return nil, fmt.Errorf("list postgres columns for %s: %w", table, err)
 	}
-	defer rows.Close()
+	defer closeRows(rows, &err)
 
 	var result []postgresColumn
 	for rows.Next() {
@@ -368,8 +449,9 @@ ORDER BY ordinal_position`, schema, table)
 	return result, rows.Err()
 }
 
-func listPostgresForeignKeys(ctx context.Context, db *sql.DB, schema string) ([]foreignKey, error) {
-	rows, err := db.QueryContext(ctx, `
+func listPostgresForeignKeys(ctx context.Context, db *sql.DB, schema string) (_ []foreignKey, err error) {
+	rows, err := db.QueryContext(ctx, //nolint:sqlclosecheck // closed by closeRows, which folds the close error into err
+		`
 SELECT child.relname AS child_table,
        parent.relname AS parent_table
 FROM pg_constraint c
@@ -384,7 +466,7 @@ ORDER BY child.relname, parent.relname`, schema)
 	if err != nil {
 		return nil, fmt.Errorf("list postgres foreign keys: %w", err)
 	}
-	defer rows.Close()
+	defer closeRows(rows, &err)
 
 	var result []foreignKey
 	for rows.Next() {
@@ -471,7 +553,7 @@ func truncateTables(ctx context.Context, db *sql.DB, schema string, plans []tabl
 	for _, plan := range plans {
 		names = append(names, quotePGIdent(schema)+"."+quotePGIdent(plan.Name))
 	}
-	query := "TRUNCATE TABLE " + strings.Join(names, ", ") + " RESTART IDENTITY CASCADE"
+	query := "TRUNCATE TABLE " + strings.Join(names, ", ") + " RESTART IDENTITY CASCADE" //nolint:gosec // G202: identifiers quoted by quotePGIdent from the catalog
 	log.Printf("truncate %d target table(s)", len(names))
 	if _, err := db.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("truncate target tables: %w", err)
@@ -479,66 +561,124 @@ func truncateTables(ctx context.Context, db *sql.DB, schema string, plans []tabl
 	return nil
 }
 
-func copyTable(ctx context.Context, mysqlDB, postgresDB *sql.DB, schema string, plan tablePlan, batchSize int) error {
+func copyTable(ctx context.Context, mysqlDB, postgresDB *sql.DB, schema string, plan tablePlan, batchSize int) (err error) {
 	log.Printf("copy %s: start", plan.Name)
 	cols := make([]string, len(plan.Columns))
 	for i, col := range plan.Columns {
 		cols[i] = col.Name
 	}
 
-	query := "SELECT " + quoteMySQLIdentList(cols) + " FROM " + quoteMySQLIdent(plan.Name)
+	query := "SELECT " + quoteMySQLIdentList(cols) + " FROM " + quoteMySQLIdent(plan.Name) //nolint:gosec // G202: identifiers quoted by quoteMySQLIdent from information_schema
 	if len(plan.OrderColumns) > 0 {
 		query += " ORDER BY " + quoteMySQLIdentList(plan.OrderColumns)
 	}
-	rows, err := mysqlDB.QueryContext(ctx, query)
+	rows, err := mysqlDB.QueryContext(ctx, query) //nolint:rowserrcheck // rows.Err is checked by the CopyFrom source's Err method
 	if err != nil {
 		return fmt.Errorf("query mysql table %s: %w", plan.Name, err)
 	}
-	defer rows.Close()
+	defer closeRows(rows, &err)
 
-	tx, err := postgresDB.BeginTx(ctx, nil)
+	conn, err := postgresDB.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("begin postgres transaction for %s: %w", plan.Name, err)
+		return fmt.Errorf("acquire postgres connection for %s: %w", plan.Name, err)
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
+	defer func() { _ = conn.Close() }()
 
-	stmt, err := tx.PrepareContext(ctx, pq.CopyInSchema(schema, plan.Name, cols...))
+	var copied int64
+	err = conn.Raw(func(driverConn any) error {
+		pgxConn, ok := driverConn.(*stdlib.Conn)
+		if !ok {
+			return fmt.Errorf("postgres connection is %T, not pgx", driverConn)
+		}
+		tx, err := pgxConn.Conn().Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin postgres transaction for %s: %w", plan.Name, err)
+		}
+		// A no-op once the transaction committed.
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		// The rows stream through COPY's text format, the format lib/pq's
+		// COPY used, so every value keeps the text rendering it had.
+		reader, writer := io.Pipe()
+		var written sync.WaitGroup
+		var writeErr error
+		written.Add(1)
+		go func() {
+			defer written.Done()
+			copied, writeErr = writeCopyRows(writer, rows, plan, batchSize)
+			_ = writer.CloseWithError(writeErr)
+		}()
+		_, copyErr := tx.Conn().PgConn().CopyFrom(ctx, reader, copyStatement(schema, plan.Name, cols))
+		// Unblock the writer if COPY stopped reading early, then wait: the
+		// rows must not be touched after this function returns.
+		_ = reader.CloseWithError(errCopyStopped)
+		written.Wait()
+		// A writer that ran into the closed pipe only saw COPY stop; the
+		// reason is COPY's own error (PostgreSQL rejecting a row), which
+		// must be the one the operator reads.
+		if writeErr != nil && !errors.Is(writeErr, errCopyStopped) {
+			return writeErr
+		}
+		if copyErr != nil {
+			return fmt.Errorf("copy rows into %s: %w", plan.Name, copyErr)
+		}
+		if writeErr != nil {
+			return writeErr
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit postgres copy for %s: %w", plan.Name, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("prepare postgres copy for %s: %w", plan.Name, err)
+		return err
 	}
-	stmtClosed := false
-	defer func() {
-		if !stmtClosed {
-			_ = stmt.Close()
-		}
-	}()
+	log.Printf("copy %s: done, %d row(s)", plan.Name, copied)
+	return nil
+}
 
-	raw := make([]any, len(cols))
-	dest := make([]any, len(cols))
+// errCopyStopped tells the row writer that COPY stopped reading.
+var errCopyStopped = errors.New("postgres copy stopped")
+
+// copyStatement is the COPY FROM STDIN statement for the columns of table.
+func copyStatement(schema, table string, cols []string) string {
+	quoted := make([]string, len(cols))
+	for i, col := range cols {
+		quoted[i] = quotePGIdent(col)
+	}
+	return "COPY " + quotePGIdent(schema) + "." + quotePGIdent(table) + " (" + strings.Join(quoted, ", ") + ") FROM STDIN"
+}
+
+// writeCopyRows converts every MySQL row of plan and writes it in COPY's
+// text format, logging progress every batchSize rows.
+func writeCopyRows(w io.Writer, rows *sql.Rows, plan tablePlan, batchSize int) (int64, error) {
+	buffered := bufio.NewWriter(w)
+	raw := make([]any, len(plan.Columns))
+	dest := make([]any, len(plan.Columns))
 	for i := range raw {
 		dest[i] = &raw[i]
 	}
-
 	var copied int64
 	for rows.Next() {
 		if err := rows.Scan(dest...); err != nil {
-			return fmt.Errorf("scan mysql row from %s: %w", plan.Name, err)
+			return copied, fmt.Errorf("scan mysql row from %s: %w", plan.Name, err)
 		}
-		values := make([]any, len(raw))
 		for i, value := range raw {
-			converted, err := convertValue(value, plan.Columns[i])
+			converted, err := convertValue(value, plan.Columns[i], plan.Location)
 			if err != nil {
-				return fmt.Errorf("convert %s.%s: %w", plan.Name, plan.Columns[i].Name, err)
+				return copied, fmt.Errorf("convert %s.%s: %w", plan.Name, plan.Columns[i].Name, err)
 			}
-			values[i] = converted
+			if i > 0 {
+				if err := buffered.WriteByte('\t'); err != nil {
+					return copied, err
+				}
+			}
+			if _, err := buffered.WriteString(copyText(converted)); err != nil {
+				return copied, err
+			}
 		}
-		if _, err := stmt.ExecContext(ctx, values...); err != nil {
-			return fmt.Errorf("copy row into %s: %w", plan.Name, err)
+		if err := buffered.WriteByte('\n'); err != nil {
+			return copied, err
 		}
 		copied++
 		if copied%int64(batchSize) == 0 {
@@ -546,32 +686,51 @@ func copyTable(ctx context.Context, mysqlDB, postgresDB *sql.DB, schema string, 
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate mysql rows from %s: %w", plan.Name, err)
+		return copied, fmt.Errorf("iterate mysql rows from %s: %w", plan.Name, err)
 	}
-	if _, err := stmt.ExecContext(ctx); err != nil {
-		return fmt.Errorf("flush postgres copy for %s: %w", plan.Name, err)
-	}
-	if err := stmt.Close(); err != nil {
-		return fmt.Errorf("close postgres copy for %s: %w", plan.Name, err)
-	}
-	stmtClosed = true
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit postgres copy for %s: %w", plan.Name, err)
-	}
-	committed = true
-	log.Printf("copy %s: done, %d row(s)", plan.Name, copied)
-	return nil
+	return copied, buffered.Flush()
 }
 
-func convertValue(value any, col postgresColumn) (any, error) {
+// copyReplacer escapes the characters COPY's text format uses as delimiters.
+var copyReplacer = strings.NewReplacer(`\`, `\\`, "\n", `\n`, "\r", `\r`, "\t", `\t`)
+
+// copyText renders a converted value in COPY's text format: \N for NULL,
+// PostgreSQL's literal forms otherwise, delimiters escaped.
+func copyText(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return `\N`
+	case string:
+		return copyReplacer.Replace(v)
+	case []byte:
+		return `\\x` + hex.EncodeToString(v)
+	case bool:
+		if v {
+			return "t"
+		}
+		return "f"
+	case time.Time:
+		return v.Format("2006-01-02 15:04:05.999999999Z07:00")
+	case float64:
+		return strconv.FormatFloat(v, 'g', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'g', -1, 32)
+	default:
+		return copyReplacer.Replace(fmt.Sprint(v))
+	}
+}
+
+// convertValue turns a value the MySQL driver scanned into what COPY writes
+// for col; timestamps that arrive as text are parsed in location.
+func convertValue(value any, col postgresColumn, location *time.Location) (any, error) {
 	if value == nil {
 		return nil, nil
 	}
 	switch v := value.(type) {
 	case []byte:
-		return convertString(string(v), col)
+		return convertString(string(v), col, location)
 	case string:
-		return convertString(v, col)
+		return convertString(v, col, location)
 	case time.Time:
 		if v.IsZero() {
 			return nil, nil
@@ -598,7 +757,7 @@ func convertValue(value any, col postgresColumn) (any, error) {
 	}
 }
 
-func convertString(value string, col postgresColumn) (any, error) {
+func convertString(value string, col postgresColumn, location *time.Location) (any, error) {
 	if isZeroDate(value) {
 		return nil, nil
 	}
@@ -619,11 +778,11 @@ func convertString(value string, col postgresColumn) (any, error) {
 		if value == "" {
 			return nil, nil
 		}
-		t, err := parseTimestamp(value)
-		if err != nil {
-			return value, nil
+		// A value none of the known layouts parses is copied as text, for
+		// PostgreSQL to interpret.
+		if t, err := parseTimestamp(value, location); err == nil {
+			return t, nil
 		}
-		return t, nil
 	}
 	return value, nil
 }
@@ -683,7 +842,14 @@ func numericToBool(value any) (bool, error) {
 	}
 }
 
-func parseTimestamp(value string) (time.Time, error) {
+// parseTimestamp reads a MySQL DATETIME or DATE that arrived as text in
+// location, the panel's zone; the layouts with an offset carry their own.
+// It used to parse in the process's zone, which is whatever the machine the
+// tool runs on has.
+func parseTimestamp(value string, location *time.Location) (time.Time, error) {
+	if location == nil {
+		location = time.UTC
+	}
 	layouts := []string{
 		"2006-01-02 15:04:05.999999999",
 		"2006-01-02 15:04:05.999999",
@@ -693,39 +859,27 @@ func parseTimestamp(value string) (time.Time, error) {
 		"2006-01-02",
 	}
 	for _, layout := range layouts {
-		if t, err := time.ParseInLocation(layout, value, time.Local); err == nil {
+		if t, err := time.ParseInLocation(layout, value, location); err == nil {
 			return t, nil
 		}
 	}
 	return time.Time{}, fmt.Errorf("unsupported timestamp %q", value)
 }
 
-func resetSequences(ctx context.Context, db *sql.DB, schema string) error {
-	rows, err := db.QueryContext(ctx, `
-SELECT table_name, column_name
-FROM information_schema.columns
-WHERE table_schema = $1
-  AND (is_identity = 'YES' OR column_default LIKE 'nextval(%')
-ORDER BY table_name, ordinal_position`, schema)
-	if err != nil {
-		return fmt.Errorf("list postgres sequences: %w", err)
-	}
-	defer rows.Close()
-
+// resetSequences only advances sequences for columns included in the copy plan.
+// Scanning the whole schema would mutate excluded tables and race unrelated DDL.
+func resetSequences(ctx context.Context, db *sql.DB, schema string, plans []tablePlan) error {
 	type sequenceColumn struct {
 		table  string
 		column string
 	}
 	var columns []sequenceColumn
-	for rows.Next() {
-		var item sequenceColumn
-		if err := rows.Scan(&item.table, &item.column); err != nil {
-			return err
+	for _, plan := range plans {
+		for _, col := range plan.Columns {
+			if col.Identity || (col.Default.Valid && strings.HasPrefix(col.Default.String, "nextval(")) {
+				columns = append(columns, sequenceColumn{table: plan.Name, column: col.Name})
+			}
 		}
-		columns = append(columns, item)
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 
 	for _, item := range columns {
@@ -738,7 +892,7 @@ ORDER BY table_name, ordinal_position`, schema)
 			continue
 		}
 
-		query := fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s", quotePGIdent(item.column), tableName)
+		query := fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s", quotePGIdent(item.column), tableName) //nolint:gosec // G201: identifiers quoted by quotePGIdent from information_schema
 		var maxID int64
 		if err := db.QueryRowContext(ctx, query).Scan(&maxID); err != nil {
 			return fmt.Errorf("get max id for %s.%s: %w", item.table, item.column, err)

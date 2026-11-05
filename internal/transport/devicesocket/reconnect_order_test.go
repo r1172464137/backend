@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,38 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func dialDeviceReady(t *testing.T, srv *httptest.Server, deviceID string) *websocket.Conn {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "?device=" + deviceID
+	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, reply, err := conn.ReadMessage(); err != nil || string(reply) != "ping" {
+		t.Fatalf("readiness reply %q: %v", reply, err)
+	}
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
 
 // Stable has no separate register/serve methods. Hold AddDevice inside the
 // handshake Write, after sending HTTP 101 but before Upgrade returns, instead
@@ -66,7 +99,7 @@ func (w *registrationGateWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // old socket's close proves stable's post-close counter adjustment completed.
 // A real heartbeat round trip establishes both without polling or sleeping.
 func TestDialDeviceWaitsForRegistration(t *testing.T) {
-	dm := NewDeviceManager(3600, 3600)
+	dm := NewDeviceManager(3600, 3600, nil)
 	defer dm.Stop()
 
 	heartbeatReceived := make(chan struct{})
@@ -86,7 +119,7 @@ func TestDialDeviceWaitsForRegistration(t *testing.T) {
 	dialDone := make(chan struct{})
 	go func() {
 		defer close(dialDone)
-		dialed <- dialDevice(t, srv, "dev1")
+		dialed <- dialDeviceReady(t, srv, "dev1")
 	}()
 	// Even a failed assertion must release the handler and join the helper
 	// before test cleanup ends, so no goroutine reports errors afterwards.
@@ -108,7 +141,7 @@ func TestDialDeviceWaitsForRegistration(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("dial did not send its readiness heartbeat")
 	}
-	if got := atomic.LoadInt32(&dm.totalOnline); got != 0 {
+	if got := dm.totalOnline.Load(); got != 0 {
 		t.Fatalf("device registered before the test released it: %d online", got)
 	}
 	select {
@@ -128,7 +161,7 @@ func TestDialDeviceWaitsForRegistration(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("dial did not finish after registration")
 	}
-	if got := atomic.LoadInt32(&dm.totalOnline); got != 1 {
+	if got := dm.totalOnline.Load(); got != 1 {
 		t.Fatalf("ready socket has %d devices online, want 1", got)
 	}
 }
@@ -137,7 +170,7 @@ func TestDialDeviceWaitsForRegistration(t *testing.T) {
 // readiness. Cleanup must match connection identity, not just DeviceID, and
 // must preserve peers, other users, accounting and offline-event metadata.
 func TestRetiredSocketCleanupKeepsReplacement(t *testing.T) {
-	dm := NewDeviceManager(3600, 3600)
+	dm := NewDeviceManager(3600, 3600, nil)
 	defer dm.Stop()
 	const userID = int64(33)
 	type offlineEvent struct {
@@ -163,7 +196,7 @@ func TestRetiredSocketCleanupKeepsReplacement(t *testing.T) {
 	otherSrv := serverForUser(userID + 1)
 	register := func(srv *httptest.Server, uid int64, deviceID string) *Device {
 		t.Helper()
-		dialDevice(t, srv, deviceID)
+		dialDeviceReady(t, srv, deviceID)
 		for _, d := range dm.snapshotDevices(uid) {
 			if d.DeviceID == deviceID {
 				t.Cleanup(func() { dm.removeDevice(uid, d) })
@@ -195,7 +228,7 @@ func TestRetiredSocketCleanupKeepsReplacement(t *testing.T) {
 	if len(others) != 1 || others[0] != otherUser {
 		t.Fatalf("stale cleanup changed another user's socket: %+v", others)
 	}
-	if got := atomic.LoadInt32(&dm.totalOnline); got != 3 {
+	if got := dm.totalOnline.Load(); got != 3 {
 		t.Fatalf("online after stale cleanup = %d, want 3", got)
 	}
 	select {
@@ -206,7 +239,7 @@ func TestRetiredSocketCleanupKeepsReplacement(t *testing.T) {
 
 	dm.removeDevice(userID, replacement)
 	dm.removeDevice(userID, replacement)
-	if got := atomic.LoadInt32(&dm.totalOnline); got != 2 {
+	if got := dm.totalOnline.Load(); got != 2 {
 		t.Fatalf("online after replacement disconnect = %d, want 2", got)
 	}
 	devices = dm.snapshotDevices(userID)

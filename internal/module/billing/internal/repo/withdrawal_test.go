@@ -8,15 +8,10 @@ import (
 	walletEntity "github.com/perfect-panel/server/internal/module/billing/entity/wallet"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/redis/go-redis/v9"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
 func TestWithdrawalRepoUsesMigratedTableAndGuardsTransitions(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:withdrawal-repo?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := openMemoryDB(t, "withdrawal-repo")
 	if err := db.AutoMigrate(&walletEntity.Withdrawal{}); err != nil {
 		t.Fatal(err)
 	}

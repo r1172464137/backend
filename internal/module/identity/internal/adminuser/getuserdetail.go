@@ -5,38 +5,25 @@ import (
 
 	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetUserDetailLogic struct {
-	ctx  context.Context
-	deps Deps
-	logger.Logger
-}
-
-func newGetUserDetailLogic(ctx context.Context, deps Deps) *GetUserDetailLogic {
-	return &GetUserDetailLogic{
-		ctx:    ctx,
-		deps:   deps,
-		Logger: logger.WithContext(ctx),
-	}
-}
-
-func (l *GetUserDetailLogic) GetUserDetail(req *dto.GetDetailRequest) (*dto.User, error) {
-	resp := dto.User{}
-	userInfo, err := l.deps.Users.FindOne(l.ctx, req.Id)
+// GetUserDetail returns an account with its wallet, for the admin edit form.
+func (s *Service) GetUserDetail(ctx context.Context, req *dto.GetDetailRequest) (*dto.User, error) {
+	userInfo, err := s.deps.Users.FindOne(ctx, req.Id)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "get user detail error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "get user detail error: %v", err.Error())
 	}
-	mapping.DeepCopy(&resp, userInfo)
+	resp := dto.User{}
+	if err := mapping.Copy(&resp, userInfo); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "map user %d", userInfo.Id)
+	}
 	// Wallet values come from the billing-owned table. A read failure must
 	// fail the request: this response populates the admin edit form, and a
 	// silently zeroed balance would round-trip into a real adjustment.
-	w, err := l.deps.Wallet.FindWallet(l.ctx, userInfo.Id)
+	w, err := s.deps.Wallet.FindWallet(ctx, userInfo.Id)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "load user wallet error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "load user wallet error: %v", err.Error())
 	}
 	if w != nil {
 		resp.Balance = w.Balance

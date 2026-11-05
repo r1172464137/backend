@@ -1,17 +1,22 @@
 package bootstrap
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
 
-func TestMustUnmarshalNodeConfigJSONFailsClosed(t *testing.T) {
-	for _, field := range []string{"domain block", "IP block", "protocol block", "outbound"} {
-		t.Run(field, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("invalid persisted JSON did not panic during bootstrap")
-				}
-			}()
-			var target []string
-			mustUnmarshalNodeConfigJSON(field, `{`, &target)
-		})
+	"github.com/perfect-panel/server/internal/config"
+	"github.com/perfect-panel/server/pkg/logger/logtest"
+)
+
+func TestNodeReloadKeepsPreviousSettingsForInvalidServerDNS(t *testing.T) {
+	logtest.Discard(t)
+	deps, runtime := newHarness(healthyStore(), config.Config{})
+	deps.ValidateServerDNS = func(context.Context) error { return errors.New("invalid server DNS") }
+	if err := Node(context.Background(), deps); err == nil {
+		t.Fatal("invalid stored override accepted")
+	}
+	if runtime.config.Node.NodeSecret != "" || runtime.managerSettings != 0 {
+		t.Fatal("published partial node settings")
 	}
 }

@@ -3,7 +3,7 @@ package adminuser
 import (
 	"testing"
 
-	"github.com/pkg/errors"
+	"errors"
 
 	"github.com/perfect-panel/server/pkg/xerr"
 )
@@ -63,7 +63,7 @@ func TestValidateAvatarUpdate(t *testing.T) {
 			}
 
 			var codeErr *xerr.CodeError
-			if !errors.As(errors.Cause(err), &codeErr) {
+			if !errors.As(err, &codeErr) {
 				t.Fatalf("error = %T, want wrapped *xerr.CodeError", err)
 			}
 			if codeErr.GetErrCode() != tt.wantCode {

@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 
 	"github.com/perfect-panel/server/internal/module/platform/entity/task"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-var _ repository.TaskRepo = (*taskRepo)(nil)
+var _ kernel.TaskRepo = (*taskRepo)(nil)
 
 const taskPageSelect = "task.*, COUNT(*) OVER() AS total_count"
 
@@ -25,7 +25,7 @@ type taskPageRow struct {
 }
 
 // NewTaskRepo builds the module-owned implementation.
-func NewTaskRepo(db *gorm.DB) repository.TaskRepo {
+func NewTaskRepo(db *gorm.DB) kernel.TaskRepo {
 	return &taskRepo{
 		db: db,
 	}
@@ -52,10 +52,10 @@ func (m *taskRepo) QueryTaskList(ctx context.Context, filter *task.Filter) (int6
 		filter = &task.Filter{
 			Type: task.Undefined,
 			Page: 1,
-			Size: repository.DefaultPageSize,
+			Size: kernel.DefaultPageSize,
 		}
 	}
-	filter.Page, filter.Size = repository.NormalizePage(filter.Page, filter.Size)
+	filter.Page, filter.Size = kernel.NormalizePage(filter.Page, filter.Size)
 
 	query := m.taskListQuery(ctx, filter)
 	var rows []taskPageRow
@@ -108,14 +108,19 @@ func (m *taskRepo) taskListQuery(ctx context.Context, filter *task.Filter) *gorm
 	return query
 }
 
+// Update rewrites the task's mutable columns from data; the row's type and
+// creation time stay as they were, and a missing row is not inserted, which
+// a whole-row save would do.
 func (m *taskRepo) Update(ctx context.Context, data *task.Task) error {
-	return m.db.WithContext(ctx).Where("id = ?", data.Id).Save(data).Error
+	return m.db.WithContext(ctx).Model(&task.Task{}).Where("id = ?", data.Id).
+		Select("scope", "content", "status", "errors", "total", "current", "daily_date", "daily_sent").
+		Updates(data).Error
 }
 
 func (m *taskRepo) UpdateActive(ctx context.Context, data *task.Task) (bool, error) {
 	result := m.db.WithContext(ctx).Model(&task.Task{}).
 		Where("id = ? AND type = ? AND status IN ?", data.Id, data.Type, []int8{task.StatusPending, task.StatusInProgress}).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"scope": data.Scope, "content": data.Content, "status": data.Status,
 			"errors": data.Errors, "total": data.Total, "current": data.Current,
 		})
@@ -132,8 +137,8 @@ func (m *taskRepo) UpdateActiveProgress(ctx context.Context, data *task.Task) (b
 	return result.RowsAffected == 1, result.Error
 }
 
-func activeProgressUpdates(data *task.Task) map[string]interface{} {
-	return map[string]interface{}{
+func activeProgressUpdates(data *task.Task) map[string]any {
+	return map[string]any{
 		"status": data.Status, "errors": data.Errors, "total": data.Total, "current": data.Current,
 		"daily_date": data.DailyDate, "daily_sent": data.DailySent,
 	}
@@ -174,7 +179,7 @@ func (m *taskRepo) UpdateStatusFrom(ctx context.Context, id int64, typ task.Type
 func (m *taskRepo) UpdateStatusAndErrorFrom(ctx context.Context, id int64, typ task.Type, from []int8, status int8, taskError string) (bool, error) {
 	result := m.db.WithContext(ctx).Model(&task.Task{}).
 		Where("id = ? AND type = ? AND status IN ?", id, typ, from).
-		Updates(map[string]interface{}{"status": status, "errors": taskError})
+		Updates(map[string]any{"status": status, "errors": taskError})
 	return result.RowsAffected == 1, result.Error
 }
 

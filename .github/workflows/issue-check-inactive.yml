@@ -3,6 +3,7 @@ name: Issue Check Inactive
 on:
   schedule:
     - cron: '0 0 */15 * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,13 +11,31 @@ permissions:
 jobs:
   issue-check-inactive:
     permissions:
-      issues: write # for actions-cool/issues-helper to update issues
-      pull-requests: write # for actions-cool/issues-helper to update PRs
+      issues: write # to label the issues
     runs-on: ubuntu-latest
     steps:
+      # Labels every open issue without activity for 30 days "Inactive";
+      # issue-remove-inactive.yml takes the label off when the author returns.
       - name: check-inactive
-        uses: actions-cool/issues-helper@v3
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          actions: 'check-inactive'
-          inactive-label: 'Inactive'
-          inactive-day: 30
+          script: |
+            const label = 'Inactive';
+            const inactiveDays = 30;
+            const cutoff = Date.now() - inactiveDays * 24 * 60 * 60 * 1000;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+              if (Date.parse(issue.updated_at) > cutoff) continue;
+              if (issue.labels.some((l) => l.name === label)) continue;
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: issue.number,
+                labels: [label],
+              });
+              core.info(`#${issue.number}: labelled ${label} (last activity ${issue.updated_at})`);
+            }

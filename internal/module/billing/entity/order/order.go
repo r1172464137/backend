@@ -1,3 +1,7 @@
+// Package order holds the billing domain's order entities and the rules that
+// travel with them: the order and its details, the status state machine,
+// order numbers, the durable order events and their wake-up channels, and
+// the guest checkout data an order carries until the guest's account exists.
 package order
 
 import (
@@ -22,15 +26,18 @@ type Order struct {
 	CouponDiscount         int64     `gorm:"type:int;not null;default:0;comment:Coupon Discount Amount"`
 	CouponReserved         bool      `gorm:"type:tinyint(1);not null;default:0;comment:Coupon usage reserved while order is pending"`
 	Commission             int64     `gorm:"type:int;not null;default:0;comment:Order Commission"`
+	CommissionRefererId    int64     `gorm:"type:bigint;not null;default:0;comment:Referrer credited with the commission"`
 	PaymentId              int64     `gorm:"type:bigint;not null;default:0;comment:Payment Method Id"`
 	Method                 string    `gorm:"type:varchar(255);not null;default:'';comment:Payment Method"`
 	FeeAmount              int64     `gorm:"type:int;not null;default:0;comment:Fee Amount"`
 	PaymentAmount          int64     `gorm:"type:bigint;not null;default:0;comment:Amount requested by payment gateway in minor units"`
 	PaymentCurrency        string    `gorm:"type:varchar(16);not null;default:'';comment:Payment gateway currency"`
+	PaymentSession         string    `gorm:"type:text;default:null;comment:Durable external checkout attempt and payment entry" json:"-"`
 	TradeNo                string    `gorm:"type:varchar(255);default:null;comment:Trade No"`
 	Status                 uint8     `gorm:"type:tinyint(1);not null;default:1;comment:Order Status: 1: Pending, 2: Paid, 3:Close, 4: Failed, 5:Finished;"`
 	SubscribeId            int64     `gorm:"type:bigint;not null;default:0;comment:Subscribe Id"`
 	SubscribeToken         string    `gorm:"type:varchar(255);default:null;comment:Renewal Subscribe Token"`
+	UserSubscribeId        int64     `gorm:"column:user_subscribe_id;type:bigint;not null;default:0;comment:User subscription renewed or reset by the order"`
 	GuestAuthType          string    `gorm:"type:varchar(255);not null;default:'';comment:Guest auth type before account activation"`
 	GuestIdentifier        string    `gorm:"type:varchar(255);not null;default:'';comment:Guest auth identifier before account activation"`
 	GuestPasswordHash      string    `gorm:"type:varchar(255);not null;default:'';comment:Guest password hash before account activation"`
@@ -55,34 +62,36 @@ func (Order) TableName() string {
 }
 
 type Details struct {
-	Id              int64                `gorm:"primaryKey"`
-	ParentId        int64                `gorm:"type:bigint;default:null;comment:Parent Order Id"`
-	SubOrders       []*Order             `gorm:"foreignKey:ParentId;references:Id"`
-	UserId          int64                `gorm:"type:bigint;not null;default:0;comment:User Id"`
-	OrderNo         string               `gorm:"type:varchar(255);not null;default:'';unique;comment:Order No"`
-	Type            uint8                `gorm:"type:tinyint(1);not null;default:1;comment:Order Type: 1: Subscribe, 2: Renewal, 3: ResetTraffic, 4: Recharge"`
-	Quantity        int64                `gorm:"type:bigint;not null;default:1;comment:Quantity"`
-	Price           int64                `gorm:"type:int;not null;default:0;comment:Original price"`
-	Amount          int64                `gorm:"type:int;not null;default:0;comment:Order Amount"`
-	Discount        int64                `gorm:"type:int;not null;default:0;comment:Order Discount"`
-	Coupon          string               `gorm:"type:varchar(255);default:null;comment:Coupon"`
-	CouponDiscount  int64                `gorm:"type:int;not null;default:0;comment:Coupon Discount"`
-	PaymentId       int64                `gorm:"type:bigint;not null;default:0;comment:Payment Id"`
-	Payment         *payment.Payment     `gorm:"foreignKey:PaymentId;references:Id"`
-	Method          string               `gorm:"type:varchar(255);not null;default:'';comment:Payment Method"`
-	FeeAmount       int64                `gorm:"type:int;not null;default:0;comment:Fee Amount"`
-	PaymentAmount   int64                `gorm:"type:bigint;not null;default:0;comment:Amount requested by payment gateway in minor units"`
-	PaymentCurrency string               `gorm:"type:varchar(16);not null;default:'';comment:Payment gateway currency"`
-	TradeNo         string               `gorm:"type:varchar(255);default:null;comment:Trade No"`
-	GiftAmount      int64                `gorm:"type:int;not null;default:0;comment:User Gift Amount"`
-	Commission      int64                `gorm:"type:int;not null;default:0;comment:Order Commission"`
-	Status          uint8                `gorm:"type:tinyint(1);not null;default:1;comment:Order Status: 1: Pending, 2: Paid, 3: Failed"`
-	SubscribeId     int64                `gorm:"type:bigint;not null;default:0;comment:Subscribe Id"`
-	SubscribeToken  string               `gorm:"type:varchar(255);default:null;comment:Renewal Subscribe Token"`
-	Subscribe       *subscribe.Subscribe `gorm:"foreignKey:SubscribeId;references:Id"`
-	IsNew           bool                 `gorm:"type:tinyint(1);not null;default:0;comment:Is New Order"`
-	CreatedAt       time.Time            `gorm:"<-:create;comment:Create Time"`
-	UpdatedAt       time.Time            `gorm:"comment:Update Time"`
+	Id                  int64                `gorm:"primaryKey"`
+	ParentId            int64                `gorm:"type:bigint;default:null;comment:Parent Order Id"`
+	SubOrders           []*Order             `gorm:"foreignKey:ParentId;references:Id"`
+	UserId              int64                `gorm:"type:bigint;not null;default:0;comment:User Id"`
+	OrderNo             string               `gorm:"type:varchar(255);not null;default:'';unique;comment:Order No"`
+	Type                uint8                `gorm:"type:tinyint(1);not null;default:1;comment:Order Type: 1: Subscribe, 2: Renewal, 3: ResetTraffic, 4: Recharge"`
+	Quantity            int64                `gorm:"type:bigint;not null;default:1;comment:Quantity"`
+	Price               int64                `gorm:"type:int;not null;default:0;comment:Original price"`
+	Amount              int64                `gorm:"type:int;not null;default:0;comment:Order Amount"`
+	Discount            int64                `gorm:"type:int;not null;default:0;comment:Order Discount"`
+	Coupon              string               `gorm:"type:varchar(255);default:null;comment:Coupon"`
+	CouponDiscount      int64                `gorm:"type:int;not null;default:0;comment:Coupon Discount"`
+	PaymentId           int64                `gorm:"type:bigint;not null;default:0;comment:Payment Id"`
+	Payment             *payment.Payment     `gorm:"foreignKey:PaymentId;references:Id"`
+	Method              string               `gorm:"type:varchar(255);not null;default:'';comment:Payment Method"`
+	FeeAmount           int64                `gorm:"type:int;not null;default:0;comment:Fee Amount"`
+	PaymentAmount       int64                `gorm:"type:bigint;not null;default:0;comment:Amount requested by payment gateway in minor units"`
+	PaymentCurrency     string               `gorm:"type:varchar(16);not null;default:'';comment:Payment gateway currency"`
+	TradeNo             string               `gorm:"type:varchar(255);default:null;comment:Trade No"`
+	GiftAmount          int64                `gorm:"type:int;not null;default:0;comment:User Gift Amount"`
+	Commission          int64                `gorm:"type:int;not null;default:0;comment:Order Commission"`
+	CommissionRefererId int64                `gorm:"type:bigint;not null;default:0;comment:Referrer credited with the commission"`
+	Status              uint8                `gorm:"type:tinyint(1);not null;default:1;comment:Order Status: 1: Pending, 2: Paid, 3: Failed"`
+	SubscribeId         int64                `gorm:"type:bigint;not null;default:0;comment:Subscribe Id"`
+	SubscribeToken      string               `gorm:"type:varchar(255);default:null;comment:Renewal Subscribe Token"`
+	UserSubscribeId     int64                `gorm:"column:user_subscribe_id;type:bigint;not null;default:0;comment:User subscription renewed or reset by the order"`
+	Subscribe           *subscribe.Subscribe `gorm:"foreignKey:SubscribeId;references:Id"`
+	IsNew               bool                 `gorm:"type:tinyint(1);not null;default:0;comment:Is New Order"`
+	CreatedAt           time.Time            `gorm:"<-:create;comment:Create Time"`
+	UpdatedAt           time.Time            `gorm:"comment:Update Time"`
 }
 
 type OrdersTotalWithDate struct {

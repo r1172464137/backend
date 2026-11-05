@@ -2,9 +2,6 @@ package usersub
 
 import (
 	"context"
-	"fmt"
-	"time"
-
 	"uuid"
 
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
@@ -12,45 +9,33 @@ import (
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type CreateUserSubscribeLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Create user subcribe
-func newCreateUserSubscribeLogic(ctx context.Context, deps Deps) *CreateUserSubscribeLogic {
-	return &CreateUserSubscribeLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *CreateUserSubscribeLogic) CreateUserSubscribe(req *dto.CreateUserSubscribeRequest) error {
-	// validate user
-	userInfo, err := l.deps.Users.FindOne(l.ctx, req.UserId)
+// CreateUserSubscribe gives a user an active subscription of the plan with
+// the requested term; a traffic quota of 0 takes the plan's. In
+// single-subscription mode a user holding a blocking subscription is
+// refused.
+func (s *Service) CreateUserSubscribe(ctx context.Context, req *dto.CreateUserSubscribeRequest) error {
+	log := logger.WithContext(ctx)
+	userInfo, err := s.deps.Users.FindOne(ctx, req.UserId)
 	if err != nil {
-		l.Errorw("FindOne error", logger.Field("error", err.Error()), logger.Field("userId", req.UserId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindOne error: %v", err.Error())
+		log.Errorw("FindOne error", logger.Field("error", err.Error()), logger.Field("userId", req.UserId))
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "FindOne error: %v", err.Error())
 	}
-	if l.deps.SingleModel() {
-		hasBlockingSubscription, err := l.deps.UserSubs.HasBlockingSubscription(l.ctx, req.UserId)
+	if s.deps.SingleModel() {
+		hasBlockingSubscription, err := s.deps.UserSubs.HasBlockingSubscription(ctx, req.UserId)
 		if err != nil {
-			l.Errorw("HasBlockingSubscription error", logger.Field("error", err.Error()), logger.Field("userId", req.UserId))
-			return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "check user subscription error: %v", err.Error())
+			log.Errorw("HasBlockingSubscription error", logger.Field("error", err.Error()), logger.Field("userId", req.UserId))
+			return xerr.Wrapf(err, xerr.DatabaseQueryError, "check user subscription error: %v", err.Error())
 		}
 		if hasBlockingSubscription {
-			return errors.Wrapf(xerr.NewErrCode(xerr.SingleSubscribeModeExceedsLimit), "Single subscribe mode exceeds limit")
+			return xerr.Errorf(xerr.SingleSubscribeModeExceedsLimit, "Single subscribe mode exceeds limit")
 		}
 	}
-	sub, err := l.deps.Plans.FindOne(l.ctx, req.SubscribeId)
+	sub, err := s.deps.Plans.FindOne(ctx, req.SubscribeId)
 	if err != nil {
-		l.Errorw("FindOne error", logger.Field("error", err.Error()), logger.Field("subscribeId", req.SubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindOne error: %v", err.Error())
+		log.Errorw("FindOne error", logger.Field("error", err.Error()), logger.Field("subscribeId", req.SubscribeId))
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "FindOne error: %v", err.Error())
 	}
 	if req.Traffic == 0 {
 		req.Traffic = sub.Traffic
@@ -60,28 +45,27 @@ func (l *CreateUserSubscribeLogic) CreateUserSubscribe(req *dto.CreateUserSubscr
 		UserId:      req.UserId,
 		SubscribeId: req.SubscribeId,
 		StartTime:   timeutil.Now(),
-		ExpireTime:  time.UnixMilli(req.ExpiredAt),
+		ExpireTime:  usersub.ExpiryFromMilli(req.ExpiredAt),
 		Traffic:     req.Traffic,
 		Download:    0,
 		Upload:      0,
-		Token:       usersub.TokenFromOrder(fmt.Sprintf("adminCreate:%d", timeutil.Now().UnixMilli())),
+		Token:       usersub.NewToken(),
 		UUID:        uuid.NewV4().String(),
 		Status:      usersub.SubscribeStatusActive,
 	}
-	if err = l.deps.UserSubs.InsertSubscribe(l.ctx, &userSub); err != nil {
-		l.Errorw("InsertSubscribe error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "InsertSubscribe error: %v", err.Error())
+	if err = s.deps.UserSubs.InsertSubscribe(ctx, &userSub); err != nil {
+		log.Errorw("InsertSubscribe error", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseInsertError, "InsertSubscribe error: %v", err.Error())
 	}
 
-	err = l.deps.Cache.UpdateUserCache(l.ctx, userInfo)
+	err = s.deps.Users.ClearUserCacheOf(ctx, userInfo)
 	if err != nil {
-		l.Errorw("UpdateUserCache error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "UpdateUserCache error: %v", err.Error())
+		log.Errorw("ClearUserCache error", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseInsertError, "ClearUserCache error: %v", err.Error())
 	}
 
-	err = l.deps.Plans.ClearCache(l.ctx, userSub.SubscribeId)
-	if err != nil {
-		logger.Errorw("ClearSubscribe error", logger.Field("error", err.Error()))
+	if err = s.deps.Plans.ClearCache(ctx, userSub.SubscribeId); err != nil {
+		log.Errorw("ClearSubscribe error", logger.Field("error", err.Error()))
 	}
 	return nil
 }

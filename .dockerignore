@@ -7,6 +7,10 @@
 .gitignore
 .github
 
+# Local configuration: once initialized it holds the JWT secret and database
+# credentials. The image ships an empty etc/ppanel.yaml instead.
+etc/ppanel.yaml
+
 # Build outputs and local runtime state
 bin/
 build/
@@ -28,3 +32,6 @@ lefthook.yml
 .goreleaser.yaml
 .idea/
 .vscode/
+
+# Local agent sessions
+.claude/

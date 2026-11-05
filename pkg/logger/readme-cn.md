@@ -45,100 +45,49 @@ type LogConf struct {
 
 ```go
 type Logger interface {
+	// Debug logs a message at debug level.
+	Debug(...any)
+	// Debugf logs a message at debug level.
+	Debugf(string, ...any)
+	// Debugw logs a message at debug level.
+	Debugw(string, ...LogField)
 	// Error logs a message at error level.
 	Error(...any)
 	// Errorf logs a message at error level.
 	Errorf(string, ...any)
-	// Errorv logs a message at error level.
-	Errorv(any)
 	// Errorw logs a message at error level.
 	Errorw(string, ...LogField)
 	// Info logs a message at info level.
 	Info(...any)
 	// Infof logs a message at info level.
 	Infof(string, ...any)
-	// Infov logs a message at info level.
-	Infov(any)
 	// Infow logs a message at info level.
 	Infow(string, ...LogField)
-	// Slow logs a message at slow level.
-	Slow(...any)
-	// Slowf logs a message at slow level.
-	Slowf(string, ...any)
-	// Slowv logs a message at slow level.
-	Slowv(any)
 	// Sloww logs a message at slow level.
 	Sloww(string, ...LogField)
-	// WithContext returns a new logger with the given context.
-	WithContext(context.Context) Logger
+	// WithCallerSkip returns a new logger with the given caller skip.
+	WithCallerSkip(skip int) Logger
 	// WithDuration returns a new logger with the given duration.
-	WithDuration(time.Duration) Logger
+	WithDuration(d time.Duration) Logger
 }
 ```
 
-- `Error`, `Info`, `Slow`: 将任何类型的信息写进日志，使用 `fmt.Sprint(...)` 来转换为 `string`
-- `Errorf`, `Infof`, `Slowf`: 将指定格式的信息写入日志
-- `Errorv`, `Infov`, `Slowv`: 将任何类型的信息写入日志，用 `json marshal` 编码
-- `Errorw`, `Infow`, `Sloww`: 写日志，并带上给定的 `key:value` 字段
-- `WithContext`：将给定的 ctx 注入日志信息，例如用于记录 `trace-id`和`span-id`
+- `logger.WithContext(ctx)`：返回的 `Logger` 会把 `ctx` 的 `trace`、`span` id 以及 `logger.ContextWithFields` 存入的字段写入每条日志
+- `Debug`, `Error`, `Info`: 将任何类型的信息写进日志，使用 `fmt.Sprint(...)` 来转换为 `string`；`LogField` 参数作为字段写入
+- `Debugf`, `Errorf`, `Infof`: 将指定格式的信息写入日志
+- `Debugw`, `Errorw`, `Infow`, `Sloww`: 写日志，并带上给定的 `key:value` 字段
+- `WithCallerSkip`：报告调用位置时多跳过若干栈帧，用于封装日志的辅助函数
 - `WithDuration`: 将指定的时间写入日志信息中，字段名为 `duration`
 
 ## 将日志写到指定的存储
 
-`logger`定义了两个接口，方便自定义 `logger`，将日志写入任何存储。
+`logger` 提供了两个函数，方便将日志写入任何存储。
 
 - `logger.NewWriter(w io.Writer)`
-- `logger.SetWriter(write logger.Writer)`
+- `logger.SetWriter(writer logger.Writer)`
 
 ## 过滤敏感字段
 
-如果我们需要防止  `password` 字段被记录下来，我们可以像下面这样实现。
-
-```go
-type (
-	Message struct {
-		Name     string
-		Password string
-		Message  string
-	}
-
-	SensitiveLogger struct {
-		logger.Writer
-	}
-)
-
-func NewSensitiveLogger(writer logger.Writer) *SensitiveLogger {
-	return &SensitiveLogger{
-		Writer: writer,
-	}
-}
-
-func (l *SensitiveLogger) Info(msg any, fields ...logger.LogField) {
-	if m, ok := msg.(Message); ok {
-		l.Writer.Info(Message{
-			Name:     m.Name,
-			Password: "******",
-			Message:  m.Message,
-		}, fields...)
-	} else {
-		l.Writer.Info(msg, fields...)
-	}
-}
-
-func main() {
-	// setup logger to make sure originalWriter not nil,
-	// the injected writer is only for filtering, like a middleware.
-
-	originalWriter := logger.Reset()
-	writer := NewSensitiveLogger(originalWriter)
-	logger.SetWriter(writer)
-
-	logger.Infov(Message{
-		Name:     "foo",
-		Password: "shouldNotAppear",
-		Message:  "bar",
-	})
-  
-	// more code
-}
-```
+日志在写出之前会先脱敏：键名表示凭据或个人信息（例如 `token`、`password`、`email`、`phone`）的字段写为
+`[REDACTED]`；消息和字段值中的 JWT、机器人令牌、邮箱地址、Bearer 令牌和敏感查询参数会被遮盖。
+`logger.RiskField` 是记录客户端 IP 和 User-Agent 的唯一方式，供风控审计使用。

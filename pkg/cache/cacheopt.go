@@ -1,3 +1,11 @@
+// Package cache is the read-through Redis cache of the GORM repositories.
+// CachedConn runs a repository's queries and writes: a cached query reads
+// Redis first and fills it from the database on a miss (a missing record is
+// remembered briefly too), and a write invalidates the keys it names. A
+// per-key version fence keeps a read that raced a committed write from
+// putting the old value back, and inside a transaction invalidations wait in
+// an InvalidationQueue until the transaction commits, so no entry is filled
+// from uncommitted data.
 package cache
 
 import "time"
@@ -33,20 +41,6 @@ func newOptions(opts ...Option) Options {
 	}
 
 	return o
-}
-
-// WithExpiry returns a func to customize an Options with given expiry.
-func WithExpiry(expiry time.Duration) Option {
-	return func(o *Options) {
-		o.Expiry = expiry
-	}
-}
-
-// WithNotFoundExpiry returns a func to customize an Options with given not found expiry.
-func WithNotFoundExpiry(expiry time.Duration) Option {
-	return func(o *Options) {
-		o.NotFoundExpiry = expiry
-	}
 }
 
 // WithInvalidationQueue defers cache-key invalidation until the owner flushes

@@ -30,13 +30,11 @@ return 0
 type (
 	// ExecCtxFn defines the sql exec method.
 	ExecCtxFn func(conn *gorm.DB) error
-	// IndexQueryCtxFn defines the query method that based on unique indexes.
-	IndexQueryCtxFn func(conn *gorm.DB, v interface{}) (interface{}, error)
-	// PrimaryQueryCtxFn defines the query method that based on primary keys.
-	PrimaryQueryCtxFn func(conn *gorm.DB, v, primary interface{}) error
 	// QueryCtxFn defines the query method.
-	QueryCtxFn func(conn *gorm.DB, v interface{}) error
+	QueryCtxFn func(conn *gorm.DB, v any) error
 
+	// CachedConn is a database connection with the cache in front of it;
+	// the zero value is not usable, see NewConn.
 	CachedConn struct {
 		db             *gorm.DB
 		cache          *redis.Client
@@ -58,11 +56,6 @@ func NewConn(db *gorm.DB, c *redis.Client, opts ...Option) CachedConn {
 	}
 }
 
-// DelCache deletes cache with keys.
-func (cc CachedConn) DelCache(keys ...string) error {
-	return cc.DelCacheCtx(context.Background(), keys...)
-}
-
 // DelCacheCtx deletes cache with keys.
 func (cc CachedConn) DelCacheCtx(ctx context.Context, keys ...string) error {
 	if cc.invalidations != nil {
@@ -73,7 +66,7 @@ func (cc CachedConn) DelCacheCtx(ctx context.Context, keys ...string) error {
 }
 
 // GetCacheCtx unmarshals cache with given key and context into v.
-func (cc CachedConn) GetCacheCtx(ctx context.Context, key string, v interface{}) error {
+func (cc CachedConn) GetCacheCtx(ctx context.Context, key string, v any) error {
 	// query redis key
 	val, err := cc.cache.Get(ctx, key).Result()
 	if err != nil {
@@ -84,7 +77,7 @@ func (cc CachedConn) GetCacheCtx(ctx context.Context, key string, v interface{})
 }
 
 // SetCacheCtx sets cache with key, value, and context.
-func (cc CachedConn) SetCacheCtx(ctx context.Context, key string, v interface{}) error {
+func (cc CachedConn) SetCacheCtx(ctx context.Context, key string, v any) error {
 	version, err := cc.cacheVersion(ctx, key)
 	if err != nil {
 		return err
@@ -108,7 +101,7 @@ func (cc CachedConn) cacheVersion(ctx context.Context, key string) (string, erro
 	return version, err
 }
 
-func (cc CachedConn) setCacheIfVersion(ctx context.Context, key, version string, v interface{}) error {
+func (cc CachedConn) setCacheIfVersion(ctx context.Context, key, version string, v any) error {
 	value, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -130,18 +123,6 @@ func (cc CachedConn) invalidateCacheKeys(ctx context.Context, keys ...string) er
 	return invalidateCacheKeys(ctx, cc.cache, keys...)
 }
 
-// GetCache unmarshals cache with given key into v.
-// Delegates to GetCacheCtx with context.Background().
-func (cc CachedConn) GetCache(key string, v interface{}) error {
-	return cc.GetCacheCtx(context.Background(), key, v)
-}
-
-// SetCache sets cache with key and v.
-// Delegates to SetCacheCtx with context.Background().
-func (cc CachedConn) SetCache(key string, v interface{}) error {
-	return cc.SetCacheCtx(context.Background(), key, v)
-}
-
 // ExecCtx runs given exec on given keys, and returns execution result.
 func (cc CachedConn) ExecCtx(ctx context.Context, execCtx ExecCtxFn, keys ...string) error {
 	err := execCtx(cc.db.WithContext(ctx))
@@ -156,17 +137,17 @@ func (cc CachedConn) ExecCtx(ctx context.Context, execCtx ExecCtxFn, keys ...str
 	return nil
 }
 
-// ExecNoCache runs exec with given sql statement, without affecting cache.
-func (cc CachedConn) ExecNoCache(exec ExecCtxFn) error {
-	return cc.ExecNoCacheCtx(context.Background(), exec)
-}
-
 // ExecNoCacheCtx runs exec with given sql statement, without affecting cache.
 func (cc CachedConn) ExecNoCacheCtx(ctx context.Context, execCtx ExecCtxFn) (err error) {
 	return execCtx(cc.db.WithContext(ctx))
 }
 
-func (cc CachedConn) QueryCtx(ctx context.Context, v interface{}, key string, query QueryCtxFn) (err error) {
+// QueryCtx fills v from the cache entry key, or on a miss by running query
+// and caching its result; a query that finds no record is remembered for
+// the not-found expiry, so repeated lookups of a missing key stay off the
+// database. Redis failures fall back to the database, and so does every
+// read inside a transaction, which must see the transaction's own writes.
+func (cc CachedConn) QueryCtx(ctx context.Context, v any, key string, query QueryCtxFn) (err error) {
 	// A transaction must always read through its GORM connection. Reading Redis
 	// here could return a value from before an earlier write in the same
 	// transaction, violating read-your-writes semantics.
@@ -230,16 +211,11 @@ func (cc CachedConn) QueryCtx(ctx context.Context, v interface{}, key string, qu
 }
 
 // QueryNoCacheCtx runs query with given sql statement, without affecting cache.
-func (cc CachedConn) QueryNoCacheCtx(ctx context.Context, v interface{}, query QueryCtxFn) (err error) {
+func (cc CachedConn) QueryNoCacheCtx(ctx context.Context, v any, query QueryCtxFn) (err error) {
 	return query(cc.db.WithContext(ctx), v)
 }
 
 // TransactCtx runs given fn in transaction mode.
 func (cc CachedConn) TransactCtx(ctx context.Context, fn func(db *gorm.DB) error, opts ...*sql.TxOptions) error {
 	return cc.db.WithContext(ctx).Transaction(fn, opts...)
-}
-
-// Transact runs given fn in transaction mode.
-func (cc CachedConn) Transact(fn func(db *gorm.DB) error, opts ...*sql.TxOptions) error {
-	return cc.TransactCtx(context.Background(), fn, opts...)
 }

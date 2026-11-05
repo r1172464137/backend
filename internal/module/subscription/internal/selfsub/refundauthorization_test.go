@@ -2,235 +2,108 @@ package selfsub
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
-	usermodel "github.com/perfect-panel/server/internal/module/identity/entity/user"
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
+	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
-	"github.com/perfect-panel/server/internal/repository"
-	"github.com/perfect-panel/server/pkg/logger/logtest"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-// fakeUserRepo embeds repository.UserRepo (nil) so any unexpected
-// method call panics immediately (fail-fast).
-type fakeUserRepo struct {
-	repository.UserRepo
-	repository.UserSubscriptionRepo
-
-	findOneSubscribeFn    func(context.Context, int64) (*usersub.Subscribe, error)
-	findOneSubscribeCalls int
-
-	findOneUserSubscribeFn    func(context.Context, int64) (*usersub.SubscribeDetails, error)
-	findOneUserSubscribeCalls int
-}
-
-func (r *fakeUserRepo) FindOneSubscribe(ctx context.Context, id int64) (*usersub.Subscribe, error) {
-	r.findOneSubscribeCalls++
-	if r.findOneSubscribeFn != nil {
-		return r.findOneSubscribeFn(ctx, id)
-	}
-	panic("fakeUserRepo: unexpected call to FindOneSubscribe")
-}
-
-func (r *fakeUserRepo) FindOneUserSubscribe(ctx context.Context, id int64) (*usersub.SubscribeDetails, error) {
-	r.findOneUserSubscribeCalls++
-	if r.findOneUserSubscribeFn != nil {
-		return r.findOneUserSubscribeFn(ctx, id)
-	}
-	panic("fakeUserRepo: unexpected call to FindOneUserSubscribe")
-}
-
-// fakeStore embeds repository.Store (nil) so any unexpected method
-// call panics immediately.
-type fakeStore struct {
-	repository.Store
-	uRepo *fakeUserRepo
-	inbox *fakeInboxRepo
-}
-
-func (s *fakeStore) Inbox() repository.InboxRepo {
-	if s.inbox == nil {
-		s.inbox = newFakeInboxRepo()
-	}
-	return s.inbox
-}
-
-func (s *fakeStore) InSubscriptionTx(_ context.Context, fn func(repository.SubscriptionStore) error) error {
-	return fn(s)
-}
-
-func (s *fakeStore) InBillingTx(_ context.Context, fn func(repository.BillingStore) error) error {
-	return fn(s)
-}
-
-// The auth-gate tests never reach the refund; a nil embed panics if they do.
-func (s *fakeStore) Wallet() repository.WalletRepo { return fakeWalletRepo{} }
-
-type fakeWalletRepo struct{ repository.WalletRepo }
-
-func (s *fakeStore) User() repository.UserRepo { return s.uRepo }
-func (s *fakeStore) UserSubscription() repository.UserSubscriptionRepo {
-	return s.uRepo
-}
-
-func newFakeDeps(uRepo *fakeUserRepo) Deps {
-	store := &fakeStore{uRepo: uRepo}
-	return Deps{
-		UserSubs: uRepo,
-		Users:    uRepo,
-		Inbox:    store.Inbox(),
-		Store:    store,
-	}
-}
-
-// errCode extracts the xerr.CodeError from the wrapped error chain.
-func errCode(t *testing.T, err error) uint32 {
+// assertUntouched fails when a refused request changed the subscription or
+// started either cancellation stage.
+func (f *fixture) assertUntouched(t *testing.T, sub *usersub.Subscribe) {
 	t.Helper()
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if got := f.Load(t, sub.Id); got.Status != sub.Status {
+		t.Fatalf("status = %d, want %d", got.Status, sub.Status)
 	}
-	var ce *xerr.CodeError
-	if !errors.As(errors.Cause(err), &ce) {
-		t.Fatalf("expected *xerr.CodeError in chain, got %T", err)
+	if _, ok := f.cancelMarker(t, sub.Id); ok {
+		t.Fatalf("a refused request wrote the %s marker", unsubscribeCancelConsumer)
 	}
-	return ce.GetErrCode()
-}
-
-// ---------------------------------------------------------------------------
-// PreUnsubscribe – authorization-gate tests
-// ---------------------------------------------------------------------------
-
-func TestPreUnsubscribe_WrongOwner_ReturnsInvalidAccess(t *testing.T) {
-	logtest.Discard(t)
-
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyUser, &usermodel.User{Id: 100})
-	const subID int64 = 200
-
-	u := &fakeUserRepo{
-		findOneSubscribeFn: func(_ context.Context, id int64) (*usersub.Subscribe, error) {
-			if id != subID {
-				t.Fatalf("FindOneSubscribe: got id %d, want %d", id, subID)
-			}
-			return &usersub.Subscribe{Id: subID, UserId: 200}, nil
-		},
-	}
-
-	logic := newPreUnsubscribeLogic(ctx, newFakeDeps(u))
-	resp, err := logic.PreUnsubscribe(&dto.PreUnsubscribeRequest{Id: subID})
-
-	if code := errCode(t, err); code != xerr.InvalidAccess {
-		t.Fatalf("code = %d, want %d (InvalidAccess)", code, xerr.InvalidAccess)
-	}
-	if resp != nil {
-		t.Fatalf("resp = %+v, want nil", resp)
-	}
-	if u.findOneSubscribeCalls != 1 {
-		t.Fatalf("FindOneSubscribe called %d time(s), want 1", u.findOneSubscribeCalls)
-	}
-	if u.findOneUserSubscribeCalls != 0 {
-		t.Fatalf("FindOneUserSubscribe called %d time(s), want 0", u.findOneUserSubscribeCalls)
+	if len(f.refunds.requests) != 0 {
+		t.Fatalf("a refused request settled refunds: %+v", f.refunds.requests)
 	}
 }
 
-func TestPreUnsubscribe_OwnerBypassesAuthGate(t *testing.T) {
-	logtest.Discard(t)
-
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyUser, &usermodel.User{Id: 100})
-	const subID int64 = 100
-
-	u := &fakeUserRepo{
-		findOneSubscribeFn: func(_ context.Context, id int64) (*usersub.Subscribe, error) {
-			if id != subID {
-				t.Fatalf("FindOneSubscribe: got id %d, want %d", id, subID)
-			}
-			return &usersub.Subscribe{Id: subID, UserId: 100}, nil
-		},
-		findOneUserSubscribeFn: func(_ context.Context, id int64) (*usersub.SubscribeDetails, error) {
-			return nil, errors.New("simulated FindOneUserSubscribe failure")
-		},
+// Only the owner may quote or cancel a subscription.
+func TestUnsubscribeIsForTheOwner(t *testing.T) {
+	f := newFixture(t)
+	sub := f.paidSubscription(t)
+	for name, ctx := range map[string]context.Context{"another user": as(refundBuyer + 1), "anonymous": context.Background()} {
+		if _, err := f.svc.PreUnsubscribe(ctx, &dto.PreUnsubscribeRequest{Id: sub.Id}); xerr.CodeOf(err) != xerr.InvalidAccess {
+			t.Fatalf("%s: PreUnsubscribe = %v, want InvalidAccess", name, err)
+		}
+		if err := f.svc.Unsubscribe(ctx, &dto.UnsubscribeRequest{Id: sub.Id}); xerr.CodeOf(err) != xerr.InvalidAccess {
+			t.Fatalf("%s: Unsubscribe = %v, want InvalidAccess", name, err)
+		}
 	}
+	f.assertUntouched(t, sub)
+}
 
-	logic := newPreUnsubscribeLogic(ctx, newFakeDeps(u))
-	resp, err := logic.PreUnsubscribe(&dto.PreUnsubscribeRequest{Id: subID})
+// A provider-managed subscription is cancelled through its provider, and one
+// that already ended has nothing left to cancel.
+func TestUnsubscribeRefusesProviderManagedAndEndedSubscriptions(t *testing.T) {
+	f := newFixture(t)
+	f.Plan(t, subscribe.Subscribe{Id: refundPlan})
+	future := time.Now().Add(24 * time.Hour)
+	provider := f.Subscription(t, usersub.Subscribe{UserId: refundBuyer, SubscribeId: refundPlan, ExpireTime: future, Status: usersub.SubscribeStatusActive, EntitlementSource: "apple"})
+	ended := f.Subscription(t, usersub.Subscribe{UserId: refundBuyer, SubscribeId: refundPlan, Status: usersub.SubscribeStatusExpired})
+	stopped := f.Subscription(t, usersub.Subscribe{UserId: refundBuyer, SubscribeId: refundPlan, ExpireTime: future, Status: usersub.SubscribeStatusStopped})
+	ctx := as(refundBuyer)
 
-	if code := errCode(t, err); code == xerr.InvalidAccess {
-		t.Fatal("got InvalidAccess – auth gate should not have blocked the owner")
+	if _, err := f.svc.PreUnsubscribe(ctx, &dto.PreUnsubscribeRequest{Id: provider.Id}); !errors.Is(err, usersub.ErrProviderManaged) {
+		t.Fatalf("provider quote = %v", err)
 	}
-	if resp != nil {
-		t.Fatalf("resp = %+v, want nil (expected downstream error)", resp)
+	if err := f.svc.Unsubscribe(ctx, &dto.UnsubscribeRequest{Id: provider.Id}); !errors.Is(err, usersub.ErrProviderManaged) {
+		t.Fatalf("provider cancellation = %v", err)
 	}
-	if u.findOneSubscribeCalls != 1 {
-		t.Fatalf("FindOneSubscribe called %d time(s), want 1", u.findOneSubscribeCalls)
+	for _, sub := range []*usersub.Subscribe{ended, stopped} {
+		if err := f.svc.Unsubscribe(ctx, &dto.UnsubscribeRequest{Id: sub.Id}); !errors.Is(err, errNotCancelable) {
+			t.Fatalf("cancelling status %d = %v, want errNotCancelable", sub.Status, err)
+		}
 	}
-	if u.findOneUserSubscribeCalls != 1 {
-		t.Fatalf("FindOneUserSubscribe called %d time(s), want 1", u.findOneUserSubscribeCalls)
+	// A Deducted subscription without a cancellation marker was not deducted
+	// by a cancellation: there is no refund to resume.
+	deducted := f.Subscription(t, usersub.Subscribe{UserId: refundBuyer, SubscribeId: refundPlan, Status: usersub.SubscribeStatusDeducted})
+	if err := f.svc.Unsubscribe(ctx, &dto.UnsubscribeRequest{Id: deducted.Id}); !errors.Is(err, errNotCancelable) {
+		t.Fatalf("cancelling a deducted subscription = %v, want errNotCancelable", err)
+	}
+	for _, sub := range []*usersub.Subscribe{provider, ended, stopped, deducted} {
+		f.assertUntouched(t, sub)
+	}
+	if err := f.svc.Unsubscribe(ctx, &dto.UnsubscribeRequest{Id: 404}); xerr.CodeOf(err) != xerr.DatabaseQueryError {
+		t.Fatalf("cancelling a missing subscription = %v", err)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Unsubscribe – authorization-gate tests
-// ---------------------------------------------------------------------------
-
-func TestUnsubscribe_WrongOwner_ReturnsInvalidAccess(t *testing.T) {
-	logtest.Discard(t)
-
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyUser, &usermodel.User{Id: 100})
-	const subID int64 = 200
-
-	u := &fakeUserRepo{
-		findOneSubscribeFn: func(_ context.Context, id int64) (*usersub.Subscribe, error) {
-			if id != subID {
-				t.Fatalf("FindOneSubscribe: got id %d, want %d", id, subID)
-			}
-			return &usersub.Subscribe{Id: subID, UserId: 200, Status: 1}, nil
-		},
+// A plan deleted after the purchase takes its refund rules with it: quoting
+// or cancelling reports that instead of dereferencing the missing plan.
+func TestUnsubscribeRefusesSubscriptionsWhosePlanIsGone(t *testing.T) {
+	f := newFixture(t)
+	sub := f.paidSubscription(t)
+	if err := f.DB.Delete(&subscribe.Subscribe{}, refundPlan).Error; err != nil {
+		t.Fatal(err)
 	}
-
-	logic := newUnsubscribeLogic(ctx, newFakeDeps(u))
-	err := logic.Unsubscribe(&dto.UnsubscribeRequest{Id: subID})
-
-	if code := errCode(t, err); code != xerr.InvalidAccess {
-		t.Fatalf("code = %d, want %d (InvalidAccess)", code, xerr.InvalidAccess)
+	if _, err := f.svc.PreUnsubscribe(as(refundBuyer), &dto.PreUnsubscribeRequest{Id: sub.Id}); xerr.CodeOf(err) != xerr.SubscribeNotAvailable {
+		t.Fatalf("PreUnsubscribe = %v, want SubscribeNotAvailable", err)
 	}
-	if u.findOneSubscribeCalls != 1 {
-		t.Fatalf("FindOneSubscribe called %d time(s), want 1", u.findOneSubscribeCalls)
+	if err := f.svc.Unsubscribe(as(refundBuyer), &dto.UnsubscribeRequest{Id: sub.Id}); xerr.CodeOf(err) != xerr.SubscribeNotAvailable {
+		t.Fatalf("Unsubscribe = %v, want SubscribeNotAvailable", err)
 	}
-	if u.findOneUserSubscribeCalls != 0 {
-		t.Fatalf("FindOneUserSubscribe called %d time(s), want 0", u.findOneUserSubscribeCalls)
-	}
+	f.assertUntouched(t, sub)
 }
 
-func TestUnsubscribe_OwnerBypassesAuthGate(t *testing.T) {
-	logtest.Discard(t)
-
-	ctx := context.WithValue(context.Background(), requestctx.CtxKeyUser, &usermodel.User{Id: 100})
-	const subID int64 = 100
-
-	u := &fakeUserRepo{
-		findOneSubscribeFn: func(_ context.Context, id int64) (*usersub.Subscribe, error) {
-			if id != subID {
-				t.Fatalf("FindOneSubscribe: got id %d, want %d", id, subID)
-			}
-			return &usersub.Subscribe{Id: subID, UserId: 100, Status: 1}, nil
-		},
-		findOneUserSubscribeFn: func(_ context.Context, id int64) (*usersub.SubscribeDetails, error) {
-			return nil, errors.New("simulated FindOneUserSubscribe failure")
-		},
+// A plan row whose deduction flag was never set allows no deduction.
+func TestUnsubscribeRefusesPlansWithoutADeductionFlag(t *testing.T) {
+	f := newFixture(t)
+	sub := f.paidSubscription(t)
+	if err := f.DB.Model(&subscribe.Subscribe{}).Where("id = ?", refundPlan).Update("allow_deduction", nil).Error; err != nil {
+		t.Fatal(err)
 	}
-
-	logic := newUnsubscribeLogic(ctx, newFakeDeps(u))
-	err := logic.Unsubscribe(&dto.UnsubscribeRequest{Id: subID})
-
-	if code := errCode(t, err); code == xerr.InvalidAccess {
-		t.Fatal("got InvalidAccess – auth gate should not have blocked the owner")
+	if _, err := f.svc.PreUnsubscribe(as(refundBuyer), &dto.PreUnsubscribeRequest{Id: sub.Id}); xerr.CodeOf(err) != xerr.SubscribeNotAvailable {
+		t.Fatalf("PreUnsubscribe = %v, want SubscribeNotAvailable", err)
 	}
-	if u.findOneSubscribeCalls != 1 {
-		t.Fatalf("FindOneSubscribe called %d time(s), want 1", u.findOneSubscribeCalls)
-	}
-	if u.findOneUserSubscribeCalls != 1 {
-		t.Fatalf("FindOneUserSubscribe called %d time(s), want 1", u.findOneUserSubscribeCalls)
-	}
+	f.assertUntouched(t, sub)
 }

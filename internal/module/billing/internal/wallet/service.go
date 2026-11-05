@@ -1,15 +1,27 @@
-// Package wallet implements the user-facing wallet subdomain of the billing
-// module: commission withdrawal, balance/commission statements and the
-// affiliate earnings overview. Only the module facade may reach it.
+// Package wallet implements the wallet subdomain of the billing module: the
+// user-facing commission withdrawal, balance/commission statements and
+// affiliate earnings overview, and the wallet reads and money movements
+// other modules request from billing (ADR-001 rules 2 and 4) — the
+// administrator's wallet edits, cancellation refunds and quota-task gifts,
+// each committed in a billing transaction of its own. Only the module facade
+// may reach it.
 package wallet
 
 import (
 	"context"
 
-	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
+	"github.com/perfect-panel/server/internal/module/platform/entity/log"
 	"github.com/perfect-panel/server/internal/repository"
 )
+
+// LogReader is the read side of the audit log the statements and the
+// affiliate overview show: the user's balance and commission entries and the
+// net commission they add up to.
+type LogReader interface {
+	FilterSystemLog(ctx context.Context, filter *log.FilterParams) ([]*log.SystemLog, int64, error)
+	SumAmountByTypeAndObjectID(ctx context.Context, typ uint8, objectID int64) (int64, error)
+}
 
 // Transactor mirrors the facade's billing-scoped transaction port.
 type Transactor interface {
@@ -31,15 +43,33 @@ type AuthMethodReader interface {
 	FindUserAuthMethods(ctx context.Context, userId int64) ([]*user.AuthMethods, error)
 }
 
+// ProfileReader is the read-only identity port resolving the referrer a
+// refund takes the commission back from.
+type ProfileReader interface {
+	FindOne(ctx context.Context, id int64) (*user.User, error)
+}
+
+// Store is the persistence the movements other modules request need: the
+// billing-scoped transactions, the wallet view for plain reads and the inbox
+// holding the movements' idempotency markers.
+type Store interface {
+	Transactor
+	Inbox() repository.InboxRepo
+	Wallet() repository.WalletRepo
+}
+
 // Deps declares the subdomain's dependencies; the module facade forwards
 // them from the composition root.
 type Deps struct {
-	Logs        repository.LogRepo
+	Logs        LogReader
 	Withdrawals repository.UserWithdrawalRepo
-	Cache       repository.UserCacheRepo
 	Affiliates  AffiliateReader
 	AuthMethods AuthMethodReader
 	Tx          Transactor
+	// Store and Profiles serve the reads and movements other modules
+	// request.
+	Store    Store
+	Profiles ProfileReader
 }
 
 // Service is the wallet subdomain entry point used by the billing facade.
@@ -49,36 +79,4 @@ type Service struct {
 
 func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
-}
-
-func (s *Service) CommissionWithdraw(ctx context.Context, req *dto.CommissionWithdrawRequest) (*dto.WithdrawalLog, error) {
-	return newCommissionWithdrawLogic(ctx, s.deps).CommissionWithdraw(req)
-}
-
-func (s *Service) QueryUserBalanceLog(ctx context.Context) (*dto.QueryUserBalanceLogListResponse, error) {
-	return newQueryUserBalanceLogLogic(ctx, s.deps).QueryUserBalanceLog()
-}
-
-func (s *Service) QueryUserCommissionLog(ctx context.Context, req *dto.QueryUserCommissionLogListRequest) (*dto.QueryUserCommissionLogListResponse, error) {
-	return newQueryUserCommissionLogLogic(ctx, s.deps).QueryUserCommissionLog(req)
-}
-
-func (s *Service) QueryWithdrawalLog(ctx context.Context, req *dto.QueryWithdrawalLogListRequest) (*dto.QueryWithdrawalLogListResponse, error) {
-	return newQueryWithdrawalLogLogic(ctx, s.deps).QueryWithdrawalLog(req)
-}
-
-func (s *Service) GetWithdrawalList(ctx context.Context, req *dto.GetWithdrawalListRequest) (*dto.GetWithdrawalListResponse, error) {
-	return newWithdrawalAdminLogic(ctx, s.deps).GetWithdrawalList(req)
-}
-
-func (s *Service) ReviewWithdrawal(ctx context.Context, req *dto.ReviewWithdrawalRequest) error {
-	return newWithdrawalAdminLogic(ctx, s.deps).ReviewWithdrawal(req)
-}
-
-func (s *Service) QueryUserAffiliate(ctx context.Context) (*dto.QueryUserAffiliateCountResponse, error) {
-	return newQueryUserAffiliateLogic(ctx, s.deps).QueryUserAffiliate()
-}
-
-func (s *Service) QueryUserAffiliateList(ctx context.Context, req *dto.QueryUserAffiliateListRequest) (*dto.QueryUserAffiliateListResponse, error) {
-	return newQueryUserAffiliateListLogic(ctx, s.deps).QueryUserAffiliateList(req)
 }

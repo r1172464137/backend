@@ -9,25 +9,11 @@ import (
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/slicesx"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type CreateSubscribeLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// NewCreateSubscribeLogic Create subscribe
-func newCreateSubscribeLogic(ctx context.Context, deps Deps) *CreateSubscribeLogic {
-	return &CreateSubscribeLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *CreateSubscribeLogic) CreateSubscribe(req *dto.CreateSubscribeRequest) error {
+// CreateSubscribe stores a new plan after validating its configuration; it
+// is sorted after the existing plans.
+func (s *Service) CreateSubscribe(ctx context.Context, req *dto.CreateSubscribeRequest) error {
 	if err := validateSubscribeInput(req.UnitTime, req.UnitPrice, req.Replacement, req.Inventory, req.Traffic, req.SpeedLimit, req.DeviceLimit, req.Quota, req.DeductionRatio, req.ResetCycle, req.Discount); err != nil {
 		return err
 	}
@@ -61,10 +47,10 @@ func (l *CreateSubscribeLogic) CreateSubscribe(req *dto.CreateSubscribeRequest) 
 		RenewalReset:      req.RenewalReset,
 		ShowOriginalPrice: req.ShowOriginalPrice,
 	}
-	err := l.deps.Plans.Insert(l.ctx, sub)
+	err := s.deps.Plans.Insert(ctx, sub)
 	if err != nil {
-		l.Logger.Error("[CreateSubscribeLogic] create subscribe error: ", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "create subscribe error: %v", err.Error())
+		logger.WithContext(ctx).Error("[CreateSubscribeLogic] create subscribe error: ", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseInsertError, "create subscribe error: %v", err.Error())
 	}
 
 	return nil

@@ -8,9 +8,9 @@
 //     import of another module's internals. Only the facade, contract,
 //     integration-event, entity and transport packages are importable from
 //     outside; transport remains an inbound adapter, never a module dependency.
-//  2. This test: freezes the pre-existing cross-package coupling in the legacy
-//     internal/logic tree and keeps new module packages free of legacy
-//     dependencies while domains are migrated.
+//  2. These tests: the directory layout, the dependency direction between the
+//     shared layers, the composition root and the modules, and the ownership
+//     rules the compiler cannot see.
 package arch
 
 import (
@@ -24,12 +24,6 @@ import (
 )
 
 const importPrefix = "github.com/perfect-panel/server/"
-
-// legacyLogicImports is the frozen baseline of cross-package imports inside
-// internal/logic, keyed by importer directory. Removing an edge here is always
-// welcome; adding one requires updating docs/design/adr-001-modular-monolith.md, as
-// each new edge makes the future module split harder.
-var legacyLogicImports = map[string][]string{}
 
 // appImporters is the closed composition-root boundary. Only cmd may import
 // internal/app to build the application; every runtime consumer receives a
@@ -117,7 +111,7 @@ var skippedDirs = map[string]bool{
 }
 
 type goFile struct {
-	dir     string // repo-relative package directory, e.g. "internal/logic/auth"
+	dir     string // repo-relative package directory, e.g. "internal/module/billing/internal/checkout"
 	path    string // repo-relative file path, for error messages
 	imports []string
 }
@@ -177,52 +171,19 @@ func within(pkg, dir string) bool {
 	return pkg == dir || strings.HasPrefix(pkg, dir+"/")
 }
 
-func allowedLegacyEdge(importer, imported string) bool {
-	for _, allowed := range legacyLogicImports[importer] {
-		if imported == allowed {
-			return true
-		}
-	}
-	return false
-}
-
-// TestLogicImportFreeze forbids new cross-package imports inside the legacy
-// internal/logic tree. Same-domain imports (parent/child packages) are always
-// fine; anything else must be in the frozen baseline above.
-func TestLogicImportFreeze(t *testing.T) {
-	for _, f := range collectGoFiles(t) {
-		if !within(f.dir, "internal/logic") {
-			continue
-		}
-		for _, imp := range f.imports {
-			if !within(imp, "internal/logic") {
-				continue
-			}
-			if within(f.dir, imp) || within(imp, f.dir) {
-				continue
-			}
-			if allowedLegacyEdge(f.dir, imp) {
-				continue
-			}
-			t.Errorf("%s: new cross-package logic import %q — move the shared code into the owning module (see docs/design/adr-001-modular-monolith.md) instead of coupling logic packages", f.path, imp)
-		}
-	}
-}
-
-// TestModulePurity keeps internal/module packages free of the legacy god
-// object and legacy logic tree: modules receive dependencies via their facade
-// constructors, never by reaching back into application assembly or logic.
+// TestModulePurity keeps modules independent of the composition root:
+// modules receive dependencies via their facade constructors, never by
+// reaching back into application assembly. (The removed legacy trees,
+// internal/svc and internal/logic, cannot return: TestInternalLayout fixes
+// the internal root directories.)
 func TestModulePurity(t *testing.T) {
 	for _, f := range collectGoFiles(t) {
 		if !within(f.dir, "internal/module") {
 			continue
 		}
 		for _, imp := range f.imports {
-			if within(imp, "internal/svc") || (within(imp, "internal/app") && imp != "internal/app/buildinfo") {
+			if within(imp, "internal/app") && imp != "internal/app/buildinfo" {
 				t.Errorf("%s: module code must not import application assembly; declare the dependency on the module facade constructor instead", f.path)
-			}
-			if within(imp, "internal/logic") {
-				t.Errorf("%s: module code must not import legacy internal/logic packages; migrate the logic into the module", f.path)
 			}
 		}
 	}
@@ -255,24 +216,6 @@ func TestModulesDoNotDependOnFullStore(t *testing.T) {
 			}
 			if id, ok := selector.X.(*ast.Ident); ok && id.Name == repositoryAlias {
 				t.Errorf("%s: module depends on repository.Store; define a consumer-owned capability instead", f.path)
-			}
-			return true
-		})
-	}
-}
-
-func TestTasksDoNotOwnIdentityTransactions(t *testing.T) {
-	for _, f := range collectGoFiles(t) {
-		if !within(f.dir, "internal/transport/task") || strings.HasSuffix(f.path, "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join("..", "..", f.path), nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ast.Inspect(file, func(node ast.Node) bool {
-			if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "InIdentityTx" {
-				t.Errorf("%s: task adapter owns an identity transaction; invoke an identity business capability instead", f.path)
 			}
 			return true
 		})
@@ -449,6 +392,18 @@ func TestLegacyHandlerTreeRemoved(t *testing.T) {
 			if within(imp, "internal/handler") {
 				t.Errorf("%s: legacy handler import %q", f.path, imp)
 			}
+		}
+	}
+}
+
+// TestGoFileNamesAreLowercase keeps the one naming style the tree was
+// normalized to: Go files and their directories are lowercase snake_case, as
+// the Go toolchain's own names are. The camelCase names the code generator
+// used to write mixed with them.
+func TestGoFileNamesAreLowercase(t *testing.T) {
+	for _, f := range collectGoFiles(t) {
+		if strings.ToLower(f.path) != f.path {
+			t.Errorf("%s: name Go files and directories in lowercase snake_case", f.path)
 		}
 	}
 }

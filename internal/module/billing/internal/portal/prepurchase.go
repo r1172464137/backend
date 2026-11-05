@@ -2,83 +2,31 @@ package portal
 
 import (
 	"context"
-	"encoding/json"
-	"slices"
 
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
-	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/slicesx"
+	"github.com/perfect-panel/server/internal/module/billing/internal/checkout"
+	"github.com/perfect-panel/server/internal/module/billing/internal/pricing"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
-	"gorm.io/gorm"
 )
 
-// PrePurchase calculates the guest order pricing preview without creating an
-// order.
+// PrePurchase previews the price of a guest order without creating it. A
+// guest holds no gift credit, so the preview prices exactly like Purchase.
 func (s *Service) PrePurchase(ctx context.Context, req *dto.PrePurchaseOrderRequest) (*dto.PrePurchaseOrderResponse, error) {
-	log := logger.WithContext(ctx)
-	// find subscribe plan
-	sub, err := s.deps.Plans.FindOne(ctx, req.SubscribeId)
+	plan, err := s.deps.Plans.FindOne(ctx, req.SubscribeId)
 	if err != nil {
-		log.Errorw("[PreCreateOrder] Database query error", logger.Field("error", err.Error()), logger.Field("subscribe_id", req.SubscribeId))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find subscribe error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find subscribe %d", req.SubscribeId)
 	}
-	var discount float64 = 1
-	if sub.Discount != "" {
-		var dis []dto.BillingSubscribeDiscount
-		_ = json.Unmarshal([]byte(sub.Discount), &dis)
-		discount = getDiscount(dis, req.Quantity)
+	terms, err := checkout.ResolvePlanTerms(ctx, s.deps.Coupons, s.deps.Payments, plan, req.Quantity, req.Coupon, req.Payment)
+	if err != nil {
+		return nil, err
 	}
-	price := sub.UnitPrice * req.Quantity
-	amount := int64(float64(price) * discount)
-	discountAmount := price - amount
-	var coupon int64
-	if req.Coupon != "" {
-		couponInfo, err := s.deps.Coupons.FindOneByCode(ctx, req.Coupon)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errors.Wrapf(xerr.NewErrCode(xerr.CouponNotExist), "coupon not found")
-			}
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find coupon error: %v", err.Error())
-		}
-		if err := ensureCouponEnabled(couponInfo); err != nil {
-			return nil, err
-		}
-		if couponInfo.Count != 0 && couponInfo.Count <= couponInfo.UsedCount {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.CouponInsufficientUsage), "coupon used")
-		}
-		subs := slicesx.StringToInt64Slice(couponInfo.Subscribe)
-
-		if len(subs) > 0 && !slices.Contains(subs, req.SubscribeId) {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.CouponNotApplicable), "coupon not match")
-		}
-
-		coupon = calculateCoupon(amount, couponInfo)
-	}
-	amount -= coupon
-	var feeAmount int64
-	if req.Payment != 0 {
-		payment, err := s.deps.Payments.FindOne(ctx, req.Payment)
-		if err != nil {
-			log.Errorw("[PreCreateOrder] Database query error", logger.Field("error", err.Error()), logger.Field("payment", req.Payment))
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find payment method error: %v", err.Error())
-		}
-		if err := ensurePaymentAvailable(payment); err != nil {
-			return nil, err
-		}
-		// Calculate the handling fee
-		if amount > 0 {
-			feeAmount = calculateFee(amount, payment)
-		}
-		amount += feeAmount
-	}
-
+	quote := pricing.Compute(terms.Input(0))
 	return &dto.PrePurchaseOrderResponse{
-		Price:          price,
-		Amount:         amount,
-		Discount:       discountAmount,
+		Price:          quote.Price,
+		Amount:         quote.Amount,
+		Discount:       quote.Discount,
 		Coupon:         req.Coupon,
-		CouponDiscount: coupon,
-		FeeAmount:      feeAmount,
+		CouponDiscount: quote.CouponDiscount,
+		FeeAmount:      quote.FeeAmount,
 	}, nil
 }

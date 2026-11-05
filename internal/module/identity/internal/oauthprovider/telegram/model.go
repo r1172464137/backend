@@ -17,7 +17,7 @@ type AuthData struct {
 
 	// raw keeps every field of the signed payload, including ones this
 	// struct does not model, because Telegram's hash covers all of them.
-	raw map[string]interface{}
+	raw map[string]any
 }
 
 // Validate checks the hash of AuthData with computed one. To compute hash botToken is required.

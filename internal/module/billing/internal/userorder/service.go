@@ -1,20 +1,19 @@
 // Package userorder implements the user-facing order query subdomain of the
-// billing module (the checkout flows join as migration proceeds). Only the
-// module facade may reach it.
+// billing module. Only the module facade may reach it.
 package userorder
 
 import (
 	"context"
+	"errors"
 
 	"github.com/perfect-panel/server/internal/infra/mapping"
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
+	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	subscribeEntity "github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
+	"gorm.io/gorm"
 )
 
 // PlanReader is the subdomain's read-only port onto the subscription
@@ -25,21 +24,27 @@ type PlanReader interface {
 	FindOne(ctx context.Context, id int64) (*subscribeEntity.Subscribe, error)
 }
 
+// Orders reads the current user's orders.
+type Orders interface {
+	FindOneDetailsByOrderNo(ctx context.Context, orderNo string) (*order.Details, error)
+	QueryOrderListByPage(ctx context.Context, page, size int, status uint8, user, subscribe int64, search string) (int64, []*order.Details, error)
+}
+
 type Service struct {
-	orders repository.OrderRepo
+	orders Orders
 	plans  PlanReader
 }
 
-func NewService(orders repository.OrderRepo, plans PlanReader) *Service {
+func NewService(orders Orders, plans PlanReader) *Service {
 	return &Service{orders: orders, plans: plans}
 }
 
 // attachPlan fills the detail's plan fields from the subscription domain.
 // A missing plan (deleted, or a recharge order without one) leaves the
 // zero value, matching the former SQL association's behaviour.
-func (s *Service) attachPlan(ctx context.Context, detail *dto.OrderDetail, cache map[int64]*subscribeEntity.Subscribe) {
+func (s *Service) attachPlan(ctx context.Context, detail *dto.OrderDetail, cache map[int64]*subscribeEntity.Subscribe) error {
 	if detail.SubscribeId == 0 || s.plans == nil {
-		return
+		return nil
 	}
 	plan, cached := cache[detail.SubscribeId]
 	if !cached {
@@ -52,44 +57,61 @@ func (s *Service) attachPlan(ctx context.Context, detail *dto.OrderDetail, cache
 		}
 		cache[detail.SubscribeId] = plan
 	}
-	if plan != nil {
-		mapping.DeepCopy(&detail.Subscribe, plan)
+	if plan == nil {
+		return nil
 	}
+	if err := mapping.Copy(&detail.Subscribe, plan); err != nil {
+		return xerr.Wrapf(err, xerr.ERROR, "map subscribe %d of order %s", plan.Id, detail.OrderNo)
+	}
+	return nil
+}
+
+// orderDetail is what the buyer is shown of an order: the order with its
+// plan, never the referrer commission it earned.
+func (s *Service) orderDetail(ctx context.Context, orderInfo *order.Details, planCache map[int64]*subscribeEntity.Subscribe) (dto.OrderDetail, error) {
+	var detail dto.OrderDetail
+	if err := mapping.Copy(&detail, orderInfo); err != nil {
+		return dto.OrderDetail{}, xerr.Wrapf(err, xerr.ERROR, "map order %s", orderInfo.OrderNo)
+	}
+	if err := s.attachPlan(ctx, &detail, planCache); err != nil {
+		return dto.OrderDetail{}, err
+	}
+	detail.Commission = 0
+	return detail, nil
 }
 
 // QueryDetail returns one of the current user's orders; ownership is
 // enforced here and the referrer commission never leaves the module.
 func (s *Service) QueryDetail(ctx context.Context, req *dto.QueryOrderDetailRequest) (*dto.OrderDetail, error) {
-	currentUser, ok := ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok || currentUser == nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
+	currentUser, ok := user.FromContext(ctx)
+	if !ok {
+		return nil, xerr.Errorf(xerr.InvalidAccess, "Invalid Access")
 	}
 	orderInfo, err := s.orders.FindOneDetailsByOrderNo(ctx, req.OrderNo)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, xerr.Errorf(xerr.OrderNotExist, "order %s not found", req.OrderNo)
+	}
 	if err != nil {
-		logger.WithContext(ctx).Errorw("[QueryOrderDetail] Database query error", logger.Field("error", err.Error()), logger.Field("order_no", req.OrderNo))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find order error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find order %s", req.OrderNo)
 	}
 	if orderInfo.UserId != currentUser.Id {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "order does not belong to the current user")
+		return nil, xerr.Errorf(xerr.InvalidAccess, "order does not belong to the current user")
 	}
-	resp := &dto.OrderDetail{}
-	mapping.DeepCopy(resp, orderInfo)
-	s.attachPlan(ctx, resp, map[int64]*subscribeEntity.Subscribe{})
-	// Prevent commission amount leakage
-	resp.Commission = 0
-	return resp, nil
+	detail, err := s.orderDetail(ctx, orderInfo, map[int64]*subscribeEntity.Subscribe{})
+	if err != nil {
+		return nil, err
+	}
+	return &detail, nil
 }
 
 func (s *Service) QueryList(ctx context.Context, req *dto.QueryOrderListRequest) (*dto.QueryOrderListResponse, error) {
-	u, ok := ctx.Value(requestctx.CtxKeyUser).(*user.User)
+	u, ok := user.FromContext(ctx)
 	if !ok {
-		logger.Error("current user is not found in context")
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
+		return nil, xerr.Errorf(xerr.InvalidAccess, "Invalid Access")
 	}
 	total, data, err := s.orders.QueryOrderListByPage(ctx, req.Page, req.Size, 0, u.Id, 0, "")
 	if err != nil {
-		logger.WithContext(ctx).Errorw("[QueryOrderListLogic] Query order list failed", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Query order list failed")
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "query orders of user %d", u.Id)
 	}
 	resp := &dto.QueryOrderListResponse{
 		Total: total,
@@ -97,12 +119,11 @@ func (s *Service) QueryList(ctx context.Context, req *dto.QueryOrderListRequest)
 	}
 	planCache := map[int64]*subscribeEntity.Subscribe{}
 	for _, item := range data {
-		var orderInfo dto.OrderDetail
-		mapping.DeepCopy(&orderInfo, item)
-		s.attachPlan(ctx, &orderInfo, planCache)
-		// Prevent commission amount leakage
-		orderInfo.Commission = 0
-		resp.List = append(resp.List, orderInfo)
+		detail, err := s.orderDetail(ctx, item, planCache)
+		if err != nil {
+			return nil, err
+		}
+		resp.List = append(resp.List, detail)
 	}
 	return resp, nil
 }

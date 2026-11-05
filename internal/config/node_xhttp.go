@@ -300,6 +300,13 @@ func validateXHTTPSplit(v *xhttpSplit, mode string, depth int) error {
 	if v.Xmux.MaxConnections.To > 0 && v.Xmux.MaxConcurrency.To > 0 {
 		return fmt.Errorf("XHTTP xmux conflict")
 	}
+	if err := validateXHTTPSession(v); err != nil {
+		return err
+	}
+	return validateXHTTPNested(v, mode, depth)
+}
+
+func validateXHTTPSession(v *xhttpSplit) error {
 	if v.SessionIDTable != "" {
 		table := v.SessionIDTable
 		switch table {
@@ -333,6 +340,10 @@ func validateXHTTPSplit(v *xhttpSplit, mode string, depth int) error {
 			return fmt.Errorf("XHTTP session space too small")
 		}
 	}
+	return nil
+}
+
+func validateXHTTPNested(v *xhttpSplit, mode string, depth int) error {
 	if v.DownloadSettings != nil {
 		if mode == "stream-one" {
 			return fmt.Errorf("XHTTP stream-one cannot have download settings")
@@ -369,6 +380,16 @@ func validateXHTTPStream(v *xhttpStream, depth int) error {
 	default:
 		return fmt.Errorf("unsupported XHTTP download security")
 	}
+	if err := validateXHTTPDownloadTLS(v, security); err != nil {
+		return err
+	}
+	if err := validateXHTTPDownloadReality(v, security); err != nil {
+		return err
+	}
+	return validateXHTTPDownloadSettings(v, security, depth)
+}
+
+func validateXHTTPDownloadTLS(v *xhttpStream, security string) error {
 	if security == "tls" && len(bytes.TrimSpace(v.TLSSettings)) > 0 && !bytes.Equal(bytes.TrimSpace(v.TLSSettings), []byte("null")) {
 		var tls *xhttpTLS
 		if err := decodeXHTTP(v.TLSSettings, &tls); err != nil || tls == nil {
@@ -400,6 +421,10 @@ func validateXHTTPStream(v *xhttpStream, depth int) error {
 			}
 		}
 	}
+	return nil
+}
+
+func validateXHTTPDownloadReality(v *xhttpStream, security string) error {
 	if security == "reality" {
 		var reality *xhttpReality
 		if err := decodeXHTTP(v.RealitySettings, &reality); err != nil || reality == nil {
@@ -441,6 +466,10 @@ func validateXHTTPStream(v *xhttpStream, depth int) error {
 			return fmt.Errorf("unsupported XHTTP REALITY transport")
 		}
 	}
+	return nil
+}
+
+func validateXHTTPDownloadSettings(v *xhttpStream, security string, depth int) error {
 	for _, p := range []*xhttpPath{v.WSSettings, v.HTTPUpgradeSettings} {
 		if p != nil {
 			if err := ValidateNodeURI("download path", p.Path, false); err != nil {

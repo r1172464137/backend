@@ -75,8 +75,8 @@
                         </div>
                         <div>
                             <label for="adminPassword" id="labelAdminPassword" class="text-sm font-medium">Administrator Password</label>
-                            <input type="password" id="adminPassword" name="adminPassword" required minlength="6" class="input-field mt-1 block w-full rounded-md border px-3 py-2" placeholder="Enter administrator password" data-placeholder-en="Enter administrator password" data-placeholder-zh="请输入管理员密码" oninput="validateInput(this)">
-                            <span id="adminPasswordError" class="text-red-500 text-sm mt-1 hidden">Password must be at least 6 characters.</span>
+                            <input type="password" id="adminPassword" name="adminPassword" required minlength="8" class="input-field mt-1 block w-full rounded-md border px-3 py-2" placeholder="Enter administrator password" data-placeholder-en="Enter administrator password" data-placeholder-zh="请输入管理员密码" oninput="validateInput(this)">
+                            <span id="adminPasswordError" class="text-red-500 text-sm mt-1 hidden">Password must be at least 8 characters.</span>
                         </div>
                     </div>
                 </div>
@@ -236,7 +236,7 @@
             alreadyInitializedTitle: 'Already Initialized',
             alreadyInitializedMessage: 'Your PPanel application has already been initialized.',
             invalidEmail: 'Invalid email address.',
-            invalidPassword: 'Password must be at least 6 characters.',
+            invalidPassword: 'Password must be at least 8 characters.',
         },
         zh: {
             // 中文翻译内容
@@ -276,7 +276,7 @@
             alreadyInitializedTitle: '已初始化',
             alreadyInitializedMessage: '您的 PPanel 应用程序已被初始化。',
             invalidEmail: '无效的邮箱地址。',
-            invalidPassword: '密码至少需要6个字符。',
+            invalidPassword: '密码至少需要8个字符。',
         }
     };
 

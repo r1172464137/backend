@@ -34,7 +34,7 @@ func TestQueryFailsClosedForEnabledInvalidProtocols(t *testing.T) {
 		deps := Deps{Store: snapshotStore{node: repo}, ReadGlobalNodeConfig: func(context.Context) (config.NodeConfig, error) {
 			return config.NodeConfig{RoutingRevision: 1, Routing: &config.NodeRouting{Version: 1, Outbounds: []config.NodeOutbound{}, Rules: []config.NodeRoute{}, DefaultOutboundID: "direct"}}, nil
 		}}
-		if got, err := newQueryServerProtocolConfigLogic(context.Background(), deps).QueryServerProtocolConfig(&dto.QueryServerConfigRequest{ServerID: 1}); err == nil {
+		if got, err := NewService(deps).QueryServerProtocolConfig(context.Background(), &dto.QueryServerConfigRequest{ServerID: 1}); err == nil {
 			t.Fatalf("enabled invalid sanitized: %#v", got)
 		}
 	}
@@ -47,7 +47,7 @@ func TestQueryOneListenerToZeroEmitsArray(t *testing.T) {
 	}}
 	query := func() map[string]json.RawMessage {
 		t.Helper()
-		got, err := newQueryServerProtocolConfigLogic(context.Background(), deps).QueryServerProtocolConfig(&dto.QueryServerConfigRequest{ServerID: 1})
+		got, err := NewService(deps).QueryServerProtocolConfig(context.Background(), &dto.QueryServerConfigRequest{ServerID: 1})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -4,7 +4,9 @@ import (
 	"context"
 
 	walletEntity "github.com/perfect-panel/server/internal/module/billing/entity/wallet"
-	"gorm.io/gorm"
+	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
+	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 )
 
 // Domain store views (ADR-001 step 2). A scoped transaction hands the closure
@@ -14,11 +16,9 @@ import (
 // Inbox() because the idempotent-consumer markers must commit with the
 // domain's own mutations.
 
-// WalletRepo is the billing domain's window onto the user table's money
-// columns (Balance, GiftAmount, Commission). The columns living on the user
-// row is recorded data debt: ADR-001 step 5 moves them into a wallet table
-// owned by billing. Until then this view keeps wallet movements inside
-// billing transactions without exposing the rest of the identity repository.
+// WalletRepo is the billing domain's repository of the user_wallet table,
+// the single source of every account's balance, gift amount and commission.
+// Other modules read and move wallets through the billing facade.
 type WalletRepo interface {
 	// FindOneForUpdate locks and returns the wallet row, seeding it from a
 	// zero state when the account has none yet.
@@ -30,8 +30,8 @@ type WalletRepo interface {
 	FindWalletsByUserIds(ctx context.Context, userIds []int64) (map[int64]*walletEntity.Wallet, error)
 	// UpdateBalanceFields persists the balance and gift columns;
 	// UpdateCommission persists the commission column.
-	UpdateBalanceFields(ctx context.Context, data *walletEntity.Wallet, tx ...*gorm.DB) error
-	UpdateCommission(ctx context.Context, data *walletEntity.Wallet, tx ...*gorm.DB) error
+	UpdateBalanceFields(ctx context.Context, data *walletEntity.Wallet) error
+	UpdateCommission(ctx context.Context, data *walletEntity.Wallet) error
 }
 
 // BillingStore is the billing domain's transactional surface: orders,
@@ -51,6 +51,7 @@ type BillingStore interface {
 // SubscriptionStore is the subscription domain's transactional surface:
 // plans, user subscriptions and their traffic quota state.
 type SubscriptionStore interface {
+	Entitlement() EntitlementRepo
 	Subscribe() SubscribeRepo
 	UserSubscription() UserSubscriptionRepo
 	SubscriptionTraffic() SubscriptionTrafficRepo
@@ -82,14 +83,9 @@ type NetworkStore interface {
 }
 
 // PlatformStore is the platform domain's transactional surface: system
-// settings, scheduled-task bookkeeping and audit/message logs.
-type PlatformStore interface {
-	System() SystemRepo
-	Task() TaskRepo
-	Log() LogRepo
-	Inbox() InboxRepo
-	Outbox() OutboxRepo
-}
+// settings, scheduled-task bookkeeping and audit/message logs. It is the
+// shared kernel's, re-exported from the kernel package.
+type PlatformStore = kernel.PlatformStore
 
 // Transaction capabilities can be injected without granting the complete
 // application store or unrelated domain transactions.
@@ -112,6 +108,10 @@ type DeliverySnapshot interface {
 	Subscribe() SubscribeRepo
 	User() UserRepo
 	UserSubscription() UserSubscriptionRepo
+	// These scoped projections run on this same repeatable-read transaction.
+	RoutingPlans(context.Context, []int64, []string) ([]*subscribe.Subscribe, error)
+	RoutingSubscriptions(context.Context, []int64) ([]*usersub.Subscribe, error)
+	RoutingEnabledAccounts(context.Context, []int64) ([]int64, error)
 }
 
 type DeliverySnapshotTransactor interface {
@@ -122,9 +122,7 @@ type NetworkTransactor interface {
 	InNetworkTx(context.Context, func(NetworkStore) error) error
 }
 
-type PlatformTransactor interface {
-	InPlatformTx(context.Context, func(PlatformStore) error) error
-}
+type PlatformTransactor = kernel.PlatformTransactor
 
 // The full store satisfies every domain view; the scoped transactions below
 // hand out the narrowed interface.

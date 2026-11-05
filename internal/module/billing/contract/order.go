@@ -1,3 +1,7 @@
+// Package dto is the billing module's contract: the commands, queries and
+// results of its facade and HTTP handlers, and the billing-owned read-only
+// snapshots of other domains' data it returns. The package keeps the name dto
+// so the Swagger schema names (dto.*) stay as they were.
 package dto
 
 type CheckoutOrderRequest struct {
@@ -17,10 +21,15 @@ type CloseOrderRequest struct {
 	OrderNo string `json:"orderNo" validate:"required"`
 }
 
+// CreateOrderRequest is an administrator's order. Type is 1 (subscribe), 2
+// (renewal), 3 (reset traffic) or 4 (recharge); Quantity defaults to one
+// unit. A renewal or traffic reset names the user subscription it applies
+// to in UserSubscribeId. TradeNo is assigned by the gateway that collects the
+// payment and is not accepted here.
 type CreateOrderRequest struct {
 	UserId         int64  `json:"user_id" validate:"required"`
-	Type           uint8  `json:"type" validate:"required"`
-	Quantity       int64  `json:"quantity,omitempty" validate:"omitempty,lte=1000"`
+	Type           uint8  `json:"type" validate:"required,oneof=1 2 3 4"`
+	Quantity       int64  `json:"quantity,omitempty" validate:"omitempty,gte=1,lte=1000"`
 	Price          int64  `json:"price" validate:"required,gte=0,lte=2000000000"`
 	Amount         int64  `json:"amount" validate:"required,gte=0,lte=2147483647"`
 	Discount       int64  `json:"discount,omitempty" validate:"omitempty,gte=0,lte=2000000000"`
@@ -29,9 +38,14 @@ type CreateOrderRequest struct {
 	Commission     int64  `json:"commission" validate:"gte=0,lte=2000000000"`
 	FeeAmount      int64  `json:"fee_amount" validate:"required,gte=0,lte=2000000000"`
 	PaymentId      int64  `json:"payment_id" validate:"required"`
-	TradeNo        string `json:"trade_no,omitempty"`
-	Status         uint8  `json:"status,omitempty"`
-	SubscribeId    int64  `json:"subscribe_id,omitempty"`
+	// TradeNo is refused when set: the gateway assigns it when the order is
+	// paid, and Stripe and Cryptomus read it as their own payment identifier.
+	TradeNo     string `json:"trade_no,omitempty" validate:"omitempty,len=0"`
+	Status      uint8  `json:"status,omitempty"`
+	SubscribeId int64  `json:"subscribe_id,omitempty"`
+	// UserSubscribeId is the user subscription a renewal (type 2) or traffic
+	// reset (type 3) order applies to; required for those types.
+	UserSubscribeId int64 `json:"user_subscribe_id,omitempty" validate:"omitempty,gt=0"`
 }
 
 type GetOrderListRequest struct {
@@ -66,36 +80,46 @@ type Order struct {
 	TradeNo        string        `json:"trade_no"`
 	Status         uint8         `json:"status"`
 	SubscribeId    int64         `json:"subscribe_id"`
-	CreatedAt      int64         `json:"created_at"`
-	UpdatedAt      int64         `json:"updated_at"`
+	// UserSubscribeId is the user subscription a renewal or traffic reset
+	// order applies to; zero for other orders and for orders created before
+	// it was recorded.
+	UserSubscribeId int64 `json:"user_subscribe_id"`
+	CreatedAt       int64 `json:"created_at"`
+	UpdatedAt       int64 `json:"updated_at"`
 }
 
 type OrderDetail struct {
-	Id             int64                    `json:"id"`
-	UserId         int64                    `json:"user_id"`
-	OrderNo        string                   `json:"order_no"`
-	Type           uint8                    `json:"type"`
-	Quantity       int64                    `json:"quantity"`
-	Price          int64                    `json:"price"`
-	Amount         int64                    `json:"amount"`
-	GiftAmount     int64                    `json:"gift_amount"`
-	Discount       int64                    `json:"discount"`
-	Coupon         string                   `json:"coupon"`
-	CouponDiscount int64                    `json:"coupon_discount"`
-	Commission     int64                    `json:"commission,omitempty"`
-	Payment        PaymentMethod            `json:"payment"`
-	Method         string                   `json:"method"`
-	FeeAmount      int64                    `json:"fee_amount"`
-	TradeNo        string                   `json:"trade_no"`
-	Status         uint8                    `json:"status"`
-	SubscribeId    int64                    `json:"subscribe_id"`
-	Subscribe      BillingSubscribeSnapshot `json:"subscribe"`
-	CreatedAt      int64                    `json:"created_at"`
-	UpdatedAt      int64                    `json:"updated_at"`
+	Id             int64         `json:"id"`
+	UserId         int64         `json:"user_id"`
+	OrderNo        string        `json:"order_no"`
+	Type           uint8         `json:"type"`
+	Quantity       int64         `json:"quantity"`
+	Price          int64         `json:"price"`
+	Amount         int64         `json:"amount"`
+	GiftAmount     int64         `json:"gift_amount"`
+	Discount       int64         `json:"discount"`
+	Coupon         string        `json:"coupon"`
+	CouponDiscount int64         `json:"coupon_discount"`
+	Commission     int64         `json:"commission,omitempty"`
+	Payment        PaymentMethod `json:"payment"`
+	Method         string        `json:"method"`
+	FeeAmount      int64         `json:"fee_amount"`
+	TradeNo        string        `json:"trade_no"`
+	Status         uint8         `json:"status"`
+	SubscribeId    int64         `json:"subscribe_id"`
+	// UserSubscribeId is the user subscription a renewal or traffic reset
+	// order applies to; zero for other orders and for orders created before
+	// it was recorded.
+	UserSubscribeId int64                    `json:"user_subscribe_id"`
+	Subscribe       BillingSubscribeSnapshot `json:"subscribe"`
+	CreatedAt       int64                    `json:"created_at"`
+	UpdatedAt       int64                    `json:"updated_at"`
 }
 
+// PortalPurchaseRequest creates a guest order. AuthType is email or mobile; a
+// mobile identifier includes its country calling code.
 type PortalPurchaseRequest struct {
-	AuthType       string `json:"auth_type" validate:"required"`
+	AuthType       string `json:"auth_type" validate:"required" enums:"email,mobile"`
 	Identifier     string `json:"identifier" validate:"required"`
 	Password       string `json:"password" validate:"required,min=8,max=128"`
 	Payment        int64  `json:"payment" validate:"required,gt=0"`

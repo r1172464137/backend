@@ -1,31 +1,19 @@
 package repository
 
+import "github.com/perfect-panel/server/internal/repository/kernel"
+
+// The pagination helpers belong to the shared kernel; these re-export them.
 const (
-	DefaultPageSize = 20
-	MaxPageSize     = 100
+	DefaultPageSize = kernel.DefaultPageSize
+	MaxPageSize     = kernel.MaxPageSize
 )
 
 // NormalizePage clamps pagination inputs; module repo implementations share it.
 func NormalizePage(page, size int) (int, int) {
-	if page < 1 {
-		page = 1
-	}
-	if size < 1 {
-		size = DefaultPageSize
-	}
-	if size > MaxPageSize {
-		size = MaxPageSize
-	}
-	return page, size
+	return kernel.NormalizePage(page, size)
 }
 
 // NormalizePageFloor clamps pagination inputs without a minimum page size.
 func NormalizePageFloor(page, size int) (int, int) {
-	if page < 1 {
-		page = 1
-	}
-	if size < 1 {
-		size = DefaultPageSize
-	}
-	return page, size
+	return kernel.NormalizePageFloor(page, size)
 }

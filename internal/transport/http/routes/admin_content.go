@@ -10,8 +10,7 @@ import (
 )
 
 func registerAdminAdsRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/ads")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/ads")
 	group.POST("/", adminAds.CreateAdsHandler(deps.Support))
 	group.PUT("/", adminAds.UpdateAdsHandler(deps.Support))
 	group.DELETE("/", adminAds.DeleteAdsHandler(deps.Support))
@@ -20,8 +19,7 @@ func registerAdminAdsRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminAnnouncementRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/announcement")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/announcement")
 	group.POST("/", adminAnnouncement.CreateAnnouncementHandler(deps.Support))
 	group.PUT("/", adminAnnouncement.UpdateAnnouncementHandler(deps.Support))
 	group.DELETE("/", adminAnnouncement.DeleteAnnouncementHandler(deps.Support))
@@ -30,8 +28,7 @@ func registerAdminAnnouncementRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminApplicationRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/application")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/application")
 	group.POST("/", adminApplication.CreateSubscribeApplicationHandler(deps.Subscription))
 	group.GET("/preview", adminApplication.PreviewSubscribeTemplateHandler(deps.Subscription))
 	group.PUT("/subscribe_application", adminApplication.UpdateSubscribeApplicationHandler(deps.Subscription))
@@ -40,8 +37,7 @@ func registerAdminApplicationRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminDocumentRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/document")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/document")
 	group.POST("/", adminDocument.CreateDocumentHandler(deps.Support))
 	group.PUT("/", adminDocument.UpdateDocumentHandler(deps.Support))
 	group.DELETE("/", adminDocument.DeleteDocumentHandler(deps.Support))
@@ -51,8 +47,7 @@ func registerAdminDocumentRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminMarketingRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/marketing")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/marketing")
 	group.GET("/email/batch/list", adminMarketing.GetBatchSendEmailTaskListHandler(deps.Support))
 	group.POST("/email/batch/pre-send-count", adminMarketing.GetPreSendEmailCountHandler(deps.Support))
 	group.POST("/email/batch/send", adminMarketing.CreateBatchSendEmailTaskHandler(deps.Support))

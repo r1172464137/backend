@@ -1,3 +1,5 @@
+// Package payment holds the billing domain's payment method entity and the
+// stored configuration of each gateway it can be bound to.
 package payment
 
 import (
@@ -55,7 +57,11 @@ type StripeConfig struct {
 	PublicKey     string `json:"public_key"`
 	SecretKey     string `json:"secret_key"`
 	WebhookSecret string `json:"webhook_secret"`
-	Payment       string `json:"payment"`
+	// WebhookEndpointID is the Stripe webhook endpoint registered for the
+	// method, so it can be removed when the secret key is rotated to another
+	// account; empty on methods registered before it was recorded.
+	WebhookEndpointID string `json:"webhook_endpoint_id,omitempty"`
+	Payment           string `json:"payment"`
 }
 
 func (l *StripeConfig) Marshal() ([]byte, error) {
@@ -95,7 +101,7 @@ func (l *AlipayF2FConfig) Marshal() ([]byte, error) {
 
 func (l *AlipayF2FConfig) Unmarshal(data []byte) error {
 	// First try to unmarshal into a map to handle string "true"/"false" for sandbox
-	var rawMap map[string]interface{}
+	var rawMap map[string]any
 	if err := json.Unmarshal(data, &rawMap); err != nil {
 		return err
 	}
@@ -144,6 +150,11 @@ type EPayConfig struct {
 	Url  string `json:"url"`
 	Key  string `json:"key"`
 	Type string `json:"type"`
+	// Empty Version and CheckoutMode retain the existing V1 page checkout.
+	Version      string `json:"version,omitempty"`
+	CheckoutMode string `json:"checkout_mode,omitempty"`
+	PrivateKey   string `json:"private_key,omitempty"`
+	PublicKey    string `json:"public_key,omitempty"`
 }
 
 func (l *EPayConfig) Marshal() ([]byte, error) {

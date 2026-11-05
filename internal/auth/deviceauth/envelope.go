@@ -29,7 +29,7 @@ type Envelope struct {
 }
 
 type ReplayStore interface {
-	SetNX(context.Context, string, interface{}, time.Duration) *redis.BoolCmd
+	SetNX(context.Context, string, any, time.Duration) *redis.BoolCmd
 }
 
 // Sign binds the ciphertext to its HTTP operation and envelope location.

@@ -6,11 +6,12 @@ package validation
 import (
 	"reflect"
 
+	"errors"
+
 	"github.com/go-playground/locales/en"
 	ut "github.com/go-playground/universal-translator"
 	"github.com/go-playground/validator/v10"
 	enTranslations "github.com/go-playground/validator/v10/translations/en"
-	"github.com/pkg/errors"
 )
 
 var engine, translator = newEngine()
@@ -32,8 +33,8 @@ func newEngine() (*validator.Validate, ut.Translator) {
 // validator.Validate is safe for concurrent use after registrations finish.
 func Validate(value any) error {
 	if err := engine.Struct(value); err != nil {
-		validationErrors, ok := err.(validator.ValidationErrors)
-		if !ok || len(validationErrors) == 0 {
+		var validationErrors validator.ValidationErrors
+		if !errors.As(err, &validationErrors) || len(validationErrors) == 0 {
 			return err
 		}
 		return errors.New(validationErrors[0].Translate(translator))

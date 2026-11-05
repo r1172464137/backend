@@ -8,25 +8,11 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetUserSubscribeLogsLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get user subcribe logs
-func newGetUserSubscribeLogsLogic(ctx context.Context, deps Deps) *GetUserSubscribeLogsLogic {
-	return &GetUserSubscribeLogsLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetUserSubscribeLogsLogic) GetUserSubscribeLogs(req *dto.GetUserSubscribeLogsRequest) (resp *dto.GetUserSubscribeLogsResponse, err error) {
+// GetUserSubscribeLogs pages the user's subscription fetch log, optionally
+// only the fetches of one subscription.
+func (s *Service) GetUserSubscribeLogs(ctx context.Context, req *dto.GetUserSubscribeLogsRequest) (*dto.GetUserSubscribeLogsResponse, error) {
 	params := &log.FilterParams{
 		Page:     req.Page,
 		Size:     req.Size,
@@ -37,19 +23,19 @@ func (l *GetUserSubscribeLogsLogic) GetUserSubscribeLogs(req *dto.GetUserSubscri
 		params.Search = `"user_subscribe_id":` + strconv.FormatInt(req.SubscribeId, 10)
 	}
 
-	data, total, err := l.deps.Logs.FilterSystemLog(l.ctx, params)
-
+	lg := logger.WithContext(ctx)
+	data, total, err := s.deps.Logs.FilterSystemLog(ctx, params)
 	if err != nil {
-		l.Errorw("[GetUserSubscribeLogs] Get User Subscribe Logs Error:", logger.Field("err", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Get User Subscribe Logs Error")
+		lg.Errorw("[GetUserSubscribeLogs] Get User Subscribe Logs Error:", logger.Field("err", err.Error()))
+		return nil, xerr.Errorf(xerr.DatabaseQueryError, "Get User Subscribe Logs Error")
 	}
 	var list []dto.UserSubscribeLog
 
 	for _, datum := range data {
 		var content log.Subscribe
 		if err = content.Unmarshal([]byte(datum.Content)); err != nil {
-			l.Errorf("[GetUserSubscribeLogs] unmarshal subscribe log content failed: %v", err.Error())
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "corrupt subscription log %d: %v", datum.Id, err)
+			lg.Errorf("[GetUserSubscribeLogs] unmarshal subscribe log content failed: %v", err.Error())
+			return nil, xerr.Wrapf(err, xerr.ERROR, "corrupt subscription log %d: %v", datum.Id, err)
 		}
 		list = append(list, dto.UserSubscribeLog{
 			Id:               datum.Id,
@@ -72,5 +58,5 @@ func (l *GetUserSubscribeLogsLogic) GetUserSubscribeLogs(req *dto.GetUserSubscri
 	return &dto.GetUserSubscribeLogsResponse{
 		List:  list,
 		Total: total,
-	}, err
+	}, nil
 }

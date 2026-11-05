@@ -2,181 +2,208 @@ package guestaccount
 
 import (
 	"context"
-	"errors"
-	"maps"
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/perfect-panel/server/internal/auth/password"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
+	"github.com/perfect-panel/server/internal/module/identity/internal/identitytest"
 	"github.com/perfect-panel/server/internal/module/platform/entity/inbox"
 	"github.com/perfect-panel/server/internal/repository"
-	"gorm.io/gorm"
+	"github.com/perfect-panel/server/pkg/logger/logtest"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
-var errGuestWrite = errors.New("guest write failed")
-
-type guestStore struct {
-	repository.Store
-	account      *user.User
-	credential   *user.AuthMethods
-	markers      map[string]string
-	fail         string
+// countingStore is the real identity store, counting the identity
+// transactions the flow opens.
+type countingStore struct {
+	store        *repository.GormStore
 	transactions int
 }
 
-func (s *guestStore) User() repository.UserRepo         { return guestUsers{s: s} }
-func (s *guestStore) UserAuth() repository.UserAuthRepo { return guestAuth{s: s} }
-func (s *guestStore) Inbox() repository.InboxRepo       { return guestInbox{s: s} }
-func (s *guestStore) InIdentityTx(_ context.Context, fn func(repository.IdentityStore) error) error {
-	beforeUser, beforeAuth, beforeMarkers := s.account, s.credential, maps.Clone(s.markers)
+var _ Store = (*countingStore)(nil)
+
+func (s *countingStore) Inbox() repository.InboxRepo { return s.store.Inbox() }
+
+func (s *countingStore) InIdentityTx(ctx context.Context, fn func(repository.IdentityStore) error) error {
 	s.transactions++
-	if err := fn(s); err != nil {
-		s.account, s.credential, s.markers = beforeUser, beforeAuth, beforeMarkers
-		return err
-	}
-	return nil
+	return s.store.InIdentityTx(ctx, fn)
 }
 
-type guestUsers struct {
-	repository.UserRepo
-	s *guestStore
+type guestFixture struct {
+	*identitytest.Env
+	store *countingStore
+	svc   *Service
 }
 
-func (r guestUsers) Insert(_ context.Context, u *user.User, _ ...*gorm.DB) error {
-	u.Id = 11
-	copy := *u
-	r.s.account = &copy
-	return nil
-}
-func (r guestUsers) Update(_ context.Context, u *user.User, _ ...*gorm.DB) error {
-	if r.s.fail == "user" {
-		return errGuestWrite
-	}
-	copy := *u
-	r.s.account = &copy
-	return nil
-}
-func (r guestUsers) FindOneByReferCode(_ context.Context, code string) (*user.User, error) {
-	if code == "referral" {
-		return &user.User{Id: 99}, nil
-	}
-	return nil, gorm.ErrRecordNotFound
+func newGuestFixture(t *testing.T) *guestFixture {
+	t.Helper()
+	logtest.Discard(t)
+	env := identitytest.New(t)
+	store := &countingStore{store: env.Store}
+	return &guestFixture{Env: env, store: store, svc: New(store)}
 }
 
-type guestAuth struct {
-	repository.UserAuthRepo
-	s *guestStore
+// markers returns the guest account markers, the account id by order number.
+func (f *guestFixture) markers(t *testing.T) map[string]string {
+	t.Helper()
+	var rows []inbox.Record
+	if err := f.DB.Where("consumer = ?", Consumer).Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	markers := make(map[string]string, len(rows))
+	for _, row := range rows {
+		markers[row.EventKey] = row.Result
+	}
+	return markers
 }
 
-func (r guestAuth) InsertUserAuthMethods(_ context.Context, a *user.AuthMethods, _ ...*gorm.DB) error {
-	if r.s.fail == "auth" {
-		return errGuestWrite
+// assertNothingWritten fails when an account, an identity or a marker exists.
+func (f *guestFixture) assertNothingWritten(t *testing.T) {
+	t.Helper()
+	var identities int64
+	if err := f.DB.Model(&user.AuthMethods{}).Count(&identities).Error; err != nil {
+		t.Fatal(err)
 	}
-	copy := *a
-	r.s.credential = &copy
-	return nil
+	if users, markers := f.Users(t), f.markers(t); len(users) != 0 || identities != 0 || len(markers) != 0 {
+		t.Fatalf("accounts = %d, identities = %d, markers = %v; want nothing written", len(users), identities, markers)
+	}
 }
 
-type guestInbox struct {
-	repository.InboxRepo
-	s *guestStore
-}
-
-func (r guestInbox) Find(_ context.Context, consumer, key string) (*inbox.Record, error) {
-	result, ok := r.s.markers[consumer+"|"+key]
-	if !ok {
-		return nil, nil
+// failWrites makes the table refuse the statement (INSERT or UPDATE) until
+// the returned function runs.
+func (f *guestFixture) failWrites(t *testing.T, table, statement string) (restore func()) {
+	t.Helper()
+	trigger := "fail_" + table
+	create := fmt.Sprintf(`CREATE TRIGGER %s BEFORE %s ON %q BEGIN SELECT RAISE(FAIL, 'guest write failed'); END`, trigger, statement, table)
+	if err := f.DB.Exec(create).Error; err != nil {
+		t.Fatal(err)
 	}
-	return &inbox.Record{Consumer: consumer, EventKey: key, Result: result}, nil
-}
-func (r guestInbox) Insert(_ context.Context, consumer, key, result string) error {
-	if r.s.fail == "inbox" {
-		return errGuestWrite
+	return func() {
+		t.Helper()
+		if err := f.DB.Exec("DROP TRIGGER " + trigger).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, exists := r.s.markers[consumer+"|"+key]; exists {
-		return errors.New("duplicate inbox marker")
-	}
-	r.s.markers[consumer+"|"+key] = result
-	return nil
 }
 
 func TestGuestAccountReplayKeepsIdentityAndPasswordHash(t *testing.T) {
-	store := &guestStore{markers: map[string]string{}}
-	svc := New(store)
+	f := newGuestFixture(t)
+	referer := &user.User{ReferCode: "referral"}
+	if err := f.DB.Create(referer).Error; err != nil {
+		t.Fatal(err)
+	}
 	hash := password.EncodePassWord("guest-password")
 	command := Command{OrderNo: "order-1", AuthType: "email", Identifier: "guest@example.test", PasswordHash: hash, InviteCode: "referral"}
-	id, err := svc.EnsureGuestAccount(context.Background(), command)
+	id, err := f.svc.EnsureGuestAccount(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != 11 || store.account.Password != hash || store.account.Algo != password.PasswordAlgoForHash(hash) || store.account.RefererId != 99 || store.account.ReferCode == "" {
-		t.Fatal("guest account lost its identity, password hash or referral settings")
+	var account user.User
+	if err := f.DB.First(&account, id).Error; err != nil {
+		t.Fatal(err)
 	}
-	if store.credential.UserId != id || store.credential.AuthIdentifier != command.Identifier || store.credential.AuthType != command.AuthType {
-		t.Fatal("authentication identity was not bound to the account")
+	if account.Password != hash || account.Algo != password.PasswordAlgoForHash(hash) || account.RefererId != referer.Id || account.ReferCode == "" {
+		t.Fatalf("account = %+v, want its password hash, the referer and a refer code", account)
 	}
-	if store.markers["identity.guest_account|order-1"] != "11" {
-		t.Fatal("durable consumer identity changed")
+	identities := f.Identities(t, id)
+	if len(identities) != 1 || identities[0].AuthIdentifier != command.Identifier || identities[0].AuthType != command.AuthType {
+		t.Fatalf("identities = %+v, want the guest's email", identities)
 	}
-	replayed, err := svc.EnsureGuestAccount(context.Background(), Command{OrderNo: command.OrderNo})
-	if err != nil || replayed != id || store.transactions != 1 {
-		t.Fatalf("replay re-created account: id=%d tx=%d err=%v", replayed, store.transactions, err)
+	if markers := f.markers(t); markers["order-1"] != strconv.FormatInt(id, 10) {
+		t.Fatalf("markers = %v, want order-1 marked with account %d", markers, id)
+	}
+	replayed, err := f.svc.EnsureGuestAccount(context.Background(), Command{OrderNo: command.OrderNo})
+	if err != nil || replayed != id || f.store.transactions != 1 {
+		t.Fatalf("replay re-created account: id=%d tx=%d err=%v", replayed, f.store.transactions, err)
 	}
 }
 
 func TestGuestAccountLegacyPasswordIsHashedByIdentity(t *testing.T) {
-	store := &guestStore{markers: map[string]string{}}
-	_, err := New(store).EnsureGuestAccount(context.Background(), Command{OrderNo: "legacy", AuthType: "email", Identifier: "legacy@example.test", LegacyPassword: "old-password"})
+	f := newGuestFixture(t)
+	id, err := f.svc.EnsureGuestAccount(context.Background(), Command{OrderNo: "legacy", AuthType: "email", Identifier: "legacy@example.test", LegacyPassword: "old-password"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if store.account.Password == "old-password" || !password.VerifyPassWord("old-password", store.account.Password) {
+	var account user.User
+	if err := f.DB.First(&account, id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if account.Password == "old-password" || !password.VerifyPassWord("old-password", account.Password) {
 		t.Fatal("legacy plaintext was not converted to a valid password hash")
 	}
 }
 
 func TestGuestAccountMissingPasswordDoesNotCreateAccount(t *testing.T) {
-	store := &guestStore{markers: map[string]string{}}
-	_, err := New(store).EnsureGuestAccount(context.Background(), Command{
+	f := newGuestFixture(t)
+	_, err := f.svc.EnsureGuestAccount(context.Background(), Command{
 		OrderNo: "missing-password", AuthType: "email", Identifier: "guest@example.test",
 	})
 	if err == nil {
 		t.Fatal("missing credentials must not be converted into an empty-password account")
 	}
-	if store.transactions != 0 || store.account != nil || store.credential != nil || len(store.markers) != 0 {
-		t.Fatal("missing credentials must fail before any identity writes")
+	if f.store.transactions != 0 {
+		t.Fatalf("transactions = %d, want the flow to fail before any identity write", f.store.transactions)
 	}
+	f.assertNothingWritten(t)
 }
 
 func TestGuestAccountFailureRollsBackAccountAuthAndMarker(t *testing.T) {
-	for _, failure := range []string{"user", "auth", "inbox"} {
+	for failure, write := range map[string]struct{ table, statement string }{
+		// The refer code is set on the new account row.
+		"user":  {"user", "UPDATE"},
+		"auth":  {"user_auth_methods", "INSERT"},
+		"inbox": {"domain_event_inbox", "INSERT"},
+	} {
 		t.Run(failure, func(t *testing.T) {
-			store := &guestStore{markers: map[string]string{}, fail: failure}
-			svc := New(store)
+			f := newGuestFixture(t)
+			restore := f.failWrites(t, write.table, write.statement)
 			command := Command{OrderNo: "retry", AuthType: "email", Identifier: "retry@example.test", PasswordHash: "stored-hash"}
-			if _, err := svc.EnsureGuestAccount(context.Background(), command); !errors.Is(err, errGuestWrite) {
+			if _, err := f.svc.EnsureGuestAccount(context.Background(), command); err == nil || !strings.Contains(xerr.Detail(err), "guest write failed") {
 				t.Fatalf("expected write failure, got %v", err)
 			}
-			if store.account != nil || store.credential != nil || len(store.markers) != 0 {
-				t.Fatal("failed transaction left partial account state")
-			}
-			store.fail = ""
-			if _, err := svc.EnsureGuestAccount(context.Background(), command); err != nil {
+			f.assertNothingWritten(t)
+			restore()
+			id, err := f.svc.EnsureGuestAccount(context.Background(), command)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if store.account == nil || store.credential == nil || len(store.markers) != 1 {
-				t.Fatal("retry did not commit the complete account")
+			if users, identities, markers := f.Users(t), f.Identities(t, id), f.markers(t); len(users) != 1 || len(identities) != 1 || len(markers) != 1 {
+				t.Fatalf("accounts = %d, identities = %d, markers = %v; retry did not commit the complete account", len(users), len(identities), markers)
 			}
 		})
 	}
 }
 
 func TestGuestAccountCorruptMarkerDoesNotCreateAccount(t *testing.T) {
-	store := &guestStore{markers: map[string]string{"identity.guest_account|corrupt": "not-an-id"}}
-	if _, err := New(store).EnsureGuestAccount(context.Background(), Command{OrderNo: "corrupt"}); err == nil {
+	f := newGuestFixture(t)
+	if err := f.DB.Create(&inbox.Record{Consumer: Consumer, EventKey: "corrupt", Result: "not-an-id"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.EnsureGuestAccount(context.Background(), Command{OrderNo: "corrupt"}); err == nil {
 		t.Fatal("corrupt durable marker was accepted")
 	}
-	if store.transactions != 0 || store.account != nil {
-		t.Fatal("corrupt marker caused account creation")
+	if users := f.Users(t); f.store.transactions != 0 || len(users) != 0 {
+		t.Fatalf("transactions = %d, accounts = %d; corrupt marker caused account creation", f.store.transactions, len(users))
 	}
+}
+
+// A guest names an identifier nobody verified; a provider id there would
+// pre-claim someone else's OAuth sign-in, so only email and mobile pass.
+func TestGuestAccountRejectsProviderIdentities(t *testing.T) {
+	f := newGuestFixture(t)
+	for _, authType := range []string{"github", "telegram", "google", "apple", "device"} {
+		_, err := f.svc.EnsureGuestAccount(context.Background(), Command{
+			OrderNo: "order-" + authType, AuthType: authType, Identifier: "583231", PasswordHash: password.EncodePassWord("guest-password"),
+		})
+		if err == nil {
+			t.Fatalf("guest account created for auth type %q", authType)
+		}
+	}
+	if f.store.transactions != 0 {
+		t.Fatalf("transactions = %d, want none for provider identities", f.store.transactions)
+	}
+	f.assertNothingWritten(t)
 }

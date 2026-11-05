@@ -2,6 +2,7 @@ package devicesession
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -11,7 +12,7 @@ import (
 func TestRevokeOnlyRotatesTargetAndNeverExpires(t *testing.T) {
 	rdb := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: rdb.Addr(), MaxRetries: -1})
-	defer client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 	ctx := context.Background()
 	if _, err := Epoch(ctx, client, 1); err == nil {
 		t.Fatal("missing generation accepted")
@@ -27,7 +28,7 @@ func TestRevokeOnlyRotatesTargetAndNeverExpires(t *testing.T) {
 	if first == initial || first == "" || rdb.TTL(key(1)) != 0 {
 		t.Fatal("generation missing or expiring")
 	}
-	if _, err := Epoch(ctx, client, 2); err != redis.Nil {
+	if _, err := Epoch(ctx, client, 2); !errors.Is(err, redis.Nil) {
 		t.Fatal("unrelated device was revoked")
 	}
 	if err := Revoke(ctx, client, 1); err != nil {
@@ -55,7 +56,7 @@ func TestRevokeOnlyRotatesTargetAndNeverExpires(t *testing.T) {
 }
 
 func TestBindingRejectsLegacyAndMalformedDeviceClaims(t *testing.T) {
-	for _, claims := range []map[string]interface{}{
+	for _, claims := range []map[string]any{
 		{"LoginType": "device"},
 		{IDClaim: "1"},
 		{EpochClaim: "0"},
@@ -68,10 +69,10 @@ func TestBindingRejectsLegacyAndMalformedDeviceClaims(t *testing.T) {
 			t.Fatalf("accepted malformed claims: %v", claims)
 		}
 	}
-	if id, _, err := Binding(map[string]interface{}{}); err != nil || id != 0 {
+	if id, _, err := Binding(map[string]any{}); err != nil || id != 0 {
 		t.Fatal("web session rejected")
 	}
-	if id, epoch, err := Binding(map[string]interface{}{IDClaim: "9007199254740993", EpochClaim: "0"}); err != nil || id != 9007199254740993 || epoch != "0" {
+	if id, epoch, err := Binding(map[string]any{IDClaim: "9007199254740993", EpochClaim: "0"}); err != nil || id != 9007199254740993 || epoch != "0" {
 		t.Fatal("binding lost ID precision")
 	}
 }

@@ -131,6 +131,7 @@ func TestWriteServerReportResult_ProtobufError(t *testing.T) {
 }
 
 func TestResponseConversions(t *testing.T) {
+
 	users := serverUserListResponseToProtobuf(&dto.GetServerUserListResponse{Users: []dto.ServerUser{{
 		Id: 1, UUID: "uuid", SpeedLimit: 10, DeviceLimit: 2,
 	}}})

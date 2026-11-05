@@ -51,36 +51,9 @@ func NormalizeNodeDNS(input []NodeDNS) ([]NodeDNS, error) {
 		if address == "" || address != strings.TrimSpace(address) || strings.ContainsAny(address, "/?#@\\% \t\r\n") {
 			return nil, fmt.Errorf("%s: invalid resolver address", field)
 		}
-		host, port := address, ""
-		if strings.HasPrefix(address, "[") {
-			end := strings.IndexByte(address, ']')
-			if end < 0 {
-				return nil, fmt.Errorf("%s: invalid IPv6", field)
-			}
-			host = address[1:end]
-			tail := address[end+1:]
-			if tail != "" {
-				if !strings.HasPrefix(tail, ":") || len(tail) == 1 {
-					return nil, fmt.Errorf("%s: invalid port", field)
-				}
-				port = tail[1:]
-			}
-			ip, err := netip.ParseAddr(host)
-			if err != nil || !ip.Is6() || ip.Zone() != "" {
-				return nil, fmt.Errorf("%s: invalid IPv6", field)
-			}
-			host = ip.String()
-		} else if ip, err := netip.ParseAddr(address); err == nil {
-			if ip.Zone() != "" {
-				return nil, fmt.Errorf("%s: invalid IP zone", field)
-			}
-			host = ip.String()
-		} else if strings.Contains(address, ":") {
-			var err error
-			host, port, err = net.SplitHostPort(address)
-			if err != nil || port == "" {
-				return nil, fmt.Errorf("%s: invalid address or port", field)
-			}
+		host, port, err := splitDNSAddress(field, address)
+		if err != nil {
+			return nil, err
 		}
 		if port != "" {
 			for _, r := range port {
@@ -94,34 +67,9 @@ func NormalizeNodeDNS(input []NodeDNS) ([]NodeDNS, error) {
 			}
 			port = strconv.FormatUint(n, 10)
 		}
-		if ip, err := netip.ParseAddr(host); err == nil {
-			if ip.Zone() != "" {
-				return nil, fmt.Errorf("%s: invalid IP zone", field)
-			}
-			host = ip.String()
-		} else {
-			if strings.HasSuffix(host, "..") {
-				return nil, fmt.Errorf("%s: invalid hostname", field)
-			}
-			trailing := strings.HasSuffix(host, ".")
-			base := strings.TrimSuffix(host, ".")
-			if strings.Count(base, ".") == 3 && strings.Trim(base, "0123456789.") == "" {
-				if _, err := netip.ParseAddr(base); err != nil {
-					return nil, fmt.Errorf("%s: invalid IP address", field)
-				}
-			}
-			if len(base) == 0 || len(base) > 253 {
-				return nil, fmt.Errorf("%s: invalid hostname", field)
-			}
-			for _, label := range strings.Split(base, ".") {
-				if !domainLabel.MatchString(label) {
-					return nil, fmt.Errorf("%s: invalid hostname", field)
-				}
-			}
-			host = strings.ToLower(base)
-			if trailing || host == "localhost" || host == "fakedns" {
-				host += "."
-			}
+		host, err = normalizeDNSHost(field, host)
+		if err != nil {
+			return nil, err
 		}
 		if port != "" {
 			address = net.JoinHostPort(host, port)
@@ -146,4 +94,71 @@ func NormalizeNodeDNS(input []NodeDNS) ([]NodeDNS, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func splitDNSAddress(field, address string) (string, string, error) {
+	host, port := address, ""
+	if strings.HasPrefix(address, "[") {
+		end := strings.IndexByte(address, ']')
+		if end < 0 {
+			return "", "", fmt.Errorf("%s: invalid IPv6", field)
+		}
+		host = address[1:end]
+		tail := address[end+1:]
+		if tail != "" {
+			if !strings.HasPrefix(tail, ":") || len(tail) == 1 {
+				return "", "", fmt.Errorf("%s: invalid port", field)
+			}
+			port = tail[1:]
+		}
+		ip, err := netip.ParseAddr(host)
+		if err != nil || !ip.Is6() || ip.Zone() != "" {
+			return "", "", fmt.Errorf("%s: invalid IPv6", field)
+		}
+		host = ip.String()
+	} else if ip, err := netip.ParseAddr(address); err == nil {
+		if ip.Zone() != "" {
+			return "", "", fmt.Errorf("%s: invalid IP zone", field)
+		}
+		host = ip.String()
+	} else if strings.Contains(address, ":") {
+		var err error
+		host, port, err = net.SplitHostPort(address)
+		if err != nil || port == "" {
+			return "", "", fmt.Errorf("%s: invalid address or port", field)
+		}
+	}
+	return host, port, nil
+}
+
+func normalizeDNSHost(field, host string) (string, error) {
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if ip.Zone() != "" {
+			return "", fmt.Errorf("%s: invalid IP zone", field)
+		}
+		return ip.String(), nil
+	}
+	if strings.HasSuffix(host, "..") {
+		return "", fmt.Errorf("%s: invalid hostname", field)
+	}
+	trailing := strings.HasSuffix(host, ".")
+	base := strings.TrimSuffix(host, ".")
+	if strings.Count(base, ".") == 3 && strings.Trim(base, "0123456789.") == "" {
+		if _, err := netip.ParseAddr(base); err != nil {
+			return "", fmt.Errorf("%s: invalid IP address", field)
+		}
+	}
+	if len(base) == 0 || len(base) > 253 {
+		return "", fmt.Errorf("%s: invalid hostname", field)
+	}
+	for _, label := range strings.Split(base, ".") {
+		if !domainLabel.MatchString(label) {
+			return "", fmt.Errorf("%s: invalid hostname", field)
+		}
+	}
+	host = strings.ToLower(base)
+	if trailing || host == "localhost" || host == "fakedns" {
+		host += "."
+	}
+	return host, nil
 }

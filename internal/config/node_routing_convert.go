@@ -134,12 +134,11 @@ func ConvertLegacyRouting(legacy LegacyRoutingInput, scope string) (LegacyRoutin
 	if len(result.Blockers) > 0 {
 		return result, nil
 	}
-	canonical, err := NormalizeNodeRouting(policy)
-	if err != nil {
+	if canonical, err := NormalizeNodeRouting(policy); err == nil {
+		result.Draft = canonical
+	} else {
 		result.Blockers = append(result.Blockers, LegacyRoutingBlocker{"routing", err.Error()})
-		return result, nil
 	}
-	result.Draft = canonical
 	return result, nil
 }
 
@@ -207,6 +206,13 @@ func validateLegacyOutboundConversion(o NodeOutbound) error {
 			return fmt.Errorf("raw stream settings cannot be verified equivalent")
 		}
 	}
+	if err := validateLegacyOutboundSettings(o, protocol); err != nil {
+		return err
+	}
+	return validateLegacyOutboundTransport(o, protocol)
+}
+
+func validateLegacyOutboundSettings(o NodeOutbound, protocol string) error {
 	if raw := strings.TrimSpace(o.Settings); raw != "" {
 		var fields map[string]json.RawMessage
 		if ValidateUniqueJSON([]byte(raw)) != nil || json.Unmarshal([]byte(raw), &fields) != nil || fields == nil {
@@ -250,6 +256,10 @@ func validateLegacyOutboundConversion(o NodeOutbound) error {
 			}
 		}
 	}
+	return nil
+}
+
+func validateLegacyOutboundTransport(o NodeOutbound, protocol string) error {
 	security := strings.ToLower(strings.TrimSpace(o.Security))
 	if security != "" && security != "none" && security != "tls" && security != "reality" {
 		return fmt.Errorf("unsupported security %q", o.Security)
@@ -257,7 +267,7 @@ func validateLegacyOutboundConversion(o NodeOutbound) error {
 	if (protocol == "vless" || protocol == "trojan") && (security == "" || security == "none") {
 		address := strings.TrimSpace(o.Address)
 		ip, err := netip.ParseAddr(address)
-		if address != "localhost" && (err != nil || !(ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast())) {
+		if address != "localhost" && (err != nil || (!ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast())) {
 			return fmt.Errorf("public %s without transport security cannot be verified", protocol)
 		}
 	}
@@ -287,6 +297,10 @@ func validateLegacyOutboundConversion(o NodeOutbound) error {
 			return fmt.Errorf("invalid REALITY spider path")
 		}
 	}
+	return validateLegacyTransportKind(o, protocol, security)
+}
+
+func validateLegacyTransportKind(o NodeOutbound, protocol, security string) error {
 	transport := strings.ToLower(strings.TrimSpace(o.Transport))
 	if security == "reality" && strings.TrimSpace(o.StreamSettings) == "" {
 		effective := transport
@@ -314,10 +328,10 @@ func validateLegacyOutboundConversion(o NodeOutbound) error {
 		return fmt.Errorf("unsupported transport %q", o.Transport)
 	}
 	if protocol == "hysteria" && transport != "" && transport != "hysteria" {
-		return fmt.Errorf("Hysteria outbound requires Hysteria transport")
+		return fmt.Errorf("%s outbound requires Hysteria transport", "Hysteria")
 	}
 	if protocol != "hysteria" && transport == "hysteria" {
-		return fmt.Errorf("Hysteria transport requires Hysteria outbound")
+		return fmt.Errorf("%s transport requires Hysteria outbound", "Hysteria")
 	}
 	return nil
 }

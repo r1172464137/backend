@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 )
 
-// GenerateCipher 根据公钥生成固定长度密文
+// GenerateCipher derives a fixed-length key from serverKey: the first length
+// hex digits (at most 64) of the HMAC-SHA256 of an empty message keyed with
+// serverKey. The same serverKey always gives the same key.
 func GenerateCipher(serverKey string, length int) string {
 	h := hmac.New(sha256.New, []byte(serverKey))
 	hash := h.Sum(nil)

@@ -35,16 +35,6 @@ func NewCouponRepo(conn cache.CachedConn) repository.CouponRepo {
 	}
 }
 
-//nolint:unused
-func (m *couponRepo) batchGetCacheKeys(Coupons ...*coupon.Coupon) []string {
-	var keys []string
-	for _, coupon := range Coupons {
-		keys = append(keys, m.getCacheKeys(coupon)...)
-	}
-	return keys
-
-}
-
 func (m *couponRepo) getCacheKeys(data *coupon.Coupon) []string {
 	if data == nil {
 		return []string{}
@@ -67,40 +57,47 @@ func (m *couponRepo) Insert(ctx context.Context, data *coupon.Coupon) error {
 
 func (m *couponRepo) FindOne(ctx context.Context, id int64) (*coupon.Coupon, error) {
 	var resp coupon.Coupon
-	err := m.QueryNoCacheCtx(ctx, &resp, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryNoCacheCtx(ctx, &resp, func(conn *gorm.DB, v any) error {
 		return conn.Model(&coupon.Coupon{}).Where("id = ?", id).First(&resp).Error
 	})
-	switch {
-	case err == nil:
-		return &resp, nil
-	default:
+	if err != nil {
 		return nil, err
 	}
+	return &resp, nil
 }
 
 func (m *couponRepo) FindOneByCode(ctx context.Context, code string) (*coupon.Coupon, error) {
 	var resp coupon.Coupon
-	err := m.QueryNoCacheCtx(ctx, &resp, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryNoCacheCtx(ctx, &resp, func(conn *gorm.DB, v any) error {
 		return conn.Model(&coupon.Coupon{}).Where("code = ?", code).First(&resp).Error
 	})
-	switch {
-	case err == nil:
-		return &resp, nil
-	default:
+	if err != nil {
 		return nil, err
 	}
+	return &resp, nil
 }
 
+// couponEditableColumns are the columns an administrator's edit writes. The
+// whole-row save it replaced also rewrote the creation time and, for a row
+// loaded before a concurrent reservation, the use count.
+var couponEditableColumns = []string{"name", "code", "count", "type", "discount", "start_time", "expire_time", "user_limit", "subscribe", "used_count", "enable", "updated_at"}
+
+// Update writes the editable columns of the coupon. Enable must be set: a
+// nil value would clear the column, so the caller defaults it first.
 func (m *couponRepo) Update(ctx context.Context, data *coupon.Coupon) error {
+	if data == nil || data.Id == 0 {
+		return errors.New("coupon update needs the coupon id")
+	}
+	if data.Enable == nil {
+		return errors.New("coupon update needs the enable flag")
+	}
 	old, err := m.FindOne(ctx, data.Id)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
-	err = m.ExecCtx(ctx, func(conn *gorm.DB) error {
-		db := conn
-		return db.Save(data).Error
+	return m.ExecCtx(ctx, func(conn *gorm.DB) error {
+		return conn.Model(&coupon.Coupon{}).Where("id = ?", data.Id).Select(couponEditableColumns).Updates(data).Error
 	}, m.getCacheKeys(old)...)
-	return err
 }
 
 func (m *couponRepo) Delete(ctx context.Context, id int64) error {
@@ -118,10 +115,11 @@ func (m *couponRepo) Delete(ctx context.Context, id int64) error {
 	return err
 }
 
-// QueryCouponListByPage query coupon list by page
+// QueryCouponListByPage pages the coupons, optionally only those limited to
+// the subscribe plan or whose name or code starts with search.
 func (m *couponRepo) QueryCouponListByPage(ctx context.Context, page, size int, subscribe int64, search string) (total int64, list []*coupon.Coupon, err error) {
 	page, size = repository.NormalizePage(page, size)
-	err = m.QueryNoCacheCtx(ctx, &list, func(conn *gorm.DB, v interface{}) error {
+	err = m.QueryNoCacheCtx(ctx, &list, func(conn *gorm.DB, v any) error {
 		db := conn.Model(&coupon.Coupon{})
 		if subscribe != 0 {
 			db = db.Scopes(orm.CommaSeparatedContains("subscribe", []string{strconv.FormatInt(subscribe, 10)}))
@@ -144,28 +142,32 @@ func (m *couponRepo) BatchDelete(ctx context.Context, ids []int64) error {
 	return nil
 }
 
+// UpdateCount counts one more use of the coupon when an order that had not
+// reserved its use settles. The increment happens in the database, so
+// concurrent settlements and reservations never lose a count to a stale
+// read-modify-write.
 func (m *couponRepo) UpdateCount(ctx context.Context, code string) error {
 	data, err := m.FindOneByCode(ctx, code)
 	if err != nil {
 		return err
 	}
-	data.UsedCount++
-	return m.Update(ctx, data)
+	return m.ExecCtx(ctx, func(conn *gorm.DB) error {
+		return conn.Model(&coupon.Coupon{}).
+			Where("code = ?", code).
+			UpdateColumn("used_count", gorm.Expr("used_count + 1")).Error
+	}, m.getCacheKeys(data)...)
 }
 
 // ReserveUsage atomically reserves one coupon use for a pending order.  A
 // reservation is made at order creation (rather than after payment) so a
 // limited coupon cannot be oversold by concurrent checkouts.
-func (m *couponRepo) ReserveUsage(ctx context.Context, code string, now int64, tx ...*gorm.DB) (bool, error) {
+func (m *couponRepo) ReserveUsage(ctx context.Context, code string, now int64) (bool, error) {
 	data, err := m.FindOneByCode(ctx, code)
 	if err != nil {
 		return false, err
 	}
 	var reserved bool
 	err = m.ExecCtx(ctx, func(conn *gorm.DB) error {
-		if len(tx) > 0 {
-			conn = tx[0]
-		}
 		result := conn.Model(&coupon.Coupon{}).
 			Where("code = ? AND enable = ? AND start_time <= ? AND expire_time >= ? AND (count = 0 OR used_count < count)", code, true, now, now).
 			UpdateColumn("used_count", gorm.Expr("used_count + 1"))
@@ -177,7 +179,7 @@ func (m *couponRepo) ReserveUsage(ctx context.Context, code string, now int64, t
 
 // ReleaseUsage returns a reservation when its pending order is closed. The
 // conditional expression makes repeated close processing harmless.
-func (m *couponRepo) ReleaseUsage(ctx context.Context, code string, tx ...*gorm.DB) error {
+func (m *couponRepo) ReleaseUsage(ctx context.Context, code string) error {
 	data, err := m.FindOneByCode(ctx, code)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -188,9 +190,6 @@ func (m *couponRepo) ReleaseUsage(ctx context.Context, code string, tx ...*gorm.
 		return err
 	}
 	return m.ExecCtx(ctx, func(conn *gorm.DB) error {
-		if len(tx) > 0 {
-			conn = tx[0]
-		}
 		return conn.Model(&coupon.Coupon{}).
 			Where("code = ?", code).
 			UpdateColumn("used_count", gorm.Expr("CASE WHEN used_count > 0 THEN used_count - 1 ELSE 0 END")).Error

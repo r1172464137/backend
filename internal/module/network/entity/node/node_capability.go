@@ -45,6 +45,10 @@ func ValidateNodeProtocols(server *Server) error {
 			}
 		}
 	}
+	return validateProtocolInventory(protocols)
+}
+
+func validateProtocolInventory(protocols []Protocol) error {
 	seenType, seenTCP, seenUDP := map[string]bool{}, map[uint16]bool{}, map[uint16]bool{}
 	var blockers []string
 	for i, raw := range protocols {
@@ -113,6 +117,21 @@ func validateEnabledNodeProtocol(raw Protocol, name string) error {
 			return err
 		}
 	}
+	if err := validateInboundShadowsocks(raw, name); err != nil {
+		return err
+	}
+	normalized, err := NormalizeProtocolForStorage(raw)
+	if err != nil {
+		return fmt.Errorf("cannot be distributed: %w", err)
+	}
+	projected := SanitizeProtocolsForNodeDistribution([]Protocol{normalized})
+	if len(projected) != 1 {
+		return fmt.Errorf("would be omitted by node distribution")
+	}
+	return validateProjectedProtocol(projected[0], name)
+}
+
+func validateInboundShadowsocks(raw Protocol, name string) error {
 	if name == "shadowsocks" {
 		plugin := strings.ToLower(strings.TrimSpace(raw.Plugin))
 		switch plugin {
@@ -136,15 +155,10 @@ func validateEnabledNodeProtocol(raw Protocol, name string) error {
 			}
 		}
 	}
-	normalized, err := NormalizeProtocolForStorage(raw)
-	if err != nil {
-		return fmt.Errorf("cannot be distributed: %w", err)
-	}
-	projected := SanitizeProtocolsForNodeDistribution([]Protocol{normalized})
-	if len(projected) != 1 {
-		return fmt.Errorf("would be omitted by node distribution")
-	}
-	p := projected[0]
+	return nil
+}
+
+func validateProjectedProtocol(p Protocol, name string) error {
 	if name == "vless" || name == "vmess" || name == "trojan" {
 		switch p.Security {
 		case "", "none", "tls", "reality":
@@ -157,6 +171,16 @@ func validateEnabledNodeProtocol(raw Protocol, name string) error {
 			return fmt.Errorf("unsupported or missing transport")
 		}
 	}
+	if err := validateInboundReality(p, name); err != nil {
+		return err
+	}
+	if err := validateInboundVLESSEncryption(p, name); err != nil {
+		return err
+	}
+	return validateInboundTLSAndBandwidth(p, name)
+}
+
+func validateInboundReality(p Protocol, name string) error {
 	if p.Security == "reality" {
 		key, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(p.RealityPrivateKey))
 		if err != nil || len(key) != 32 {
@@ -190,6 +214,10 @@ func validateEnabledNodeProtocol(raw Protocol, name string) error {
 			}
 		}
 	}
+	return nil
+}
+
+func validateInboundVLESSEncryption(p Protocol, name string) error {
 	if name == "vless" && p.Encryption != "" && p.Encryption != "none" {
 		if p.Encryption != "mlkem768x25519plus" {
 			return fmt.Errorf("unsupported VLESS encryption")
@@ -232,6 +260,10 @@ func validateEnabledNodeProtocol(raw Protocol, name string) error {
 			}
 		}
 	}
+	return nil
+}
+
+func validateInboundTLSAndBandwidth(p Protocol, name string) error {
 	if p.Security == "tls" || name == "hysteria" || name == "tuic" {
 		switch p.CertMode {
 		case "file", "self", "dns", "http":
@@ -243,7 +275,7 @@ func validateEnabledNodeProtocol(raw Protocol, name string) error {
 		return fmt.Errorf("invalid Hysteria bandwidth")
 	}
 	if name == "hysteria" && p.DownMbps > 0 && p.UpMbps <= 0 {
-		return fmt.Errorf("Hysteria down bandwidth requires up bandwidth")
+		return fmt.Errorf("%s down bandwidth requires up bandwidth", "Hysteria")
 	}
 	if name == "hysteria" && p.Obfs != "" && p.ObfsPassword != "" {
 		if p.Obfs != "salamander" {

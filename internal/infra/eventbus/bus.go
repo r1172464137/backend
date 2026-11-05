@@ -53,6 +53,8 @@ type Bus struct {
 	subscribers map[string][]subscription
 }
 
+// New returns a bus that reads the events to publish from outboxRepo and
+// hands them to publisher; subscribers are registered with Subscribe.
 func New(outboxRepo repository.OutboxRepo, publisher Publisher) *Bus {
 	return &Bus{
 		outbox:      outboxRepo,

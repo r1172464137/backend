@@ -1,3 +1,5 @@
+// Package system holds the system settings row (the system table), one stored
+// value per setting, and the parsing of the node settings kept in it.
 package system
 
 import "time"

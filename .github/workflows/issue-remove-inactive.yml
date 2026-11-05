@@ -12,14 +12,28 @@ permissions:
 jobs:
   issue-remove-inactive:
     permissions:
-      issues: write # for actions-cool/issues-helper to update issues
-      pull-requests: write # for actions-cool/issues-helper to update PRs
+      issues: write # to remove the label
     runs-on: ubuntu-latest
     steps:
+      # The author coming back to an open issue takes the "Inactive" label
+      # (issue-check-inactive.yml) off again.
       - name: remove inactive
         if: github.event.issue.state == 'open' && github.actor == github.event.issue.user.login
-        uses: actions-cool/issues-helper@v3
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          actions: 'remove-labels'
-          issue-number: ${{ github.event.issue.number }}
-          labels: 'Inactive'
+          script: |
+            const label = 'Inactive';
+            const issue = context.payload.issue;
+            if (issue.pull_request) return;
+            if (!issue.labels.some((l) => l.name === label)) return;
+            try {
+              await github.rest.issues.removeLabel({
+                ...context.repo,
+                issue_number: issue.number,
+                name: label,
+              });
+              core.info(`#${issue.number}: removed ${label}`);
+            } catch (error) {
+              // Removed by someone else in the meantime.
+              if (error.status !== 404) throw error;
+            }

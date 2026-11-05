@@ -7,14 +7,22 @@ import (
 
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
-	"github.com/perfect-panel/server/internal/repository"
 	"gorm.io/gorm"
 )
 
 type dailyReportOrders struct {
-	repository.OrderRepo
 	report *order.DailyReport
 	date   time.Time
+}
+
+var _ Orders = (*dailyReportOrders)(nil)
+
+func (r *dailyReportOrders) FindOne(context.Context, int64) (*order.Order, error) {
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (r *dailyReportOrders) QueryOrderListByPage(context.Context, int, int, uint8, int64, int64, string) (int64, []*order.Details, error) {
+	return 0, nil, nil
 }
 
 func (r *dailyReportOrders) QueryDailyReport(_ context.Context, date time.Time) (*order.DailyReport, error) {
@@ -52,9 +60,9 @@ func TestDailyReportLabelsThePlanBreakdown(t *testing.T) {
 			{Name: "", Orders: 1, Amount: 2000},
 		},
 	}}
-	svc := NewService(orders, nil, nil, nil, &dailyReportPlans{
+	svc := NewService(Deps{Orders: orders, Plans: &dailyReportPlans{
 		plans: map[int64]*subscribe.Subscribe{9: {Id: 9, Name: "Pro 月付"}},
-	})
+	}})
 
 	report, err := svc.DailyReport(context.Background(), orders.report.Date)
 	if err != nil {
@@ -87,7 +95,7 @@ func TestDailyReportWithoutPlanReader(t *testing.T) {
 		Amount: 500,
 		ByPlan: []order.DailyBreakdown{{Id: 9, Orders: 1, Amount: 500}},
 	}}
-	svc := NewService(orders, nil, nil, nil, nil)
+	svc := NewService(Deps{Orders: orders})
 
 	report, err := svc.DailyReport(context.Background(), time.Now())
 	if err != nil {

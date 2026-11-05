@@ -4,46 +4,24 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
-	"github.com/perfect-panel/server/internal/module/identity/entity/user"
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type UpdateUserRulesLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// NewUpdateUserRulesLogic Update User Rules
-func newUpdateUserRulesLogic(ctx context.Context, deps Deps) *UpdateUserRulesLogic {
-	return &UpdateUserRulesLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *UpdateUserRulesLogic) UpdateUserRules(req *dto.UpdateUserRulesRequest) error {
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok {
-		logger.Error("current user is not found in context")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
+// UpdateUserRules stores the calling account's rules; an empty list leaves
+// the stored ones.
+func (s *Service) UpdateUserRules(ctx context.Context, req *dto.UpdateUserRulesRequest) error {
+	u, err := currentUser(ctx)
+	if err != nil {
+		return err
 	}
 	if len(req.Rules) > 0 {
 		bytes, err := json.Marshal(req.Rules)
 		if err != nil {
-			l.Logger.Errorf("UpdateUserRulesLogic json marshal rules error: %v", err)
-			return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "json marshal rules failed: %v", err.Error())
+			return xerr.Wrapf(err, xerr.ERROR, "marshal rules")
 		}
-		u.Rules = string(bytes)
-		err = l.deps.Users.Update(l.ctx, u)
-		if err != nil {
-			l.Logger.Errorf("UpdateUserRulesLogic UpdateUserRules error: %v", err)
-			return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update user rules failed: %v", err.Error())
+		if err := s.deps.Users.UpdateColumns(ctx, u.Id, map[string]any{"rules": string(bytes)}); err != nil {
+			return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update rules of user %d", u.Id)
 		}
 	}
 	return nil

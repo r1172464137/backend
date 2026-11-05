@@ -1,7 +1,14 @@
+// Package lifecycle runs the process's services as one group: started
+// together and stopped once, in the reverse order they were added, with the
+// log output closed last so the lines written while stopping reach the log
+// files. A service does its own shutdown work in its Stop.
 package lifecycle
 
 import (
+	"log"
 	"sync"
+
+	"github.com/perfect-panel/server/pkg/logger"
 )
 
 type (
@@ -40,20 +47,30 @@ func (sg *Group) Add(service Service) {
 	sg.services = append([]Service{service}, sg.services...)
 }
 
-// Start starts the ServiceGroup.
-// There should not be any logic code after calling this method, because this method is a blocking one.
-// Also, quitting this method will close the logx output.
+// Start starts the services together. It blocks until every service's Start
+// returned.
 func (sg *Group) Start() {
-	AddShutdownListener(func() {
-		sg.Stop()
-	})
-
 	sg.doStart()
 }
 
-// Stop stops the ServiceGroup.
+// Stop stops the services in the reverse order they were added, then closes
+// the log output as the final step. The file output buffers entries, so the
+// lines written while stopping — typically the shutdown errors — only reach
+// the files once the output is closed. The output closes even when a service
+// panics while stopping.
 func (sg *Group) Stop() {
-	sg.stopOnce.Do(sg.doStop)
+	sg.stopOnce.Do(func() {
+		defer closeLogs()
+		sg.doStop()
+	})
+}
+
+// closeLogs flushes and closes the log output. Anything logged afterwards
+// goes to the console.
+func closeLogs() {
+	if err := logger.Close(); err != nil {
+		log.Printf("close log output: %v", err)
+	}
 }
 
 func (sg *Group) doStart() {
@@ -70,11 +87,24 @@ func (sg *Group) doStop() {
 	}
 }
 
+// StopOrder returns the services in the order Stop stops them: the reverse
+// of the order they were added in.
+func (sg *Group) StopOrder() []Service {
+	return append([]Service(nil), sg.services...)
+}
+
 // WithStart wraps a start func as a Service.
 func WithStart(start func()) Service {
 	return startOnlyService{
 		start: start,
 	}
+}
+
+// WithStop wraps a stop func as a Service whose Start returns at once: a
+// shutdown step, such as flushing the trace exporter, that has its place in
+// the stop order but nothing to run.
+func WithStop(stop func()) Service {
+	return stopOnlyService{stop: stop}
 }
 
 // WithStarter wraps a Starter as a Service.
@@ -96,6 +126,10 @@ type (
 		Starter
 		stopper
 	}
+
+	stopOnlyService struct {
+		stop func()
+	}
 )
 
 func (s stopper) Stop() {
@@ -103,4 +137,10 @@ func (s stopper) Stop() {
 
 func (s startOnlyService) Start() {
 	s.start()
+}
+
+func (s stopOnlyService) Start() {}
+
+func (s stopOnlyService) Stop() {
+	s.stop()
 }

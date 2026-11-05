@@ -1,18 +1,38 @@
+# Git hooks for contributors. Install them once per clone with
+# `lefthook install`; docs/contributing/CONTRIBUTING.md lists the
+# prerequisites. The Go tools run through make, which installs the versions
+# the Makefile pins into bin/tools.
+min_version: 1.10.0
+
 pre-commit:
-  parallel: true
-  commands:
-    go-fmt:
-      run: go fmt ./...
-    go-imports:
-      run: goimports -w .
-    go-lint:
-      run: golangci-lint run
-    go-vet:
-      run: go vet ./...
-    go-test:
-      run: go test -v ./...
+  jobs:
+    # Formatting rewrites files, so it runs on its own before the read-only
+    # checks: next to them (or next to a second formatter) two processes raced
+    # on the same files. goimports formats exactly like gofmt and also fixes
+    # the imports; the fixed files are staged again.
+    - name: goimports
+      glob: "*.go"
+      run: make -s fmt-files FILES="{staged_files}"
+      stage_fixed: true
+    - group:
+        parallel: true
+        jobs:
+          # Only the lines the commit changes are linted, to keep the hook
+          # quick; CI lints the whole tree.
+          - name: golangci-lint
+            run: make -s lint-new
+          - name: go-vet
+            run: go vet ./...
+          - name: go-test
+            run: go test ./...
 
 commit-msg:
-  commands:
-    commitlint:
-      run: npx --no -- commitlint --edit $1
+  jobs:
+    # The repository has no package.json: npx fetches the pinned commitlint
+    # into its cache on first use and reuses it afterwards. The rules are
+    # those of @commitlint/config-conventional, inlined in .commitlintrc.json:
+    # commitlint resolves an `extends` from the config's directory and the
+    # global npm modules, never from the npx cache, so the shareable config
+    # cannot be loaded this way. Requires Node.js 22.12 or newer.
+    - name: commitlint
+      run: npx --yes -p @commitlint/cli@21.2.3 -- commitlint --edit {1}

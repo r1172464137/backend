@@ -10,21 +10,25 @@ import (
 	"github.com/perfect-panel/server/internal/module/notification"
 )
 
+// fakeNotificationService records the webhook payloads it is handed.
 type fakeNotificationService struct {
-	notification.Service
 	payloads [][]byte
 }
+
+var _ WebhookUpdates = (*fakeNotificationService)(nil)
 
 func (f *fakeNotificationService) HandleTelegramWebhook(_ context.Context, payload []byte) error {
 	f.payloads = append(f.payloads, append([]byte(nil), payload...))
 	return nil
 }
 
-func telegramWebhookContext(t *testing.T, service notification.Service, botToken string) (*server.Hertz, func(secret string, body []byte) uint32) {
+// telegramWebhook serves the webhook route and returns a poster that sends
+// it one update and decodes the response code.
+func telegramWebhook(t *testing.T, service WebhookUpdates, botToken string) func(secret string, body []byte) uint32 {
 	t.Helper()
 	engine := server.Default()
 	engine.POST("/v1/telegram/webhook", TelegramHandler(service, func() string { return botToken }))
-	return engine, func(secret string, body []byte) uint32 {
+	return func(secret string, body []byte) uint32 {
 		ctx := engine.NewContext()
 		ctx.Request.SetRequestURI("/v1/telegram/webhook")
 		ctx.Request.Header.SetMethod(http.MethodPost)
@@ -48,7 +52,7 @@ func telegramWebhookContext(t *testing.T, service notification.Service, botToken
 
 func TestTelegramHandler_abortsAndWritesSuccessEnvelope_whenSecretIsInvalid(t *testing.T) {
 	fake := &fakeNotificationService{}
-	_, post := telegramWebhookContext(t, fake, "bot-token")
+	post := telegramWebhook(t, fake, "bot-token")
 
 	if code := post("invalid", []byte(`{"update_id":1}`)); code != 200 {
 		t.Fatalf("expected success envelope code 200, got %d", code)
@@ -62,7 +66,7 @@ func TestTelegramHandler_abortsAndWritesSuccessEnvelope_whenSecretIsInvalid(t *t
 // attacker could derive from the empty token.
 func TestTelegramHandler_rejectsAll_whenBotTokenIsEmpty(t *testing.T) {
 	fake := &fakeNotificationService{}
-	_, post := telegramWebhookContext(t, fake, "")
+	post := telegramWebhook(t, fake, "")
 
 	post(notification.WebhookSecret(""), []byte(`{"update_id":1}`))
 	if len(fake.payloads) != 0 {
@@ -72,7 +76,7 @@ func TestTelegramHandler_rejectsAll_whenBotTokenIsEmpty(t *testing.T) {
 
 func TestTelegramHandler_dispatchesPayload_whenSecretMatches(t *testing.T) {
 	fake := &fakeNotificationService{}
-	_, post := telegramWebhookContext(t, fake, "bot-token")
+	post := telegramWebhook(t, fake, "bot-token")
 
 	body := []byte(`{"update_id":7}`)
 	if code := post(notification.WebhookSecret("bot-token"), body); code != 200 {

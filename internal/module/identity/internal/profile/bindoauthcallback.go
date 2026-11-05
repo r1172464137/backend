@@ -2,508 +2,77 @@ package profile
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"time"
+	"errors"
 
-	"github.com/perfect-panel/server/internal/config"
-	"github.com/perfect-panel/server/internal/infra/mapping"
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
-	"github.com/perfect-panel/server/internal/module/identity/entity/auth"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
-	"github.com/perfect-panel/server/internal/module/identity/internal/oauthprovider/apple"
-	"github.com/perfect-panel/server/internal/module/identity/internal/oauthprovider/facebook"
-	"github.com/perfect-panel/server/internal/module/identity/internal/oauthprovider/github"
-	"github.com/perfect-panel/server/internal/module/identity/internal/oauthprovider/google"
-	"github.com/perfect-panel/server/internal/module/identity/internal/oauthprovider/telegram"
 	"github.com/perfect-panel/server/internal/module/identity/internal/oauthstate"
-	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 	"gorm.io/gorm"
 )
 
-// telegramBindAuthExpire bounds how stale a Telegram widget result may be
-// when binding, and telegramBindRetryGrace lets a client re-submit the same
-// result after a timed-out request without treating it as a replay.
-const (
-	telegramBindAuthExpire = 300
-	telegramBindRetryGrace = 60 * time.Second
-)
-
-type BindOAuthCallbackLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Bind OAuth Callback
-func newBindOAuthCallbackLogic(ctx context.Context, deps Deps) *BindOAuthCallbackLogic {
-	return &BindOAuthCallbackLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-type googleRequest struct {
-	Code  string `json:"code"`
-	State string `json:"state"`
-}
-
-func (l *BindOAuthCallbackLogic) BindOAuthCallback(req *dto.BindOAuthCallbackRequest) error {
-	if err := l.deps.Policy.EnsureMethodEnabled(l.ctx, req.Method); err != nil {
+// BindOAuthCallback completes binding the req.Method identity the provider
+// vouches for to the calling account. An account holds at most one identity
+// per method: binding the identity it already holds succeeds again, which a
+// client retrying a timed-out callback relies on, and another account's
+// identity or a second one of the method is refused.
+func (s *Service) BindOAuthCallback(ctx context.Context, req *dto.BindOAuthCallbackRequest) error {
+	if err := s.deps.Policy.EnsureMethodEnabled(ctx, req.Method); err != nil {
 		return err
 	}
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
+	current, ok := user.FromContext(ctx)
 	if !ok {
-		logger.Error("current user is not found in context")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
+		return xerr.Errorf(xerr.InvalidAccess, "no signed-in user")
 	}
-	if _, ok := req.Callback.(map[string]interface{}); !ok {
-		return errors.Wrap(xerr.NewErrCode(xerr.InvalidParams), "OAuth callback must be an object")
+	fields, ok := req.Callback.(map[string]any)
+	if !ok {
+		return xerr.Errorf(xerr.InvalidParams, "OAuth callback must be an object")
 	}
-	var err error
-	switch req.Method {
-	case "google":
-		err = l.google(req)
-	case "apple":
-		err = l.apple(req)
-	case "telegram":
-		err = l.telegram(req)
-	case "github":
-		err = l.github(req)
-	case "facebook":
-		err = l.facebook(req)
-	default:
-		l.Errorw("oauth login method not support", logger.Field("method", req.Method))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "oauth login method not support: %v", req.Method)
-	}
+	identity, err := s.deps.OAuth.Identify(ctx, oauthstate.BindScope(current.Id), req.Method, fields, "")
 	if err != nil {
-		l.Errorw("bind oauth callback failed: %v", logger.Field("error", err.Error()))
 		return err
 	}
-	// update user info to redis
-	err = l.deps.UserCache.UpdateUserCache(l.ctx, u)
-	if err != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "update user cache failed")
-	}
 
-	return nil
-}
-func (l *BindOAuthCallbackLogic) google(req *dto.BindOAuthCallbackRequest) error {
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok {
-		logger.Error("current user is not found in context")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
-	}
-	var request googleRequest
-	err := mapping.CloneMapToStruct(req.Callback.(map[string]interface{}), &request)
-	if err != nil {
-		l.Errorw("error CloneMapToStruct: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "CloneMapToStruct failed")
-	}
-	// validate the state code
-	redirect, err := oauthstate.Consume(l.ctx, l.deps.Redis, fmt.Sprintf("google:%s", request.State))
-	if err != nil {
-		l.Errorw("error get google state code: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "get google state code failed")
-	}
-	// get google config
-	authMethod, err := l.deps.Auth.FindOneByMethod(l.ctx, "google")
-	if err != nil {
-		l.Errorw("error find google auth method: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find google auth method failed")
-	}
-	var cfg auth.GoogleAuthConfig
-	err = json.Unmarshal([]byte(authMethod.Config), &cfg)
-	if err != nil {
-		l.Errorw("error unmarshal google config", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "unmarshal google config failed")
-	}
-	client := google.New(&google.Config{
-		ClientID:     cfg.ClientId,
-		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  redirect,
-	})
-	token, err := client.Exchange(l.ctx, request.Code)
-	if err != nil {
-		l.Errorw("error exchange google token: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "exchange google token failed")
-	}
-	googleUserInfo, err := client.GetUserInfo(token.AccessToken)
-	if err != nil {
-		l.Errorw("error get google user info: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "get google user info failed")
-	}
-	// query user info
-	userAuthMethod, err := l.deps.UserAuth.FindUserAuthMethodByOpenID(l.ctx, "google", googleUserInfo.OpenID)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "query user auth method failed")
-	}
-	if userAuthMethod.Id > 0 {
-		return errors.Wrapf(xerr.NewErrCode(xerr.UserExist), "google user already exists")
-	}
-	// bind google
-	userAuthMethod = &user.AuthMethods{
-		UserId:         u.Id,
-		AuthType:       "google",
-		AuthIdentifier: googleUserInfo.OpenID,
-		Verified:       true,
-	}
-	err = l.deps.UserAuth.InsertUserAuthMethods(l.ctx, userAuthMethod)
-	if err != nil {
-		l.Errorw("error insert user auth method: %v", logger.Field("error", err.Error()))
-		return err
-	}
-	return nil
-}
-
-func (l *BindOAuthCallbackLogic) apple(req *dto.BindOAuthCallbackRequest) error {
-	// validate the state code
-	callback := req.Callback.(map[string]interface{})
-	state, stateOK := callback["state"].(string)
-	code, codeOK := callback["code"].(string)
-	if !stateOK || state == "" || !codeOK || code == "" {
-		return errors.Wrap(xerr.NewErrCode(xerr.InvalidParams), "invalid Apple OAuth callback")
-	}
-	_, err := oauthstate.Consume(l.ctx, l.deps.Redis, fmt.Sprintf("apple:%s", state))
-	if err != nil {
-		l.Errorw("[BindOAuthCallbackLogic] Get State code error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "get apple state code failed: %v", err.Error())
-	}
-	appleAuth, err := l.deps.Auth.FindOneByMethod(l.ctx, "apple")
-	if err != nil {
-		l.Errorw("[BindOAuthCallbackLogic] FindOneByMethod error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find apple auth method failed: %v", err.Error())
-	}
-	var appleCfg auth.AppleAuthConfig
-	err = json.Unmarshal([]byte(appleAuth.Config), &appleCfg)
-	if err != nil {
-		l.Errorw("[BindOAuthCallbackLogic] Unmarshal error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "unmarshal apple config failed: %v", err.Error())
-	}
-
-	client, err := apple.New(apple.Config{
-		ClientID:     appleCfg.ClientId,
-		TeamID:       appleCfg.TeamID,
-		KeyID:        appleCfg.KeyID,
-		ClientSecret: appleCfg.ClientSecret,
-		RedirectURI:  appleCfg.RedirectURL,
-	})
-	if err != nil {
-		l.Errorw("[BindOAuthCallbackLogic] New apple client error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "new apple client failed: %v", err.Error())
-	}
-	// verify web token
-	resp, err := client.VerifyWebToken(l.ctx, code)
-	if err != nil {
-		l.Errorw("[BindOAuthCallbackLogic] VerifyWebToken error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "verify web token failed: %v", err.Error())
-	}
-	if resp.Error != "" {
-		l.Errorw("[BindOAuthCallbackLogic] VerifyWebToken error", logger.Field("error", resp.Error))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "verify web token failed: %v", resp.Error)
-	}
-	// query apple user unique id
-	appleUnique, err := apple.GetUniqueID(resp.IDToken)
-	if err != nil {
-		l.Errorw("[BindOAuthCallbackLogic] GetUniqueID error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "get apple unique id failed: %v", err.Error())
-	}
-	// query user by apple unique id
-	userAuthMethod, err := l.deps.UserAuth.FindUserAuthMethodByOpenID(l.ctx, "apple", appleUnique)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		l.Errorw("[BindOAuthCallbackLogic] FindUserAuthMethodByOpenID error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find user auth method by openid failed: %v", err.Error())
-	}
-	if userAuthMethod.Id > 0 {
-		l.Errorw("[BindOAuthCallbackLogic] User already exists")
-		return errors.Wrapf(xerr.NewErrCode(xerr.UserExist), "apple user already exists")
-	}
-	// query user info
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok {
-		logger.Error("current user is not found in context")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
-	}
-	// bind apple
-	userAuthMethod = &user.AuthMethods{
-		UserId:         u.Id,
-		AuthType:       "apple",
-		AuthIdentifier: appleUnique,
-		Verified:       true,
-	}
-	err = l.deps.UserAuth.InsertUserAuthMethods(l.ctx, userAuthMethod)
-	if err != nil {
-		l.Errorw("[BindOAuthCallbackLogic] InsertUserAuthMethods error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "insert user auth method failed: %v", err.Error())
-	}
-	return nil
-}
-
-func (l *BindOAuthCallbackLogic) facebook(req *dto.BindOAuthCallbackRequest) error {
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok {
-		logger.Error("current user is not found in context")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
-	}
-
-	var request googleRequest
-	err := mapping.CloneMapToStruct(req.Callback.(map[string]interface{}), &request)
-	if err != nil {
-		l.Errorw("error CloneMapToStruct: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "CloneMapToStruct failed")
-	}
-
-	// validate the state code
-	redirect, err := oauthstate.Consume(l.ctx, l.deps.Redis, fmt.Sprintf("facebook:%s", request.State))
-	if err != nil {
-		l.Errorw("error get facebook state code: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "get facebook state code failed")
-	}
-
-	// get facebook config
-	authMethod, err := l.deps.Auth.FindOneByMethod(l.ctx, "facebook")
-	if err != nil {
-		l.Errorw("error find facebook auth method: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find facebook auth method failed")
-	}
-
-	var cfg auth.FacebookAuthConfig
-	err = cfg.Unmarshal(authMethod.Config)
-	if err != nil {
-		l.Errorw("error unmarshal facebook config", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "unmarshal facebook config failed")
-	}
-
-	client := facebook.New(&facebook.Config{
-		ClientID:     cfg.ClientId,
-		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  redirect,
-	})
-
-	token, err := client.Exchange(l.ctx, request.Code)
-	if err != nil {
-		l.Errorw("error exchange facebook token: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "exchange facebook token failed")
-	}
-
-	facebookUserInfo, err := client.GetUserInfo(token.AccessToken)
-	if err != nil {
-		l.Errorw("error get facebook user info: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "get facebook user info failed")
-	}
-
-	// check if this Facebook account is already bound to another user
-	userAuthMethod, err := l.deps.UserAuth.FindUserAuthMethodByOpenID(l.ctx, "facebook", facebookUserInfo.OpenID)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "query user auth method failed")
-	}
-	if userAuthMethod.Id > 0 {
-		return errors.Wrapf(xerr.NewErrCode(xerr.UserExist), "facebook user already exists")
-	}
-
-	// bind facebook
-	userAuthMethod = &user.AuthMethods{
-		UserId:         u.Id,
-		AuthType:       "facebook",
-		AuthIdentifier: facebookUserInfo.OpenID,
-		Verified:       true,
-	}
-	err = l.deps.UserAuth.InsertUserAuthMethods(l.ctx, userAuthMethod)
-	if err != nil {
-		l.Errorw("error insert user auth method: %v", logger.Field("error", err.Error()))
-		return err
-	}
-	return nil
-}
-
-func (l *BindOAuthCallbackLogic) telegram(req *dto.BindOAuthCallbackRequest) error {
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok {
-		logger.Error("current user is not found in context")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
-	}
-
-	callback, ok := req.Callback.(map[string]interface{})
-	if !ok {
-		l.Errorw("invalid telegram callback payload", logger.Field("callback_type", fmt.Sprintf("%T", req.Callback)))
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "invalid telegram callback payload")
-	}
-
-	encodeText, ok := callback["tgAuthResult"].(string)
-	if !ok || encodeText == "" {
-		l.Errorw("telegram callback payload missing tgAuthResult")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "invalid telegram callback payload")
-	}
-
-	authMethod, err := l.deps.Auth.FindOneByMethod(l.ctx, "telegram")
-	if err != nil {
-		l.Errorw("find telegram auth method failed", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find telegram auth method failed")
-	}
-
-	var cfg auth.TelegramAuthConfig
-	err = cfg.Unmarshal(authMethod.Config)
-	if err != nil {
-		l.Errorw("unmarshal telegram config failed", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "unmarshal telegram config failed")
-	}
-
-	callbackData, err := telegram.ParseAndValidateBase64([]byte(encodeText), cfg.BotToken)
-	if err != nil {
-		l.Errorw("parse telegram callback failed", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "parse telegram callback failed")
-	}
-
-	if callbackData.Id == nil || callbackData.AuthDate == nil {
-		l.Errorw("telegram callback payload missing required fields")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "invalid telegram callback payload")
-	}
-
-	now := timeutil.Now().Unix()
-	const allowedClockSkew = int64(5 * 60)
-	if *callbackData.AuthDate > now+allowedClockSkew || now-*callbackData.AuthDate > telegramBindAuthExpire {
-		l.Errorw("telegram auth date expired",
-			logger.Field("auth_date", *callbackData.AuthDate),
-			logger.Field("current_time", now),
-			logger.Field("expire_seconds", telegramBindAuthExpire),
-		)
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "auth date expired")
-	}
-
-	// The signature alone does not bind the result to one exchange, so the
-	// payload is redeemable once (plus a short retry grace). A Redis outage
-	// must not lock users out, so it degrades to signature and freshness.
-	claimKey := fmt.Sprintf("%s:%s", config.TelegramCallbackKey, oauthstate.PayloadFingerprint(encodeText))
-	allowed, claimErr := oauthstate.ClaimSingleUse(l.ctx, l.deps.Redis, claimKey,
-		timeutil.Now(), telegramBindRetryGrace, telegramBindAuthExpire*time.Second)
-	if claimErr != nil {
-		l.Errorw("telegram bind replay check unavailable", logger.Field("error", claimErr.Error()))
-	} else if !allowed {
-		l.Errorw("telegram bind callback replayed")
-		return errors.Wrap(xerr.NewErrCode(xerr.ERROR), "telegram callback has already been used")
-	}
-
-	telegramUserID := fmt.Sprintf("%d", *callbackData.Id)
-
-	existingByOpenID, err := l.deps.UserAuth.FindUserAuthMethodByOpenID(l.ctx, "telegram", telegramUserID)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		l.Errorw("find telegram user auth method by openid failed", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find telegram user auth method failed")
-	}
-	if existingByOpenID.Id > 0 {
-		if existingByOpenID.UserId == u.Id {
+	holder, err := s.deps.UserAuth.FindUserAuthMethodByOpenID(ctx, req.Method, identity.Subject)
+	switch {
+	case err == nil && holder.UserId == current.Id:
+		// The caller just proved the identity with the provider, which is
+		// what verified means; an administrator's binding from before that
+		// flag was set signs in again once its owner proves it here.
+		if holder.Verified {
 			return nil
 		}
-		return errors.Wrapf(xerr.NewErrCode(xerr.UserExist), "telegram user already exists")
-	}
-
-	existingByPlatform, err := l.deps.UserAuth.FindUserAuthMethodByPlatform(l.ctx, u.Id, "telegram")
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		l.Errorw("find telegram user auth method by platform failed", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find telegram user auth method failed")
-	}
-	if existingByPlatform.Id > 0 {
-		if existingByPlatform.AuthIdentifier == telegramUserID {
-			return nil
+		holder.Verified = true
+		if err := s.deps.UserAuth.UpdateUserAuthMethods(ctx, holder); err != nil {
+			return xerr.Wrapf(err, xerr.DatabaseUpdateError, "verify %s identity", req.Method)
 		}
-		return errors.Wrapf(xerr.NewErrCode(xerr.UserExist), "telegram already bound")
+		return s.clearCache(ctx, current)
+	case err == nil:
+		return xerr.Errorf(xerr.UserExist, "the %s identity belongs to another account", req.Method)
+	case !errors.Is(err, gorm.ErrRecordNotFound):
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "find %s identity", req.Method)
+	}
+	if _, err := s.deps.UserAuth.FindUserAuthMethodByPlatform(ctx, current.Id, req.Method); err == nil {
+		return xerr.Errorf(xerr.UserExist, "the account already has a %s identity", req.Method)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "find the account's %s identity", req.Method)
 	}
 
-	userAuthMethod := &user.AuthMethods{
-		UserId:         u.Id,
-		AuthType:       "telegram",
-		AuthIdentifier: telegramUserID,
+	if err := s.deps.UserAuth.InsertUserAuthMethods(ctx, &user.AuthMethods{
+		UserId:         current.Id,
+		AuthType:       req.Method,
+		AuthIdentifier: identity.Subject,
 		Verified:       true,
+	}); err != nil {
+		return xerr.Wrapf(err, xerr.DatabaseInsertError, "bind %s identity", req.Method)
 	}
-
-	err = l.deps.UserAuth.InsertUserAuthMethods(l.ctx, userAuthMethod)
-	if err != nil {
-		l.Errorw("insert telegram user auth method failed", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "insert telegram user auth method failed")
-	}
-
-	return nil
+	return s.clearCache(ctx, current)
 }
 
-func (l *BindOAuthCallbackLogic) github(req *dto.BindOAuthCallbackRequest) error {
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok {
-		logger.Error("current user is not found in context")
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
-	}
-
-	var request googleRequest
-	err := mapping.CloneMapToStruct(req.Callback.(map[string]interface{}), &request)
-	if err != nil {
-		l.Errorw("error CloneMapToStruct: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "CloneMapToStruct failed")
-	}
-
-	// validate the state code
-	redirect, err := oauthstate.Consume(l.ctx, l.deps.Redis, fmt.Sprintf("github:%s", request.State))
-	if err != nil {
-		l.Errorw("error get github state code: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "get github state code failed")
-	}
-
-	// get github config
-	authMethod, err := l.deps.Auth.FindOneByMethod(l.ctx, "github")
-	if err != nil {
-		l.Errorw("error find github auth method: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find github auth method failed")
-	}
-
-	var cfg auth.GithubAuthConfig
-	err = cfg.Unmarshal(authMethod.Config)
-	if err != nil {
-		l.Errorw("error unmarshal github config", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "unmarshal github config failed")
-	}
-
-	client := github.New(&github.Config{
-		ClientID:     cfg.ClientId,
-		ClientSecret: cfg.ClientSecret,
-		RedirectURL:  redirect,
-	})
-
-	token, err := client.Exchange(l.ctx, request.Code)
-	if err != nil {
-		l.Errorw("error exchange github token: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "exchange github token failed")
-	}
-
-	githubUserInfo, err := client.GetUserInfo(token.AccessToken)
-	if err != nil {
-		l.Errorw("error get github user info: %v", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "get github user info failed")
-	}
-
-	// check if this GitHub account is already bound to another user
-	openID := fmt.Sprintf("%d", githubUserInfo.OpenID)
-	userAuthMethod, err := l.deps.UserAuth.FindUserAuthMethodByOpenID(l.ctx, "github", openID)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "query user auth method failed")
-	}
-	if userAuthMethod.Id > 0 {
-		return errors.Wrapf(xerr.NewErrCode(xerr.UserExist), "github user already exists")
-	}
-
-	// bind github
-	userAuthMethod = &user.AuthMethods{
-		UserId:         u.Id,
-		AuthType:       "github",
-		AuthIdentifier: openID,
-		Verified:       true,
-	}
-	err = l.deps.UserAuth.InsertUserAuthMethods(l.ctx, userAuthMethod)
-	if err != nil {
-		l.Errorw("error insert user auth method: %v", logger.Field("error", err.Error()))
-		return err
+// clearCache drops the account's cached view, which lists its identities.
+func (s *Service) clearCache(ctx context.Context, current *user.User) error {
+	if err := s.deps.UserCache.ClearUserCache(ctx, current); err != nil {
+		return xerr.Wrapf(err, xerr.ERROR, "clear user cache")
 	}
 	return nil
 }

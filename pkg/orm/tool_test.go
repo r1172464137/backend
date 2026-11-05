@@ -197,14 +197,86 @@ func TestPostgresDSNPreservesApplicationNameOverride(t *testing.T) {
 	}
 }
 
+// The default parameters keep Asia/Shanghai unless a location is given.
+func TestDefaultParametersFollowTheLocation(t *testing.T) {
+	if DefaultMySQLQuery("") != DefaultMySQLConfig || DefaultMySQLQuery(DefaultLocation) != DefaultMySQLConfig {
+		t.Fatalf("default MySQL parameters changed: %q", DefaultMySQLQuery(""))
+	}
+	const defaultPostgresQuery = "sslmode=prefer&TimeZone=Asia/Shanghai&application_name=perfect-panel"
+	if DefaultPostgresQuery("") != defaultPostgresQuery || DefaultPostgresQuery(DefaultLocation) != defaultPostgresQuery {
+		t.Fatalf("default PostgreSQL parameters changed: %q", DefaultPostgresQuery(""))
+	}
+	if legacyMySQLQuery("") != legacyDefaultMySQLConfig {
+		t.Fatalf("legacy MySQL parameters changed: %q", legacyMySQLQuery(""))
+	}
+
+	mysqlDSN := Mysql{Config: Config{Addr: "db:3306", Dbname: "ppanel", Username: "u", Password: "p"}, Location: "Europe/Berlin"}.Dsn()
+	query, err := mysqlDSNQuery(mysqlDSN)
+	if err != nil || query.Get("loc") != "Europe/Berlin" || query.Get("parseTime") != "true" {
+		t.Fatalf("MySQL DSN %q (err %v), want loc=Europe/Berlin", mysqlDSN, err)
+	}
+
+	// A zone whose name needs escaping still reaches PostgreSQL intact.
+	for _, stored := range []string{"", DefaultMySQLConfig, DefaultMySQLQuery("Etc/GMT+8")} {
+		dsn := Mysql{Config: Config{Driver: DriverPostgres, Addr: "db:5432", Dbname: "ppanel", Config: stored}, Location: "Etc/GMT+8"}.Dsn()
+		parsed, err := url.Parse(dsn)
+		if err != nil || parsed.Query().Get("TimeZone") != "Etc/GMT+8" || !strings.Contains(dsn, "TimeZone=Etc/GMT%2B8") {
+			t.Fatalf("stored %q: PostgreSQL DSN %q (err %v), want TimeZone Etc/GMT+8 with a visible slash", stored, dsn, err)
+		}
+	}
+}
+
+func TestParseDSNInAppliesTheLocationToBareDSNs(t *testing.T) {
+	for dsn, key := range map[string]string{
+		"root:pw@tcp(db:3306)/ppanel":         "loc",
+		"mysql://root:pw@db:3306/ppanel":      "loc",
+		"postgres://root:pw@db:5432/ppanel":   "TimeZone",
+		"postgresql://root:pw@db:5432/ppanel": "TimeZone",
+	} {
+		cfg := ParseDSNIn(dsn, "UTC")
+		if cfg == nil {
+			t.Fatalf("%s: not parsed", dsn)
+		}
+		params, err := url.ParseQuery(cfg.Config)
+		if err != nil || params.Get(key) != "UTC" {
+			t.Fatalf("%s: parameters %q (err %v), want %s=UTC", dsn, cfg.Config, err, key)
+		}
+		if def := ParseDSN(dsn); def == nil || !strings.Contains(def.Config, "Shanghai") {
+			t.Fatalf("%s: ParseDSN parameters %+v, want the Asia/Shanghai default", dsn, def)
+		}
+	}
+	// Explicit parameters win over the location.
+	if cfg := ParseDSNIn("root:pw@tcp(db:3306)/ppanel?charset=utf8mb4&parseTime=true&loc=Asia%2FTokyo", "UTC"); cfg == nil || !strings.Contains(cfg.Config, "Tokyo") {
+		t.Fatalf("explicit loc overridden: %+v", cfg)
+	}
+}
+
+func pingDatabase(t *testing.T, dsn string) {
+	t.Helper()
+	cfg := ParseDSN(dsn)
+	if cfg == nil {
+		t.Fatalf("parse test DSN %q", dsn)
+	}
+	db, err := ConnectDatabase(Mysql{Config: *cfg})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("connection pool: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	if err := sqlDB.Ping(); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+}
+
 func TestPingMySQL(t *testing.T) {
 	dsn := os.Getenv("PPANEL_TEST_MYSQL_DSN")
 	if dsn == "" {
 		t.Skip("set PPANEL_TEST_MYSQL_DSN to run MySQL/MariaDB ping test")
 	}
-	if !PingDatabase(DriverMySQL, dsn) {
-		t.Fatal("mysql ping failed")
-	}
+	pingDatabase(t, dsn)
 }
 
 func TestPingPostgres(t *testing.T) {
@@ -212,9 +284,7 @@ func TestPingPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set PPANEL_TEST_POSTGRES_DSN to run PostgreSQL ping test")
 	}
-	if !PingDatabase(DriverPostgres, dsn) {
-		t.Fatal("postgres ping failed")
-	}
+	pingDatabase(t, dsn)
 }
 
 func TestConnectPostgresWithIANAZone(t *testing.T) {
@@ -241,7 +311,7 @@ func TestConnectPostgresWithIANAZone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get PostgreSQL connection pool: %v", err)
 	}
-	defer sqlDB.Close()
+	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

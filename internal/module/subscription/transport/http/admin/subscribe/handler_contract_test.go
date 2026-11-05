@@ -7,18 +7,22 @@ import (
 	"github.com/perfect-panel/server/internal/module/subscription"
 )
 
+// handlerFactory compiles only for a handler factory that takes S and returns
+// Hertz's native handler type.
+func handlerFactory[S any](func(S) app.HandlerFunc) {}
+
 func TestHandlerFactories_return_native_hertz_handlers(t *testing.T) {
-	var _ func(subscription.Service) app.HandlerFunc = BatchDeleteSubscribeGroupHandler
-	var _ func(subscription.Service) app.HandlerFunc = BatchDeleteSubscribeHandler
-	var _ func(subscription.Service) app.HandlerFunc = CreateSubscribeGroupHandler
-	var _ func(subscription.Service) app.HandlerFunc = CreateSubscribeHandler
-	var _ func(subscription.Service) app.HandlerFunc = DeleteSubscribeGroupHandler
-	var _ func(subscription.Service) app.HandlerFunc = DeleteSubscribeHandler
-	var _ func(subscription.Service) app.HandlerFunc = GetSubscribeDetailsHandler
-	var _ func(subscription.Service) app.HandlerFunc = GetSubscribeGroupListHandler
-	var _ func(subscription.Service) app.HandlerFunc = GetSubscribeListHandler
-	var _ func(subscription.Service) app.HandlerFunc = ResetAllSubscribeTokenHandler
-	var _ func(subscription.Service) app.HandlerFunc = SubscribeSortHandler
-	var _ func(subscription.Service) app.HandlerFunc = UpdateSubscribeGroupHandler
-	var _ func(subscription.Service) app.HandlerFunc = UpdateSubscribeHandler
+	handlerFactory[subscription.Service](BatchDeleteSubscribeGroupHandler)
+	handlerFactory[subscription.Service](BatchDeleteSubscribeHandler)
+	handlerFactory[subscription.Service](CreateSubscribeGroupHandler)
+	handlerFactory[subscription.Service](CreateSubscribeHandler)
+	handlerFactory[subscription.Service](DeleteSubscribeGroupHandler)
+	handlerFactory[subscription.Service](DeleteSubscribeHandler)
+	handlerFactory[subscription.Service](GetSubscribeDetailsHandler)
+	handlerFactory[subscription.Service](GetSubscribeGroupListHandler)
+	handlerFactory[subscription.Service](GetSubscribeListHandler)
+	handlerFactory[subscription.Service](ResetAllSubscribeTokenHandler)
+	handlerFactory[subscription.Service](SubscribeSortHandler)
+	handlerFactory[subscription.Service](UpdateSubscribeGroupHandler)
+	handlerFactory[subscription.Service](UpdateSubscribeHandler)
 }

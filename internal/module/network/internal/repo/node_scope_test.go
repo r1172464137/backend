@@ -10,10 +10,18 @@ import (
 )
 
 func TestListNodesByScopeUsesORSemanticsAndPreloadsServer(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:node-plan-scope?mode=memory&cache=shared"), &gorm.Config{})
+	// A shared-cache in-memory database lives as long as one connection to
+	// it is open; closing the pool discards it, so a repeated run (-count)
+	// starts from an empty one instead of colliding on the unique sort.
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	if err := db.AutoMigrate(&node.Server{}, &node.Node{}); err != nil {
 		t.Fatal(err)
 	}

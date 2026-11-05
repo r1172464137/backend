@@ -1,16 +1,25 @@
+// Package github is the GitHub API client of the GitHub sign-in method: the
+// profile of the signed-in user and their verified email address.
 package github
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"time"
 
 	"github.com/perfect-panel/server/pkg/logger"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/github"
 )
+
+// apiURL is a variable so tests can point the client at a stub server.
+var apiURL = "https://api.github.com"
+
+// errNoVerifiedEmail reports an account without a verified address.
+var errNoVerifiedEmail = errors.New("no verified email found")
 
 type Config struct {
 	ClientID     string
@@ -51,84 +60,64 @@ func New(config *Config) *Client {
 	}
 }
 
-// GetUserInfo fetches the user profile from the GitHub API using the access token.
-// If the email is not publicly visible on the profile, it falls back to the emails API.
-func (c *Client) GetUserInfo(token string) (*UserInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client := c.Config.Client(ctx, &oauth2.Token{AccessToken: token})
-
-	// Fetch user profile
-	resp, err := client.Get("https://api.github.com/user")
-	if err != nil {
-		logger.Error("[GitHub OAuth 2.0] Get User Info", logger.Field("error", err.Error()))
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		logger.Error("[GitHub OAuth 2.0] Get User Info unexpected status",
-			logger.Field("status", resp.StatusCode))
-		return nil, fmt.Errorf("github api returned status %d", resp.StatusCode)
-	}
-
+// GetUserInfo fetches the user profile from the GitHub API using the access
+// token. The profile email carries no verification metadata, so the email
+// returned is the primary verified one from the emails API, or empty. The
+// requests are bound to ctx, which carries the caller's deadline.
+func (c *Client) GetUserInfo(ctx context.Context, token string) (*UserInfo, error) {
 	var userInfo UserInfo
-	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
-		logger.Error("[GitHub OAuth 2.0] Decode User Info", logger.Field("error", err.Error()))
-		return nil, err
+	if err := c.get(ctx, token, "/user", &userInfo); err != nil {
+		return nil, fmt.Errorf("github user: %w", err)
 	}
-
-	// The profile email does not carry verification metadata. Only attach an
-	// address returned by the emails endpoint with verified=true.
+	if userInfo.OpenID == 0 {
+		return nil, errors.New("github user has no id")
+	}
+	// Without a verified address the account still signs in, it just gets
+	// no email binding.
 	userInfo.Email = ""
-	email, err := c.GetPrimaryEmail(token)
-	if err != nil {
-		logger.Error("[GitHub OAuth 2.0] Get Verified Email", logger.Field("error", err.Error()))
-	} else {
+	email, err := c.GetPrimaryEmail(ctx, token)
+	switch {
+	case err == nil:
 		userInfo.Email = email
+	case errors.Is(err, errNoVerifiedEmail):
+	default:
+		logger.WithContext(ctx).Errorw("[GitHub OAuth 2.0] get verified email", logger.Field("error", err.Error()))
 	}
-
 	return &userInfo, nil
 }
 
-// GetPrimaryEmail fetches the primary verified email from the GitHub emails API.
-func (c *Client) GetPrimaryEmail(token string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client := c.Config.Client(ctx, &oauth2.Token{AccessToken: token})
-
-	resp, err := client.Get("https://api.github.com/user/emails")
-	if err != nil {
-		logger.Error("[GitHub OAuth 2.0] Get Emails", logger.Field("error", err.Error()))
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("github emails api returned status %d", resp.StatusCode)
-	}
-
+// GetPrimaryEmail fetches the primary verified email from the GitHub emails
+// API, falling back to any verified one.
+func (c *Client) GetPrimaryEmail(ctx context.Context, token string) (string, error) {
 	var emails []EmailInfo
-	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
-		logger.Error("[GitHub OAuth 2.0] Decode Emails", logger.Field("error", err.Error()))
-		return "", err
+	if err := c.get(ctx, token, "/user/emails", &emails); err != nil {
+		return "", fmt.Errorf("github emails: %w", err)
 	}
-
-	// Prefer primary + verified
 	for _, e := range emails {
 		if e.Primary && e.Verified {
 			return e.Email, nil
 		}
 	}
-
-	// Fallback: return the first verified email
 	for _, e := range emails {
 		if e.Verified {
 			return e.Email, nil
 		}
 	}
+	return "", errNoVerifiedEmail
+}
 
-	return "", fmt.Errorf("no verified email found")
+func (c *Client) get(ctx context.Context, token, path string, into any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.Client(ctx, &oauth2.Token{AccessToken: token}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("api returned status %d", resp.StatusCode)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(into)
 }

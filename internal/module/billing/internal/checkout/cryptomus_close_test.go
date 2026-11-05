@@ -10,90 +10,97 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
-	dto "github.com/perfect-panel/server/internal/module/billing/contract"
-	orderEntity "github.com/perfect-panel/server/internal/module/billing/entity/order"
-	paymentEntity "github.com/perfect-panel/server/internal/module/billing/entity/payment"
-	walletEntity "github.com/perfect-panel/server/internal/module/billing/entity/wallet"
+	"github.com/perfect-panel/server/internal/module/billing/entity/order"
+	"github.com/perfect-panel/server/internal/module/billing/internal/billingtest"
+	"github.com/perfect-panel/server/internal/module/billing/internal/gateway"
 	"github.com/perfect-panel/server/internal/module/billing/internal/payment/cryptomus"
-	userEntity "github.com/perfect-panel/server/internal/module/identity/entity/user"
-	"github.com/perfect-panel/server/internal/module/subscription"
-	subscribeEntity "github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/module/identity/entity/user"
+	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
 )
 
-type cryptomusCloseTransport func(*http.Request) (*http.Response, error)
+type roundTripFunc func(*http.Request) (*http.Response, error)
 
-func (f cryptomusCloseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// cryptomusCase is a pending $10.00 Cryptomus order holding a plan unit and
+// 40 of gift credit, whose invoice-1 the gateway answers through answer.
+type cryptomusCase struct {
+	*checkoutFixture
+	buyer *user.User
+	plan  *subscribe.Subscribe
 }
 
-// Replace the test process's transport, never the production gateway URL or
-// payment configuration. These tests must not run in parallel.
-func cryptomusCloseFixture(t *testing.T, gateway func() (int, string, error)) (*closeOrderStore, *Service, *closeQueue) {
+const cryptomusOrderNo = "cryptomus-order"
+
+func newCryptomusCase(t *testing.T, answer func() (int, string, error), adjust ...func(*order.Order)) *cryptomusCase {
 	t.Helper()
-	orders := &closeOrderRepo{
-		order: &orderEntity.Order{
-			Id: 1, OrderNo: "cryptomus-order", Status: 1, UserId: 7,
-			Method: "Cryptomus", PaymentId: 2, PaymentCurrency: "USD", PaymentAmount: 1000, TradeNo: "invoice-1",
-			Type: orderTypeSubscribe, SubscribeId: 99, GiftAmount: 40,
-		},
-		transition: true,
+	o := &order.Order{
+		OrderNo: cryptomusOrderNo, Status: order.StatusPending, Type: order.TypeSubscribe, Amount: 1000, GiftAmount: 40,
+		Method: "Cryptomus", PaymentCurrency: "USD", PaymentAmount: 1000, TradeNo: "invoice-1",
 	}
-	store := &closeOrderStore{
-		orders:     orders,
-		subscribes: &closeSubscribeRepo{sub: &subscribeEntity.Subscribe{Id: 99, Inventory: 2}},
-		users:      &closeUserRepo{wallet: &walletEntity.Wallet{UserId: 7, GiftAmount: 10}},
-		logs:       &closeLogRepo{},
+	for _, fn := range adjust {
+		fn(o)
 	}
-	store.markReserved(t, orders.order.OrderNo)
-	queue := &closeQueue{}
-	svc := NewService(Deps{
-		Orders: orders, Store: store, Queue: queue,
-		Inventory: subscription.NewInventory(store),
-		Payments: &closePaymentRepo{method: &paymentEntity.Payment{
-			Id: 2, Platform: "Cryptomus", Config: `{"merchant_id":"merchant-1","api_key":"test-key"}`,
-		}},
-	})
-	previous := http.DefaultTransport
-	http.DefaultTransport = cryptomusCloseTransport(func(req *http.Request) (*http.Response, error) {
-		defer req.Body.Close()
+	// The invoice query goes to the production host through the injected
+	// client; nothing leaves the process.
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		defer func() { _ = req.Body.Close() }()
 		if req.URL.String() != cryptomus.DefaultBaseURL+"/v1/payment/info" || req.Method != http.MethodPost {
-			t.Fatalf("unexpected gateway request: %s %s", req.Method, req.URL)
+			t.Errorf("unexpected gateway request: %s %s", req.Method, req.URL)
 		}
 		var query map[string]string
 		if err := json.NewDecoder(req.Body).Decode(&query); err != nil {
-			t.Fatal(err)
+			t.Error(err)
 		}
-		if tradeNo := orders.order.TradeNo; tradeNo != "" {
-			if query["uuid"] != tradeNo {
-				t.Fatalf("expected lookup by claimed invoice, got %v", query)
-			}
-		} else if query["order_id"] != orders.order.OrderNo {
-			t.Fatalf("expected recovery lookup by order number, got %v", query)
+		if o.TradeNo != "" && query["uuid"] != o.TradeNo {
+			t.Errorf("expected lookup by the claimed invoice, got %v", query)
 		}
-		status, body, err := gateway()
+		if o.TradeNo == "" && query["order_id"] != o.OrderNo {
+			t.Errorf("expected recovery lookup by order number, got %v", query)
+		}
+		status, body, err := answer()
 		if err != nil {
 			return nil, err
 		}
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
-	})
-	t.Cleanup(func() { http.DefaultTransport = previous })
-	return store, svc, queue
+	})}
+	f := newCheckoutFixture(t, withGateways(gateway.NewRegistry(gateway.WithHTTPClient(client))))
+	buyer, _ := f.buyer(10)
+	plan := f.h.Plan(1000, func(p *subscribe.Subscribe) { p.Inventory = 3 })
+	method := f.h.Payment("Cryptomus", `{"merchant_id":"merchant-1","api_key":"test-key"}`)
+	o.UserId, o.SubscribeId, o.PaymentId = buyer.Id, plan.Id, method.Id
+	f.h.Order(o)
+	if err := f.svc.deps.Inventory.Reserve(context.Background(), o.OrderNo, plan.Id); err != nil {
+		t.Fatal(err)
+	}
+	return &cryptomusCase{checkoutFixture: f, buyer: buyer, plan: plan}
 }
 
-func cryptomusInvoiceBody(status string, final bool, paymentAmount string) string {
-	return fmt.Sprintf(`{"state":0,"result":{"uuid":"invoice-1","order_id":"cryptomus-order","amount":"10.00","currency":"USD","status":%q,"is_final":%t,"payment_amount":%q}}`, status, final, paymentAmount)
+func (c *cryptomusCase) owner() context.Context { return billingtest.UserContext(c.buyer) }
+
+func (c *cryptomusCase) close(ctx context.Context) error {
+	return closeAs(ctx, c.svc, cryptomusOrderNo)
 }
 
-func assertCryptomusReservationUnchanged(t *testing.T, store *closeOrderStore) {
-	t.Helper()
-	if store.users.updateCalls != 0 || store.users.wallet.GiftAmount != 10 || store.logs.insertCalls != 0 ||
-		store.subscribes.updateCalls != 0 || store.subscribes.sub.Inventory != 2 {
-		t.Fatal("unconfirmed or paid invoice released the order reservation")
+// assertReservationKept checks that the order still holds its plan unit and
+// gift credit.
+func (c *cryptomusCase) assertReservationKept() {
+	c.t.Helper()
+	if c.h.ReloadWallet(c.buyer.Id).GiftAmount != 10 || len(c.h.GiftLogs(c.buyer.Id)) != 0 || c.h.ReloadPlan(c.plan.Id).Inventory != 2 {
+		c.t.Fatal("an unconfirmed or paid invoice released the order reservation")
 	}
 }
 
+func cryptomusInvoice(status string, final bool, paymentAmount string) string {
+	return fmt.Sprintf(`{"state":0,"result":{"uuid":"invoice-1","order_id":"cryptomus-order","amount":"10.00","currency":"USD","status":%q,"is_final":%t,"payment_amount":%q}}`, status, final, paymentAmount)
+}
+
+func answering(status int, body string) func() (int, string, error) {
+	return func() (int, string, error) { return status, body, nil }
+}
+
+// Nobody's close may release an invoice that is not confirmed cancelled
+// without funds.
 func TestCloseCryptomusKeepsUnconfirmedInvoicesPending(t *testing.T) {
 	tests := []struct {
 		name, status, paid string
@@ -117,20 +124,18 @@ func TestCloseCryptomusKeepsUnconfirmedInvoicesPending(t *testing.T) {
 		{"cancelled invalid amount", "cancel", "invalid", true},
 	}
 	for _, test := range tests {
-		for _, userInitiated := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/user=%t", test.name, userInitiated), func(t *testing.T) {
-				store, svc, queue := cryptomusCloseFixture(t, func() (int, string, error) {
-					return 200, cryptomusInvoiceBody(test.status, test.final, test.paid), nil
-				})
-				ctx := context.Background()
-				if userInitiated {
-					ctx = context.WithValue(ctx, requestctx.CtxKeyUser, &userEntity.User{Id: 7})
+		for _, byOwner := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/owner=%t", test.name, byOwner), func(t *testing.T) {
+				c := newCryptomusCase(t, answering(200, cryptomusInvoice(test.status, test.final, test.paid)))
+				ctx := system
+				if byOwner {
+					ctx = c.owner()
 				}
-				err := svc.Close(ctx, &dto.CloseOrderRequest{OrderNo: "cryptomus-order"})
-				if !errors.Is(err, ErrGatewayUnconfirmed) || store.orders.order.Status != 1 || len(queue.activations) != 0 {
-					t.Fatalf("must stay pending: err=%v order=%+v", err, store.orders.order)
+				assertUnconfirmed(t, c.close(ctx))
+				if c.status(cryptomusOrderNo) != order.StatusPending || len(c.queue.Activations) != 0 {
+					t.Fatal("the order did not stay pending")
 				}
-				assertCryptomusReservationUnchanged(t, store)
+				c.assertReservationKept()
 			})
 		}
 	}
@@ -150,25 +155,25 @@ func TestCloseCryptomusQueryErrorsNeverDiscardKnownInvoice(t *testing.T) {
 		{"server error", 500, `{"state":1,"message":"Server error"}`, nil},
 	}
 	for _, test := range tests {
-		for _, userInitiated := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/user=%t", test.name, userInitiated), func(t *testing.T) {
-				store, svc, _ := cryptomusCloseFixture(t, func() (int, string, error) { return test.code, test.body, test.err })
-				ctx := context.Background()
-				if userInitiated {
-					ctx = context.WithValue(ctx, requestctx.CtxKeyUser, &userEntity.User{Id: 7})
+		for _, byOwner := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/owner=%t", test.name, byOwner), func(t *testing.T) {
+				c := newCryptomusCase(t, func() (int, string, error) { return test.code, test.body, test.err })
+				ctx := system
+				if byOwner {
+					ctx = c.owner()
 				}
-				if err := svc.Close(ctx, &dto.CloseOrderRequest{OrderNo: "cryptomus-order"}); !errors.Is(err, ErrGatewayUnconfirmed) {
-					t.Fatalf("must reject unconfirmed close: %v", err)
+				assertUnconfirmed(t, c.close(ctx))
+				if c.status(cryptomusOrderNo) != order.StatusPending {
+					t.Fatal("a query error closed the order")
 				}
-				if store.orders.order.Status != 1 {
-					t.Fatal("query error closed the order")
-				}
-				assertCryptomusReservationUnchanged(t, store)
+				c.assertReservationKept()
 			})
 		}
 	}
 }
 
+// An invoice whose UUID was never claimed may still be being created after
+// a timeout; even "payment not found" cannot close it.
 func TestCloseCryptomusUnclaimedInvoiceMayStillBeCreating(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -181,52 +186,46 @@ func TestCloseCryptomusUnclaimedInvoiceMayStillBeCreating(t *testing.T) {
 		{"generic not found", 404, `{"state":1,"message":"Not found"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store, svc, _ := cryptomusCloseFixture(t, func() (int, string, error) { return test.code, test.body, nil })
-			store.orders.order.TradeNo = ""
-			err := svc.Close(context.Background(), &dto.CloseOrderRequest{OrderNo: "cryptomus-order"})
-			if !errors.Is(err, ErrGatewayUnconfirmed) || store.orders.order.Status != 1 {
-				t.Fatalf("unconfirmed invoice should stay pending: %v", err)
+			c := newCryptomusCase(t, answering(test.code, test.body), func(o *order.Order) { o.TradeNo = "" })
+			assertUnconfirmed(t, c.close(system))
+			if c.status(cryptomusOrderNo) != order.StatusPending {
+				t.Fatal("an unconfirmed invoice was closed")
 			}
-			assertCryptomusReservationUnchanged(t, store)
+			c.assertReservationKept()
 		})
 	}
 }
 
 func TestCloseCryptomusBeforeCheckoutCanCancel(t *testing.T) {
-	store, svc, _ := cryptomusCloseFixture(t, func() (int, string, error) {
-		t.Fatal("an order before checkout needs no gateway request")
-		return 0, "", nil
-	})
-	store.orders.order.TradeNo, store.orders.order.PaymentCurrency = "", ""
-	if err := svc.Close(context.Background(), &dto.CloseOrderRequest{OrderNo: "cryptomus-order"}); err != nil {
+	c := newCryptomusCase(t, func() (int, string, error) {
+		t.Error("an order before checkout needs no gateway request")
+		return 0, "", errors.New("unexpected")
+	}, func(o *order.Order) { o.TradeNo, o.PaymentCurrency = "", "" })
+	if err := c.close(system); err != nil {
 		t.Fatal(err)
 	}
-	if store.orders.order.Status != 3 {
+	if c.status(cryptomusOrderNo) != order.StatusClosed {
 		t.Fatal("an order before checkout should close normally")
 	}
 }
 
-type cryptomusConcurrentCheckoutStore struct{ *closeOrderStore }
-
-func (s cryptomusConcurrentCheckoutStore) InBillingTx(ctx context.Context, fn func(repository.BillingStore) error) error {
-	// Simulate checkout persisting its expectation after the close request's
-	// initial read but before the transaction acquires the order row lock.
-	s.orders.order.PaymentCurrency = "USD"
-	return s.closeOrderStore.InBillingTx(ctx, fn)
-}
-
+// The checkout records its expectation before it creates the invoice; a
+// close that read the order before that write must not close it.
 func TestCloseCryptomusRechecksConcurrentCheckoutInsideTransaction(t *testing.T) {
-	store, svc, _ := cryptomusCloseFixture(t, func() (int, string, error) {
-		t.Fatal("the initial snapshot is from before checkout")
-		return 0, "", nil
-	})
-	store.orders.order.TradeNo, store.orders.order.PaymentCurrency = "", ""
-	svc.deps.Store = cryptomusConcurrentCheckoutStore{store}
-	err := svc.Close(context.Background(), &dto.CloseOrderRequest{OrderNo: "cryptomus-order"})
-	if !errors.Is(err, ErrGatewayUnconfirmed) || store.orders.order.Status != 1 {
-		t.Fatalf("must not close an order whose checkout just started: %v", err)
+	c := newCryptomusCase(t, func() (int, string, error) {
+		t.Error("the close read the order before its checkout started")
+		return 0, "", errors.New("unexpected")
+	}, func(o *order.Order) { o.TradeNo, o.PaymentCurrency = "", "" })
+	c.svc.deps.Tx = raceTransactor{tx: c.h.Store, compete: func() {
+		if err := c.h.DB.Model(&order.Order{}).Where("order_no = ?", cryptomusOrderNo).Update("payment_currency", "USD").Error; err != nil {
+			t.Fatal(err)
+		}
+	}}
+	assertUnconfirmed(t, c.close(system))
+	if c.status(cryptomusOrderNo) != order.StatusPending {
+		t.Fatal("an order whose checkout just started was closed")
 	}
-	assertCryptomusReservationUnchanged(t, store)
+	c.assertReservationKept()
 }
 
 func TestCloseCryptomusRequiresMatchingInvoiceBeforeCancellation(t *testing.T) {
@@ -234,26 +233,32 @@ func TestCloseCryptomusRequiresMatchingInvoiceBeforeCancellation(t *testing.T) {
 		{"invoice-1", "other-invoice"}, {"cryptomus-order", "other-order"}, {"10.00", "9.00"}, {"USD", "EUR"},
 	} {
 		t.Run(test.from, func(t *testing.T) {
-			store, svc, _ := cryptomusCloseFixture(t, func() (int, string, error) {
-				return 200, strings.Replace(cryptomusInvoiceBody("cancel", true, "0.00"), test.from, test.to, 1), nil
-			})
-			if err := svc.Close(context.Background(), &dto.CloseOrderRequest{OrderNo: "cryptomus-order"}); !errors.Is(err, ErrGatewayUnconfirmed) {
-				t.Fatalf("must reject mismatched invoice: %v", err)
-			}
-			assertCryptomusReservationUnchanged(t, store)
+			c := newCryptomusCase(t, answering(200, strings.Replace(cryptomusInvoice("cancel", true, "0.00"), test.from, test.to, 1)))
+			assertUnconfirmed(t, c.close(system))
+			c.assertReservationKept()
 		})
 	}
 }
 
+// An invoice cannot be cancelled, so an administrator's close waits for the
+// gateway to confirm that no money was collected, like every caller.
+func TestCloseByAdminKeepsCryptomusConfirmationRule(t *testing.T) {
+	c := newCryptomusCase(t, answering(200, cryptomusInvoice("check", false, "0.00")))
+	closed, err := c.svc.CloseByAdmin(context.Background(), cryptomusOrderNo, 99)
+	if closed {
+		t.Fatal("the administrator closed an unconfirmed invoice")
+	}
+	assertUnconfirmed(t, err)
+	c.assertReservationKept()
+}
+
 func TestCloseCryptomusCancelledUnpaidInvoiceReleasesReservation(t *testing.T) {
-	store, svc, _ := cryptomusCloseFixture(t, func() (int, string, error) {
-		return 200, cryptomusInvoiceBody("cancel", true, "0.00000000"), nil
-	})
-	if err := svc.Close(context.Background(), &dto.CloseOrderRequest{OrderNo: "cryptomus-order"}); err != nil {
+	c := newCryptomusCase(t, answering(200, cryptomusInvoice("cancel", true, "0.00000000")))
+	if err := c.close(system); err != nil {
 		t.Fatal(err)
 	}
-	if store.orders.order.Status != 3 || store.users.wallet.GiftAmount != 50 || store.subscribes.sub.Inventory != 3 {
-		t.Fatal("verified cancellation must close and release reservation")
+	if c.status(cryptomusOrderNo) != order.StatusClosed || c.h.ReloadWallet(c.buyer.Id).GiftAmount != 50 || c.h.ReloadPlan(c.plan.Id).Inventory != 3 {
+		t.Fatal("a verified cancellation must close and release the reservation")
 	}
 }
 
@@ -261,22 +266,18 @@ func TestCloseCryptomusSettlesAfterRefusingEarlyUserCancellation(t *testing.T) {
 	for _, paidStatus := range []string{"paid", "paid_over"} {
 		t.Run(paidStatus, func(t *testing.T) {
 			status := "confirm_check"
-			store, svc, queue := cryptomusCloseFixture(t, func() (int, string, error) {
-				return 200, cryptomusInvoiceBody(status, status != "confirm_check", "10.00"), nil
+			c := newCryptomusCase(t, func() (int, string, error) {
+				return 200, cryptomusInvoice(status, status != "confirm_check", "10.00"), nil
 			})
-			ctx := context.WithValue(context.Background(), requestctx.CtxKeyUser, &userEntity.User{Id: 7})
-			req := &dto.CloseOrderRequest{OrderNo: "cryptomus-order"}
-			if err := svc.Close(ctx, req); !errors.Is(err, ErrGatewayUnconfirmed) {
-				t.Fatalf("must refuse cancellation while confirming: %v", err)
-			}
+			assertUnconfirmed(t, c.close(c.owner()))
 			status = paidStatus
-			if err := svc.Close(context.Background(), req); err != nil {
-				t.Fatalf("reconciler must settle the late payment: %v", err)
+			if err := c.close(system); err != nil {
+				t.Fatalf("the reconciler must settle the late payment: %v", err)
 			}
-			if store.orders.order.Status != 2 || len(queue.activations) != 1 {
-				t.Fatal("paid invoice must activate exactly once instead of closing")
+			if c.status(cryptomusOrderNo) != order.StatusPaid || len(c.queue.Activations) != 1 {
+				t.Fatal("a paid invoice must activate exactly once instead of closing")
 			}
-			assertCryptomusReservationUnchanged(t, store)
+			c.assertReservationKept()
 		})
 	}
 }

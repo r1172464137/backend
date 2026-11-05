@@ -60,7 +60,15 @@ func (s *Service) UpdateInterfaceConfig(ctx context.Context, req *dto.InterfaceC
 	if err != nil {
 		return err
 	}
-	if err := s.deps.System.UpdateValueByCategoryKey(ctx, "interface", interfaceConfigKey, string(value), "string"); err != nil {
+	var previous []configFieldValue
+	if rows, readErr := s.deps.System.GetInterfaceConfig(ctx); readErr == nil {
+		previous = make([]configFieldValue, 0, len(rows))
+		for _, row := range rows {
+			previous = append(previous, configFieldValue{key: row.Key, value: row.Value})
+		}
+	}
+	change := settingsChange{category: "interface", next: []configFieldValue{{key: interfaceConfigKey, value: string(value), valueType: "string"}}, previous: previous}
+	if err := updateConfigFields(ctx, s.deps, change); err != nil {
 		return errors.Wrap(xerr.NewErrCode(xerr.DatabaseUpdateError), err.Error())
 	}
 	return nil

@@ -4,34 +4,30 @@ import (
 	"github.com/perfect-panel/server/internal/infra/integration"
 )
 
+// Platform is an email provider, stored in the configuration by its name.
 type Platform int
 
 const (
+	// SMTP delivers through an SMTP relay.
 	SMTP Platform = iota
 	unsupported
 )
 
-var platformNames = map[string]Platform{
-	"smtp":        SMTP,
-	"unsupported": unsupported,
-}
+var platforms = integration.NewPlatforms(unsupported, map[string]Platform{
+	"smtp": SMTP,
+})
 
+// String returns the name the configuration stores p under.
 func (p Platform) String() string {
-	for k, v := range platformNames {
-		if v == p {
-			return k
-		}
-	}
-	return "unsupported"
+	return platforms.Name(p)
 }
 
 func parsePlatform(s string) Platform {
-	if p, ok := platformNames[s]; ok {
-		return p
-	}
-	return unsupported
+	return platforms.Parse(s)
 }
 
+// GetSupportedPlatforms describes the providers and their configuration
+// fields for the administrators' settings page.
 func GetSupportedPlatforms() []integration.Info {
 	return []integration.Info{
 		{
@@ -44,7 +40,13 @@ func GetSupportedPlatforms() []integration.Info {
 				"pass":     "pass",
 				"from":     "from",
 				"reply_to": "reply_to",
-				"ssl":      "ssl",
+				// ssl requires encryption (implicit TLS on 465, STARTTLS
+				// otherwise); implicit_tls starts with TLS on another port;
+				// insecure_skip_verify accepts a self-signed relay
+				// certificate. See SMTPConfig.
+				"ssl":                  "ssl",
+				"implicit_tls":         "implicit_tls",
+				"insecure_skip_verify": "insecure_skip_verify",
 			},
 		},
 	}

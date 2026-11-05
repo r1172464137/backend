@@ -7,15 +7,24 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
+// ParseDSN parses a MySQL or URL-form DSN with the default parameters for
+// DefaultLocation; it is ParseDSNIn(dsn, "").
 func ParseDSN(dsn string) *Config {
-	if cfg := parseURLDSN(dsn); cfg != nil {
+	return ParseDSNIn(dsn, "")
+}
+
+// ParseDSNIn parses a MySQL or URL-form DSN. A DSN without parameters gets
+// the default ones for location (DefaultLocation when empty). It returns nil
+// for a DSN it cannot parse.
+func ParseDSNIn(dsn, location string) *Config {
+	if cfg := parseURLDSN(dsn, location); cfg != nil {
 		return cfg
 	}
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return nil
 	}
-	query := DefaultMySQLConfig
+	query := DefaultMySQLQuery(location)
 	if formattedQuery := mysqlDSNRawQuery(cfg.FormatDSN()); formattedQuery != "" {
 		query = withDefaultMySQLParams(formattedQuery)
 	}
@@ -62,7 +71,7 @@ func mysqlDSNRawQuery(dsn string) string {
 	return dsn[databaseSeparator+querySeparator+2:]
 }
 
-func parseURLDSN(dsn string) *Config {
+func parseURLDSN(dsn, location string) *Config {
 	u, err := url.Parse(dsn)
 	if err != nil || u.Scheme == "" {
 		return nil
@@ -75,9 +84,9 @@ func parseURLDSN(dsn string) *Config {
 	query := u.RawQuery
 	if query == "" {
 		if driver == DriverPostgres {
-			query = DefaultPostgresConfig
+			query = DefaultPostgresQuery(location)
 		} else {
-			query = DefaultMySQLConfig
+			query = DefaultMySQLQuery(location)
 		}
 	} else if driver == DriverMySQL {
 		query = withDefaultMySQLParams(query)

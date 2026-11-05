@@ -3,37 +3,30 @@ package usersub
 import (
 	"context"
 
-	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetUserSubscribeTrafficLogsLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get user subcribe traffic logs
-func newGetUserSubscribeTrafficLogsLogic(ctx context.Context, deps Deps) *GetUserSubscribeTrafficLogsLogic {
-	return &GetUserSubscribeTrafficLogsLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetUserSubscribeTrafficLogsLogic) GetUserSubscribeTrafficLogs(req *dto.GetUserSubscribeTrafficLogsRequest) (resp *dto.GetUserSubscribeTrafficLogsResponse, err error) {
-	list, total, err := l.deps.Traffic.QueryTrafficLogPageList(l.ctx, req.UserId, req.SubscribeId, req.Page, req.Size)
+// GetUserSubscribeTrafficLogs pages a subscription's traffic records.
+func (s *Service) GetUserSubscribeTrafficLogs(ctx context.Context, req *dto.GetUserSubscribeTrafficLogsRequest) (*dto.GetUserSubscribeTrafficLogsResponse, error) {
+	list, total, err := s.deps.Traffic.SubscriptionTrafficLogs(ctx, req.UserId, req.SubscribeId, req.Page, req.Size)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetUserSubscribeTrafficLogs failed: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "list the traffic logs of subscription %d", req.SubscribeId)
 	}
-	userRespList := make([]dto.TrafficLog, 0)
-	mapping.DeepCopy(&userRespList, list)
+	logs := make([]dto.TrafficLog, 0, len(list))
+	for _, record := range list {
+		logs = append(logs, dto.TrafficLog{
+			Id:          record.Id,
+			ServerId:    record.ServerId,
+			UserId:      record.UserId,
+			SubscribeId: record.SubscribeId,
+			Download:    record.Download,
+			Upload:      record.Upload,
+			Timestamp:   record.Timestamp.UnixMilli(),
+		})
+	}
 	return &dto.GetUserSubscribeTrafficLogsResponse{
 		Total: total,
-		List:  userRespList,
+		List:  logs,
 	}, nil
 }

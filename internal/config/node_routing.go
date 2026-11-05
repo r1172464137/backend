@@ -128,21 +128,28 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 	if len(input.Outbounds) > MaxRoutingOutbounds || len(input.Rules) > MaxRoutingRules {
 		return nil, errorsWithField("routing", "too many outbounds or rules")
 	}
-	// Reject excessive input array elements before constructing a serialized
-	// copy, even when normalization would deduplicate them away.
+	if err := validateRoutingInputBudget(input); err != nil {
+		return nil, err
+	}
+	return normalizeRoutingPolicy(input)
+}
+
+// Reject excessive input elements before serializing even when normalization
+// would deduplicate them away.
+func validateRoutingInputBudget(input *NodeRouting) error {
 	inputValues := 0
 	for i, rule := range input.Rules {
 		for _, value := range rule.Values {
 			if len(strings.TrimSpace(value)) > MaxRouteRuleBytes {
-				return nil, errorsWithField(fmt.Sprintf("routing.rules[%d].values", i+1), "raw match value exceeds 4096 bytes")
+				return errorsWithField(fmt.Sprintf("routing.rules[%d].values", i+1), "raw match value exceeds 4096 bytes")
 			}
 		}
 		if len(rule.Values) > MaxRoutingValuesPerRule {
-			return nil, errorsWithField(fmt.Sprintf("routing.rules[%d].values", i+1), "too many input values")
+			return errorsWithField(fmt.Sprintf("routing.rules[%d].values", i+1), "too many input values")
 		}
 		inputValues += len(rule.Values) + len(rule.UserIDs)
 		if inputValues > MaxRoutingValues {
-			return nil, errorsWithField("routing.rules", "too many input values")
+			return errorsWithField("routing.rules", "too many input values")
 		}
 	}
 	if input.Version == RoutingVersion2 {
@@ -153,9 +160,13 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 			}
 		}
 		if inputValues > MaxRoutingValues {
-			return nil, errorsWithField("routing", "too many input values")
+			return errorsWithField("routing", "too many input values")
 		}
 	}
+	return nil
+}
+
+func normalizeRoutingPolicy(input *NodeRouting) (*NodeRouting, error) {
 	// Encoding here also bounds arbitrary connection fields/plugin options before
 	// copying or normalizing the potentially much smaller canonical policy.
 	encoded, err := json.Marshal(input)
@@ -180,6 +191,42 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 	result := &NodeRouting{Version: input.Version, DefaultOutboundID: input.DefaultOutboundID,
 		Outbounds: make([]NodeOutbound, len(input.Outbounds)), Rules: make([]NodeRoute, len(input.Rules))}
 	ids := map[string]struct{}{RoutingDirect: {}, RoutingBlock: {}}
+	if _, err := normalizeRoutingOutbounds(input, result, ids); err != nil {
+		return nil, err
+	}
+	var budget routingMatchBudget
+	if _, err := normalizeRoutingRules(input, result, ids, &budget); err != nil {
+		return nil, err
+	}
+	matchValues, matchBytes := budget.values, budget.bytes
+	if input.Version == RoutingVersion2 {
+		if err := normalizeRoutingV2(input, result, ids); err != nil {
+			return nil, err
+		}
+		matchValues += len(result.UserDefaults)
+		if result.DNSPolicy != nil {
+			for _, r := range result.DNSPolicy.Resolvers {
+				matchValues += len(r.Domains)
+				for _, v := range r.Domains {
+					matchBytes += len(v)
+				}
+			}
+		}
+		if matchValues > MaxRoutingValues || matchBytes > MaxRoutingMatchBytes {
+			return nil, errorsWithField("routing", "aggregate match budget exceeded")
+		}
+	}
+	canonical, err := json.Marshal(result)
+	if err != nil {
+		return nil, errorsWithField("routing", fmt.Sprintf("cannot encode policy: %v", err))
+	}
+	if len(canonical) > MaxRoutingJSONBytes {
+		return nil, errorsWithField("routing", "serialized policy exceeds 1 MiB")
+	}
+	return result, nil
+}
+
+func normalizeRoutingOutbounds(input, result *NodeRouting, ids map[string]struct{}) (*NodeRouting, error) {
 	names := make(map[string]struct{}, len(input.Outbounds))
 	for i, source := range input.Outbounds {
 		field := fmt.Sprintf("routing.outbounds[%d]", i+1)
@@ -229,27 +276,12 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		if err := ValidatePluginOptionsWire(source.PluginOptions); err != nil {
 			return nil, errorsWithField(field+".plugin_opts", err.Error())
 		}
-		for _, raw := range []struct{ field, value string }{{"settings", source.Settings}, {"stream_settings", source.StreamSettings}, {"xhttp_extra", source.XHTTPExtra}} {
-			if strings.TrimSpace(raw.value) != "" {
-				var object map[string]json.RawMessage
-				if ValidateUniqueJSON([]byte(raw.value)) != nil || json.Unmarshal([]byte(raw.value), &object) != nil || object == nil {
-					return nil, errorsWithField(field+"."+raw.field, "must be a JSON object")
-				}
-				if raw.field == "stream_settings" || raw.field == "xhttp_extra" {
-					if err := ValidateNodeStreamSpiderJSON(raw.value); err != nil {
-						return nil, errorsWithField(field+"."+raw.field, err.Error())
-					}
-				}
-				if raw.field == "stream_settings" {
-					if err := ValidateNodeRawXHTTP(raw.value); err != nil {
-						return nil, errorsWithField(field+"."+raw.field, err.Error())
-					}
-				}
-			}
+		if err := validateRoutingOutboundRaw(field, source); err != nil {
+			return nil, err
 		}
 		// Copy through JSON so arbitrary plugin options and nested slices cannot
 		// alias input. It also retains the exact raw settings strings.
-		copyJSON, err := json.Marshal(source)
+		copyJSON, err := json.Marshal(source) // #nosec G117 -- outbound credentials are required in the persisted wire representation.
 		if err != nil {
 			return nil, errorsWithField(field, err.Error())
 		}
@@ -264,6 +296,34 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		result.Outbounds[i].IPRules = []string{}
 		result.Outbounds[i].ProtocolRules = []string{}
 	}
+	return result, nil
+}
+
+func validateRoutingOutboundRaw(field string, source NodeOutbound) error {
+	for _, raw := range []struct{ field, value string }{{"settings", source.Settings}, {"stream_settings", source.StreamSettings}, {"xhttp_extra", source.XHTTPExtra}} {
+		if strings.TrimSpace(raw.value) != "" {
+			var object map[string]json.RawMessage
+			if ValidateUniqueJSON([]byte(raw.value)) != nil || json.Unmarshal([]byte(raw.value), &object) != nil || object == nil {
+				return errorsWithField(field+"."+raw.field, "must be a JSON object")
+			}
+			if raw.field == "stream_settings" || raw.field == "xhttp_extra" {
+				if err := ValidateNodeStreamSpiderJSON(raw.value); err != nil {
+					return errorsWithField(field+"."+raw.field, err.Error())
+				}
+			}
+			if raw.field == "stream_settings" {
+				if err := ValidateNodeRawXHTTP(raw.value); err != nil {
+					return errorsWithField(field+"."+raw.field, err.Error())
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type routingMatchBudget struct{ values, bytes int }
+
+func normalizeRoutingRules(input, result *NodeRouting, ids map[string]struct{}, budget *routingMatchBudget) (*NodeRouting, error) {
 	missing := map[string][]string{}
 	if len(input.DefaultOutboundID) > 39 {
 		return nil, errorsWithField("routing.default_outbound_id", "outbound reference is too long")
@@ -295,6 +355,7 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 			missing[source.OutboundID] = append(missing[source.OutboundID], source.ID)
 		}
 		var values []string
+		var err error
 		switch source.Kind {
 		case "domain":
 			values, err = NormalizeDomainRules(field+".values", source.Values)
@@ -337,30 +398,7 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		sort.Strings(refs)
 		return nil, errorsWithField("routing", "unknown outbound references: "+strings.Join(refs, "; "))
 	}
-	if input.Version == RoutingVersion2 {
-		if err := normalizeRoutingV2(input, result, ids); err != nil {
-			return nil, err
-		}
-		matchValues += len(result.UserDefaults)
-		if result.DNSPolicy != nil {
-			for _, r := range result.DNSPolicy.Resolvers {
-				matchValues += len(r.Domains)
-				for _, v := range r.Domains {
-					matchBytes += len(v)
-				}
-			}
-		}
-		if matchValues > MaxRoutingValues || matchBytes > MaxRoutingMatchBytes {
-			return nil, errorsWithField("routing", "aggregate match budget exceeded")
-		}
-	}
-	canonical, err := json.Marshal(result)
-	if err != nil {
-		return nil, errorsWithField("routing", fmt.Sprintf("cannot encode policy: %v", err))
-	}
-	if len(canonical) > MaxRoutingJSONBytes {
-		return nil, errorsWithField("routing", "serialized policy exceeds 1 MiB")
-	}
+	budget.values, budget.bytes = matchValues, matchBytes
 	return result, nil
 }
 

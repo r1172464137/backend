@@ -22,6 +22,20 @@ func basicRouting() *NodeRouting {
 	}
 }
 
+func TestRoutingValidationStageOrder(t *testing.T) {
+	p := basicRouting()
+	p.Outbounds[0].ID = "invalid"
+	p.Rules[0].Values = []string{strings.Repeat("x", MaxRouteRuleBytes+1)}
+	if _, err := NormalizeNodeRouting(p); err == nil || !strings.Contains(err.Error(), "raw match value exceeds 4096 bytes") {
+		t.Fatalf("raw budget must precede outbound validation: %v", err)
+	}
+	p.Rules[0].Values = []string{"example.com"}
+	p.Rules[0].ID = "invalid"
+	if _, err := NormalizeNodeRouting(p); err == nil || !strings.Contains(err.Error(), "routing.outbounds[1].id") {
+		t.Fatalf("outbound must precede rule validation: %v", err)
+	}
+}
+
 func TestNodeRoutingCanonicalAndPresence(t *testing.T) {
 	input := basicRouting()
 	got, err := NormalizeNodeRouting(input)

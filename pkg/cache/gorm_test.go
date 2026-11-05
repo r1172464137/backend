@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/perfect-panel/server/pkg/orm"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -92,7 +91,7 @@ func TestQueryCtxBypassesCacheInsideTransaction(t *testing.T) {
 	value := cachedUser{}
 	queryCalled := false
 	conn := NewConn(db, client, WithInvalidationQueue(NewInvalidationQueue()))
-	if err := conn.QueryCtx(ctx, &value, "user:42", func(_ *gorm.DB, v interface{}) error {
+	if err := conn.QueryCtx(ctx, &value, "user:42", func(_ *gorm.DB, v any) error {
 		queryCalled = true
 		*v.(*cachedUser) = cachedUser{ID: 42, Email: "new@example.com"}
 		return nil
@@ -130,9 +129,9 @@ func TestQueryCtxCachesRecordNotFoundAndInvalidationClearsIt(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 	ctx := context.Background()
-	conn := NewConn(newDryRunDB(t), client, WithNotFoundExpiry(time.Minute))
+	conn := NewConn(newDryRunDB(t), client)
 	queries := 0
-	query := func(_ *gorm.DB, _ interface{}) error {
+	query := func(_ *gorm.DB, _ any) error {
 		queries++
 		return gorm.ErrRecordNotFound
 	}
@@ -207,34 +206,4 @@ type User struct {
 	UpdatedAt             time.Time             `gorm:"comment:更新时间"`
 	DeletedAt             gorm.DeletedAt        `gorm:"default:null;comment:删除时间"`
 	IsDel                 soft_delete.DeletedAt `gorm:"softDelete:flag,DeletedAtField:DeletedAt;comment:1:正常 0:删除"` // Use `1` `0` to identify
-}
-
-func TestGormCacheCtx(t *testing.T) {
-	t.Skipf("skip TestGormCacheCtx test")
-	db, err := orm.ConnectMysql(orm.Mysql{
-		Config: orm.Config{
-			Addr:     "localhost:3306",
-			Config:   "charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai",
-			Dbname:   "vpnboard",
-			Username: "root",
-			Password: "mylove520",
-		},
-	})
-	if err != nil {
-		t.Error(err)
-	}
-	rds := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
-	conn := NewConn(db, rds)
-	var u User
-	key := "user:id"
-	err = conn.QueryCtx(context.Background(), &u, key, func(conn *gorm.DB, v interface{}) error {
-		return conn.Where("id = ?", 1).First(v).Error
-	})
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	t.Logf("get cache success %+v", u)
 }

@@ -1,10 +1,15 @@
-// Package taskqueue carries OpenTelemetry trace context across the asynq
-// boundary. asynq has no message headers, so the producer wraps the task
-// payload in an envelope holding the W3C trace context, and the worker-side
-// middleware unwraps it, resumes the producer's trace and opens a consumer
-// span around the handler. Payloads without an envelope (older in-flight
-// tasks, traceless producers, scheduler ticks) pass through untouched and
-// get a root span, so every task execution logs a trace id either way.
+// Package taskqueue is what the producers and the consumers of the asynq
+// task queue share: the task type names, the payloads, the task IDs that
+// deduplicate enqueues, and the client and worker middleware that carry the
+// OpenTelemetry trace context across the queue. Producers depend on these
+// definitions, never on the consumers in internal/transport/task.
+//
+// asynq has no message headers, so the producer wraps the task payload in
+// an envelope holding the W3C trace context, and the worker-side middleware
+// unwraps it, resumes the producer's trace and opens a consumer span around
+// the handler. Payloads without an envelope (older in-flight tasks,
+// traceless producers, scheduler ticks) pass through untouched and get a
+// root span, so every task execution logs a trace id either way.
 package taskqueue
 
 import (
@@ -39,10 +44,12 @@ type Client struct {
 	*asynq.Client
 }
 
+// NewClient wraps client.
 func NewClient(client *asynq.Client) *Client {
 	return &Client{Client: client}
 }
 
+// EnqueueContext enqueues task with ctx's trace context in its payload.
 func (c *Client) EnqueueContext(ctx context.Context, task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
 	return c.Client.EnqueueContext(ctx, Wrap(ctx, task), opts...)
 }

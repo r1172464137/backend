@@ -12,7 +12,7 @@ func TestReadLastNLines(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, accessFilename), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	lines, err := ReadLastNLines(dir, 2)
+	lines, err := readLastNLinesFromFile(filepath.Join(dir, accessFilename), 2)
 	if err != nil {
 		t.Fatal(err)
 	}

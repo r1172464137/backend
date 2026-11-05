@@ -31,7 +31,7 @@ func TestV2PartialAndInheritanceDowngrade(t *testing.T) {
 				if err := json.Unmarshal([]byte(body), &req); err != nil {
 					t.Fatal(err)
 				}
-				return newUpdateServerNodeConfigLogic(context.Background(), deps).UpdateServerNodeConfig(&req)
+				return NewService(deps).UpdateServerNodeConfig(context.Background(), &req)
 			}
 			if err := call(`{"server_id":1,"ip_strategy":"prefer_ipv4","inherit_ip_strategy":false}`); err != nil {
 				t.Fatalf("partial update: %v", err)

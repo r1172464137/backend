@@ -1,3 +1,6 @@
+// Package verification stores and checks the email and SMS verification
+// codes of the identity module in Redis: the code of one identifier and
+// purpose, and the guesses made against it.
 package verification
 
 import (
@@ -10,10 +13,15 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// maxVerificationCodeAttempts wrong guesses delete a code.
 const maxVerificationCodeAttempts = 10
 
 var (
-	ErrVerificationCodeInvalid      = errors.New("verification code is invalid or expired")
+	// ErrVerificationCodeInvalid reports a code that does not match, was
+	// never sent or expired.
+	ErrVerificationCodeInvalid = errors.New("verification code is invalid or expired")
+	// ErrVerificationAttemptsExceeded reports a code that was guessed at too
+	// often; it is deleted.
 	ErrVerificationAttemptsExceeded = errors.New("verification code attempt limit exceeded")
 	verifyCodeScript                = redis.NewScript(`
 local keyType = redis.call("TYPE", KEYS[1])
@@ -61,6 +69,9 @@ func verificationAttemptKey(cacheKey string) string {
 	return config.VerifyCodeAttemptKeyPrefix + cacheKey
 }
 
+// SaveVerificationCode stores code under cacheKey for expiration, five
+// minutes when it is not positive, and forgets the guesses made against the
+// previous code.
 func SaveVerificationCode(ctx context.Context, client *redis.Client, cacheKey, code string, expiration time.Duration) error {
 	if expiration <= 0 {
 		expiration = 5 * time.Minute
@@ -77,6 +88,7 @@ func SaveVerificationCode(ctx context.Context, client *redis.Client, cacheKey, c
 	return err
 }
 
+// DeleteVerificationCode removes the code under cacheKey and its guesses.
 func DeleteVerificationCode(ctx context.Context, client *redis.Client, cacheKey string) error {
 	return client.Del(ctx, cacheKey, verificationAttemptKey(cacheKey)).Err()
 }

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -22,8 +23,19 @@ func TestRedisPing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = RedisPing(addr, password, database)
+	err = RedisPing(t.Context(), addr, password, database)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The setup wizard bounds its connection test with the request context; a
+// ping must give up once that context ends.
+func TestRedisPingStopsWithItsContext(t *testing.T) {
+	server := miniredis.RunT(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := RedisPing(ctx, server.Addr(), "", 0); err == nil {
+		t.Fatal("a ping with an ended context succeeded")
 	}
 }

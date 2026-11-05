@@ -9,33 +9,21 @@ import (
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/slicesx"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type UpdateSubscribeLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Update subscribe
-func newUpdateSubscribeLogic(ctx context.Context, deps Deps) *UpdateSubscribeLogic {
-	return &UpdateSubscribeLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *UpdateSubscribeLogic) UpdateSubscribe(req *dto.UpdateSubscribeRequest) error {
+// UpdateSubscribe replaces an existing plan's configuration after validating
+// it, then tells the connected devices that a plan changed. A switch the
+// request leaves out keeps its stored value: show and sell cannot be NULL,
+// and writing NULL into the others would change what they mean.
+func (s *Service) UpdateSubscribe(ctx context.Context, req *dto.UpdateSubscribeRequest) error {
 	if err := validateSubscribeInput(req.UnitTime, req.UnitPrice, req.Replacement, req.Inventory, req.Traffic, req.SpeedLimit, req.DeviceLimit, req.Quota, req.DeductionRatio, req.ResetCycle, req.Discount); err != nil {
 		return err
 	}
-	// Query the database to get the subscribe information
-	_, err := l.deps.Plans.FindOne(l.ctx, req.Id)
+	log := logger.WithContext(ctx)
+	stored, err := s.deps.Plans.FindOne(ctx, req.Id)
 	if err != nil {
-		l.Logger.Error("[UpdateSubscribe] Database query error", logger.Field("error", err.Error()), logger.Field("subscribe_id", req.Id))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "get subscribe error: %v", err.Error())
+		log.Error("[UpdateSubscribe] Database query error", logger.Field("error", err.Error()), logger.Field("subscribe_id", req.Id))
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "get subscribe error: %v", err.Error())
 	}
 	discount := ""
 	if len(req.Discount) > 0 {
@@ -63,20 +51,28 @@ func (l *UpdateSubscribeLogic) UpdateSubscribe(req *dto.UpdateSubscribeRequest) 
 		Quota:             req.Quota,
 		Nodes:             nodes,
 		NodeTags:          slicesx.StringSliceToString(req.NodeTags),
-		Show:              req.Show,
-		Sell:              req.Sell,
+		Show:              keepIfOmitted(req.Show, stored.Show),
+		Sell:              keepIfOmitted(req.Sell, stored.Sell),
 		Sort:              req.Sort,
 		DeductionRatio:    req.DeductionRatio,
-		AllowDeduction:    req.AllowDeduction,
+		AllowDeduction:    keepIfOmitted(req.AllowDeduction, stored.AllowDeduction),
 		ResetCycle:        req.ResetCycle,
-		RenewalReset:      req.RenewalReset,
+		RenewalReset:      keepIfOmitted(req.RenewalReset, stored.RenewalReset),
 		ShowOriginalPrice: req.ShowOriginalPrice,
 	}
-	err = l.deps.Plans.Update(l.ctx, sub)
-	if err != nil {
-		l.Logger.Error("[UpdateSubscribe] update subscribe failed", logger.Field("error", err.Error()), logger.Field("subscribe", sub))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update subscribe error: %v", err.Error())
+	if err := s.deps.Plans.Update(ctx, sub); err != nil {
+		log.Error("[UpdateSubscribe] update subscribe failed", logger.Field("error", err.Error()), logger.Field("subscribe", sub))
+		return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update subscribe error: %v", err.Error())
 	}
-	l.deps.notifyPlanChanged()
+	s.deps.notifyPlanChanged()
 	return nil
+}
+
+// keepIfOmitted is the requested switch, or the stored one when the request
+// left it out.
+func keepIfOmitted(requested, stored *bool) *bool {
+	if requested == nil {
+		return stored
+	}
+	return requested
 }

@@ -7,31 +7,16 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetVerifyCodeConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get Verify Code Config
-func newGetVerifyCodeConfigLogic(ctx context.Context, deps Deps) *GetVerifyCodeConfigLogic {
-	return &GetVerifyCodeConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetVerifyCodeConfigLogic) GetVerifyCodeConfig() (resp *dto.VerifyCodeConfig, err error) {
-	data, err := l.deps.System.GetVerifyCodeConfig(l.ctx)
+// GetVerifyCodeConfig returns the stored verification code settings.
+func (s *Service) GetVerifyCodeConfig(ctx context.Context) (*dto.VerifyCodeConfig, error) {
+	configs, err := s.deps.System.GetVerifyCodeConfig(ctx)
 	if err != nil {
-		l.Errorw("Get Verify Code Config Error: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Get Verify Code Config Error: %s", err.Error())
+		logger.WithContext(ctx).Errorw("[GetVerifyCodeConfig] query the verify code config failed", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "Get Verify Code Config Error: %s", err.Error())
 	}
-	resp = &dto.VerifyCodeConfig{}
-	config.SystemConfigSliceReflectToStruct(data, resp)
-	return
+	resp := &dto.VerifyCodeConfig{}
+	config.SystemConfigSliceReflectToStruct(configs, resp)
+	return resp, nil
 }

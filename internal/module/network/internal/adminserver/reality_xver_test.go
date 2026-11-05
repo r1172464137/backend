@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
+	"github.com/perfect-panel/server/internal/module/network/internal/protocolmap"
 )
 
 func TestRealityXverUpdateOmissionAndExplicitReset(t *testing.T) {
@@ -24,8 +24,10 @@ func TestRealityXverUpdateOmissionAndExplicitReset(t *testing.T) {
 		if err := json.Unmarshal([]byte(tc.body), &item); err != nil {
 			t.Fatal(err)
 		}
-		var next node.Protocol
-		mapping.DeepCopy(&next, item)
+		next, err := protocolmap.FromDTO(item)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var raw map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(tc.body), &raw); err != nil {
 			t.Fatal(err)

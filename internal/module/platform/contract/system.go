@@ -5,6 +5,12 @@ type InterfaceConfig struct {
 	HiddenMenuIds []string `json:"hiddenMenuIds"`
 }
 
+// SecretMask is what the admin settings API shows in place of a stored
+// Turnstile secret or currency access key. An update carrying the mask keeps
+// the stored value; an empty field clears it. Ordered routing credentials and
+// the node secret are returned in full to authorized administrators.
+const SecretMask = "********"
+
 type Currency struct {
 	CurrencyUnit   string `json:"currency_unit"`
 	CurrencySymbol string `json:"currency_symbol"`

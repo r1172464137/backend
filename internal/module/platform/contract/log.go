@@ -1,5 +1,76 @@
 package dto
 
+// AdminActionLog is one administrator mutation: what was done to which
+// object, by whom (UserId is the administrator's account) and from where
+// (Source "http" carries the request's address and agent; "telegram" the
+// bot command's sender).
+type AdminActionLog struct {
+	Id               int64  `json:"id"`
+	UserId           int64  `json:"user_id"`
+	Action           string `json:"action"`
+	Object           string `json:"object,omitempty"`
+	ObjectId         int64  `json:"object_id,omitempty"`
+	Detail           string `json:"detail,omitempty"`
+	Source           string `json:"source"`
+	TelegramSenderId int64  `json:"telegram_sender_id,omitempty"`
+	Timestamp        int64  `json:"timestamp"`
+	CreatedAt        int64  `json:"created_at"`
+	ClientIP         string `json:"client_ip,omitempty"`
+	UserAgent        string `json:"user_agent,omitempty"`
+	IPCountryCode    string `json:"ip_country_code,omitempty"`
+	IPCountry        string `json:"ip_country,omitempty"`
+	IPRegion         string `json:"ip_region,omitempty"`
+	IPCity           string `json:"ip_city,omitempty"`
+	IPASN            uint   `json:"ip_asn,omitempty"`
+	IPASOrganization string `json:"ip_as_organization,omitempty"`
+}
+
+type FilterAdminActionLogRequest struct {
+	FilterLogParams
+	// UserId narrows the trail to one administrator.
+	UserId int64 `form:"user_id"`
+}
+
+type FilterAdminActionLogResponse struct {
+	Total int64            `json:"total"`
+	List  []AdminActionLog `json:"list"`
+}
+
+// UnmatchedPaymentLog is a payment a gateway confirmed that could not settle
+// its order; UserId is the payer when known.
+type UnmatchedPaymentLog struct {
+	Id               int64  `json:"id"`
+	UserId           int64  `json:"user_id"`
+	OrderNo          string `json:"order_no"`
+	TradeNo          string `json:"trade_no"`
+	Platform         string `json:"platform"`
+	Amount           int64  `json:"amount"`
+	Currency         string `json:"currency"`
+	Reason           string `json:"reason"`
+	Timestamp        int64  `json:"timestamp"`
+	CreatedAt        int64  `json:"created_at"`
+	ClientIP         string `json:"client_ip,omitempty"`
+	UserAgent        string `json:"user_agent,omitempty"`
+	ActorID          int64  `json:"actor_id,omitempty"`
+	IPCountryCode    string `json:"ip_country_code,omitempty"`
+	IPCountry        string `json:"ip_country,omitempty"`
+	IPRegion         string `json:"ip_region,omitempty"`
+	IPCity           string `json:"ip_city,omitempty"`
+	IPASN            uint   `json:"ip_asn,omitempty"`
+	IPASOrganization string `json:"ip_as_organization,omitempty"`
+}
+
+type FilterUnmatchedPaymentLogRequest struct {
+	FilterLogParams
+	// UserId narrows the list to one payer.
+	UserId int64 `form:"user_id"`
+}
+
+type FilterUnmatchedPaymentLogResponse struct {
+	Total int64                 `json:"total"`
+	List  []UnmatchedPaymentLog `json:"list"`
+}
+
 type BalanceLog struct {
 	Type             uint16 `json:"type"`
 	UserId           int64  `json:"user_id"`
@@ -37,7 +108,7 @@ type CommissionLog struct {
 
 type FilterBalanceLogRequest struct {
 	FilterLogParams
-	UserId int64 `form:"user_id,optional"`
+	UserId int64 `form:"user_id"`
 }
 
 type FilterBalanceLogResponse struct {
@@ -47,7 +118,7 @@ type FilterBalanceLogResponse struct {
 
 type FilterCommissionLogRequest struct {
 	FilterLogParams
-	UserId int64 `form:"user_id,optional"`
+	UserId int64 `form:"user_id"`
 }
 
 type FilterCommissionLogResponse struct {
@@ -62,7 +133,7 @@ type FilterEmailLogResponse struct {
 
 type FilterGiftLogRequest struct {
 	FilterLogParams
-	UserId int64 `form:"user_id,optional"`
+	UserId int64 `form:"user_id"`
 }
 
 type FilterGiftLogResponse struct {
@@ -73,15 +144,15 @@ type FilterGiftLogResponse struct {
 type FilterLogParams struct {
 	Page      int    `form:"page" validate:"required,gt=0"`
 	Size      int    `form:"size" validate:"required,gt=0,lte=100"`
-	Date      string `form:"date,optional"`
-	StartDate string `form:"start_date,optional" validate:"omitempty,datetime=2006-01-02"`
-	EndDate   string `form:"end_date,optional" validate:"omitempty,datetime=2006-01-02"`
-	Search    string `form:"search,optional"`
+	Date      string `form:"date"`
+	StartDate string `form:"start_date" validate:"omitempty,datetime=2006-01-02"`
+	EndDate   string `form:"end_date" validate:"omitempty,datetime=2006-01-02"`
+	Search    string `form:"search"`
 }
 
 type FilterLoginLogRequest struct {
 	FilterLogParams
-	UserId int64 `form:"user_id,optional"`
+	UserId int64 `form:"user_id"`
 }
 
 type FilterLoginLogResponse struct {
@@ -96,7 +167,7 @@ type FilterMobileLogResponse struct {
 
 type FilterOrderLogRequest struct {
 	FilterLogParams
-	UserId int64 `form:"user_id,optional"`
+	UserId int64 `form:"user_id"`
 }
 
 type FilterOrderLogResponse struct {
@@ -106,7 +177,7 @@ type FilterOrderLogResponse struct {
 
 type FilterRegisterLogRequest struct {
 	FilterLogParams
-	UserId int64 `form:"user_id,optional"`
+	UserId int64 `form:"user_id"`
 }
 
 type FilterRegisterLogResponse struct {
@@ -116,7 +187,7 @@ type FilterRegisterLogResponse struct {
 
 type FilterResetSubscribeLogRequest struct {
 	FilterLogParams
-	UserSubscribeId int64 `form:"user_subscribe_id,optional"`
+	UserSubscribeId int64 `form:"user_subscribe_id"`
 }
 
 type FilterResetSubscribeLogResponse struct {
@@ -126,8 +197,8 @@ type FilterResetSubscribeLogResponse struct {
 
 type FilterSubscribeLogRequest struct {
 	FilterLogParams
-	UserId          int64 `form:"user_id,optional"`
-	UserSubscribeId int64 `form:"user_subscribe_id,optional"`
+	UserId          int64 `form:"user_id"`
+	UserSubscribeId int64 `form:"user_subscribe_id"`
 }
 
 type FilterSubscribeLogResponse struct {
@@ -139,7 +210,7 @@ type GetMessageLogListRequest struct {
 	Page   int    `form:"page" validate:"required,gt=0"`
 	Size   int    `form:"size" validate:"required,gt=0,lte=100"`
 	Type   uint8  `form:"type" validate:"required,oneof=10 11"`
-	Search string `form:"search,optional"`
+	Search string `form:"search"`
 }
 
 type GetMessageLogListResponse struct {
@@ -168,12 +239,15 @@ type GiftLog struct {
 }
 
 type LogResponse struct {
-	List interface{} `json:"list"`
+	List any `json:"list"`
 }
 
+// LogSetting is the log retention: ClearDays may not go below seven days,
+// so the login, registration and subscription logs outlive the time it
+// takes to notice an incident.
 type LogSetting struct {
 	AutoClear *bool `json:"auto_clear" validate:"required"`
-	ClearDays int64 `json:"clear_days" validate:"required,gte=1,lte=3650"`
+	ClearDays int64 `json:"clear_days" validate:"required,gte=7,lte=3650"`
 }
 
 type LoginLog struct {
@@ -193,23 +267,23 @@ type LoginLog struct {
 }
 
 type MessageLog struct {
-	Id               int64       `json:"id"`
-	Type             uint8       `json:"type"`
-	Platform         string      `json:"platform"`
-	To               string      `json:"to"`
-	Subject          string      `json:"subject"`
-	Content          interface{} `json:"content"`
-	Status           uint8       `json:"status"`
-	CreatedAt        int64       `json:"created_at"`
-	ClientIP         string      `json:"client_ip,omitempty"`
-	UserAgent        string      `json:"user_agent,omitempty"`
-	ActorID          int64       `json:"actor_id,omitempty"`
-	IPCountryCode    string      `json:"ip_country_code,omitempty"`
-	IPCountry        string      `json:"ip_country,omitempty"`
-	IPRegion         string      `json:"ip_region,omitempty"`
-	IPCity           string      `json:"ip_city,omitempty"`
-	IPASN            uint        `json:"ip_asn,omitempty"`
-	IPASOrganization string      `json:"ip_as_organization,omitempty"`
+	Id               int64  `json:"id"`
+	Type             uint8  `json:"type"`
+	Platform         string `json:"platform"`
+	To               string `json:"to"`
+	Subject          string `json:"subject"`
+	Content          any    `json:"content"`
+	Status           uint8  `json:"status"`
+	CreatedAt        int64  `json:"created_at"`
+	ClientIP         string `json:"client_ip,omitempty"`
+	UserAgent        string `json:"user_agent,omitempty"`
+	ActorID          int64  `json:"actor_id,omitempty"`
+	IPCountryCode    string `json:"ip_country_code,omitempty"`
+	IPCountry        string `json:"ip_country,omitempty"`
+	IPRegion         string `json:"ip_region,omitempty"`
+	IPCity           string `json:"ip_city,omitempty"`
+	IPASN            uint   `json:"ip_asn,omitempty"`
+	IPASOrganization string `json:"ip_as_organization,omitempty"`
 }
 
 type OrderLog struct {

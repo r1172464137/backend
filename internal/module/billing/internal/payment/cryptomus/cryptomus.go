@@ -5,6 +5,7 @@ package cryptomus
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -73,6 +74,9 @@ type Config struct {
 	APIKey     string
 	// BaseURL overrides the production API endpoint; tests use it.
 	BaseURL string
+	// HTTPClient sends the API requests; nil selects a client with a
+	// ten-second timeout.
+	HTTPClient *http.Client
 }
 
 type Client struct {
@@ -84,12 +88,11 @@ func NewClient(config Config) *Client {
 	if config.BaseURL == "" {
 		config.BaseURL = DefaultBaseURL
 	}
-	return &Client{
-		Config: config,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+	httpClient := config.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	return &Client{Config: config, httpClient: httpClient}
 }
 
 // Order describes the invoice to create. Amount is in minor units of Currency.
@@ -201,27 +204,33 @@ type apiResponse struct {
 }
 
 // CreateInvoice creates a hosted-checkout invoice for the order.
-func (c *Client) CreateInvoice(order Order) (*Invoice, error) {
+func (c *Client) CreateInvoice(ctx context.Context, order Order) (*Invoice, error) {
 	if order.OrderNo == "" || order.Amount <= 0 || order.Currency == "" {
 		return nil, errors.New("invalid Cryptomus order")
 	}
-	result, err := c.post(createInvoicePath, invoiceRequest{
-		Amount:      FormatMoney(order.Amount),
-		Currency:    strings.ToUpper(order.Currency),
-		OrderID:     order.OrderNo,
-		URLCallback: order.NotifyURL,
-		URLReturn:   order.ReturnURL,
-		Lifetime:    order.Lifetime,
-	})
+	result, err := c.post(ctx, createInvoicePath, newInvoiceRequest(order))
 	if err != nil {
 		return nil, err
 	}
 	return decodeInvoice(result)
 }
 
+// newInvoiceRequest is the invoice creation request for order; the amount is
+// sent exactly, as payment.FormatAmount renders it.
+func newInvoiceRequest(order Order) invoiceRequest {
+	return invoiceRequest{
+		Amount:      payment.FormatAmount(order.Amount),
+		Currency:    strings.ToUpper(order.Currency),
+		OrderID:     order.OrderNo,
+		URLCallback: order.NotifyURL,
+		URLReturn:   order.ReturnURL,
+		Lifetime:    order.Lifetime,
+	}
+}
+
 // GetInvoice fetches the invoice by gateway UUID or, when uuid is empty, by
 // the merchant order number.
-func (c *Client) GetInvoice(uuid, orderNo string) (*Invoice, error) {
+func (c *Client) GetInvoice(ctx context.Context, uuid, orderNo string) (*Invoice, error) {
 	if uuid == "" && orderNo == "" {
 		return nil, errors.New("invoice lookup requires a uuid or order number")
 	}
@@ -229,7 +238,7 @@ func (c *Client) GetInvoice(uuid, orderNo string) (*Invoice, error) {
 	if uuid == "" {
 		request.OrderID = orderNo
 	}
-	result, err := c.post(invoiceInfoPath, request)
+	result, err := c.post(ctx, invoiceInfoPath, request)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +256,7 @@ func decodeInvoice(result json.RawMessage) (*Invoice, error) {
 	return &invoice, nil
 }
 
-func (c *Client) post(path string, payload interface{}) (json.RawMessage, error) {
+func (c *Client) post(ctx context.Context, path string, payload any) (json.RawMessage, error) {
 	if c.MerchantID == "" || c.APIKey == "" {
 		return nil, errors.New("incomplete Cryptomus configuration")
 	}
@@ -255,7 +264,7 @@ func (c *Client) post(path string, payload interface{}) (json.RawMessage, error)
 	if err != nil {
 		return nil, fmt.Errorf("encode Cryptomus request: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimSuffix(c.BaseURL, "/")+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(c.BaseURL, "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create Cryptomus request: %w", err)
 	}
@@ -271,7 +280,7 @@ func (c *Client) post(path string, payload interface{}) (json.RawMessage, error)
 	if err != nil {
 		return nil, errors.New("cryptomus request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	value, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
@@ -337,15 +346,6 @@ func (c *Client) VerifyNotificationSign(body []byte) bool {
 	expected := protocolkey.Md5Encode(base64.StdEncoding.EncodeToString(unsigned)+c.APIKey, false)
 	received := strings.ToLower(notification.Sign)
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(received)) == 1
-}
-
-// FormatMoney renders a minor-unit amount as the two-decimal string the
-// gateway expects.
-func FormatMoney(amount int64) string {
-	if amount < 0 {
-		return "0.00"
-	}
-	return fmt.Sprintf("%d.%02d", amount/100, amount%100)
 }
 
 // ParseMoney converts a gateway decimal amount to integer minor units. The

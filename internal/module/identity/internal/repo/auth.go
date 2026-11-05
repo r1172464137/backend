@@ -64,25 +64,30 @@ func (m *authRepo) Insert(ctx context.Context, data *auth.Auth) error {
 
 func (m *authRepo) FindOne(ctx context.Context, id int64) (*auth.Auth, error) {
 	var resp auth.Auth
-	err := m.QueryNoCacheCtx(ctx, &resp, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryNoCacheCtx(ctx, &resp, func(conn *gorm.DB, v any) error {
 		return conn.Model(&auth.Auth{}).Where("id = ?", id).First(&resp).Error
 	})
-	switch {
-	case err == nil:
-		return &resp, nil
-	default:
+	if err != nil {
 		return nil, err
 	}
+	return &resp, nil
 }
 
+// Update writes the method's configuration and, when the snapshot carries
+// one, its enabled flag. Only those columns are written: a whole-row save of
+// a stale snapshot would revert the method name and creation time to what
+// the caller loaded.
 func (m *authRepo) Update(ctx context.Context, data *auth.Auth) error {
 	old, err := m.FindOne(ctx, data.Id)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
+	columns := map[string]any{"config": data.Config}
+	if data.Enabled != nil {
+		columns["enabled"] = *data.Enabled
+	}
 	err = m.ExecCtx(ctx, func(conn *gorm.DB) error {
-		db := conn
-		return db.Save(data).Error
+		return conn.Model(&auth.Auth{}).Where("id = ?", data.Id).Updates(columns).Error
 	}, m.getCacheKeys(old)...)
 	return err
 }
@@ -105,7 +110,7 @@ func (m *authRepo) Delete(ctx context.Context, id int64) error {
 // GetAuthListByPage get auth list by page
 func (m *authRepo) GetAuthListByPage(ctx context.Context) ([]*auth.Auth, error) {
 	var list []*auth.Auth
-	err := m.QueryNoCacheCtx(ctx, &list, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryNoCacheCtx(ctx, &list, func(conn *gorm.DB, v any) error {
 		conn = conn.Model(&auth.Auth{})
 		return conn.Find(v).Error
 	})
@@ -115,7 +120,7 @@ func (m *authRepo) GetAuthListByPage(ctx context.Context) ([]*auth.Auth, error) 
 // FindOneByMethod find one by method
 func (m *authRepo) FindOneByMethod(ctx context.Context, method string) (*auth.Auth, error) {
 	var data auth.Auth
-	err := m.QueryNoCacheCtx(ctx, &data, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryNoCacheCtx(ctx, &data, func(conn *gorm.DB, v any) error {
 		return conn.Model(&auth.Auth{}).Where("method = ?", method).First(v).Error
 	})
 	return &data, err
@@ -124,7 +129,7 @@ func (m *authRepo) FindOneByMethod(ctx context.Context, method string) (*auth.Au
 // FindAll find all
 func (m *authRepo) FindAll(ctx context.Context) ([]*auth.Auth, error) {
 	var list []*auth.Auth
-	err := m.QueryNoCacheCtx(ctx, &list, func(conn *gorm.DB, v interface{}) error {
+	err := m.QueryNoCacheCtx(ctx, &list, func(conn *gorm.DB, v any) error {
 		conn = conn.Model(&auth.Auth{})
 		return conn.Find(v).Error
 	})

@@ -1,5 +1,7 @@
 package telegram
 
+import "context"
+
 // Command describes one entry of the bot's command menu. It mirrors
 // Telegram's BotCommand without binding this package to the bot library.
 type Command struct {
@@ -13,29 +15,32 @@ type Command struct {
 // SetGroupAdminCommands scopes the menu to a group's administrators, which
 // is how the administrator commands stay invisible to ordinary members.
 type TelegramCommandRegistrar interface {
-	SetCommands(chatID int64, commands []Command) error
-	SetGroupAdminCommands(chatID int64, commands []Command) error
+	SetCommands(ctx context.Context, chatID int64, commands []Command) error
+	SetGroupAdminCommands(ctx context.Context, chatID int64, commands []Command) error
 }
 
-// PublicCommands is the menu every user gets: account binding, plus the help
-// entry that makes the administrator surface discoverable to the people who
-// have access to it. Handlers still authenticate, so a non-administrator only
-// learns that the command exists.
+var (
+	startCommand   = Command{Command: "start", Description: "绑定账号"}
+	bindCommand    = Command{Command: "bind", Description: "使用绑定令牌绑定账号：/bind <token>"}
+	trafficCommand = Command{Command: "traffic", Description: "查看订阅流量"}
+	helpCommand    = Command{Command: "help", Description: "查看可用命令"}
+)
+
+// PublicCommands is the menu every user gets: account binding, the traffic
+// of the bound account, plus the help entry that makes the administrator
+// surface discoverable to the people who have access to it. Handlers still
+// authenticate, so a non-administrator only learns that the command exists.
 func PublicCommands() []Command {
-	return []Command{
-		{Command: "start", Description: "绑定账号"},
-		{Command: "bind", Description: "使用绑定令牌绑定账号：/bind <token>"},
-		{Command: "help", Description: "查看可用命令"},
-	}
+	return []Command{startCommand, bindCommand, trafficCommand, helpCommand}
 }
 
 // AdminCommands is the menu published to the administrators of the admin
 // group (chat_administrators scope), where the administrator commands are
 // the only place they work. It deliberately excludes /confirm_* and
 // /cancel_* because those carry a generated action id and are only ever
-// offered inline.
+// offered inline, and /traffic, which only answers in the private chat.
 func AdminCommands() []Command {
-	return append(PublicCommands(),
+	return append([]Command{startCommand, bindCommand, helpCommand},
 		Command{Command: "dash", Description: "数据看板"},
 		Command{Command: "tickets", Description: "工单列表：/tickets [页码]"},
 		Command{Command: "tickets_waiting", Description: "待处理工单"},

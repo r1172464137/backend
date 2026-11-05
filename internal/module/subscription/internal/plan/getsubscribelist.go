@@ -11,34 +11,21 @@ import (
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/slicesx"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetSubscribeListLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get subscribe list
-func newGetSubscribeListLogic(ctx context.Context, deps Deps) *GetSubscribeListLogic {
-	return &GetSubscribeListLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetSubscribeListLogic) GetSubscribeList(req *dto.GetSubscribeListRequest) (resp *dto.GetSubscribeListResponse, err error) {
-	total, list, err := l.deps.Plans.FilterList(l.ctx, &subscribe.FilterParams{
+// GetSubscribeList pages the plans for the admin list, each with its live
+// subscriptions (usersub.LiveStatuses) counted as sold.
+func (s *Service) GetSubscribeList(ctx context.Context, req *dto.GetSubscribeListRequest) (*dto.GetSubscribeListResponse, error) {
+	log := logger.WithContext(ctx)
+	total, list, err := s.deps.Plans.FilterList(ctx, &subscribe.FilterParams{
 		Page:     int(req.Page),
 		Size:     int(req.Size),
 		Language: req.Language,
 		Search:   req.Search,
 	})
 	if err != nil {
-		l.Logger.Error("[GetSubscribeListLogic] get subscribe list failed: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "get subscribe list failed: %v", err.Error())
+		log.Error("[GetSubscribeListLogic] get subscribe list failed: ", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "get subscribe list failed: %v", err.Error())
 	}
 	var (
 		subscribeIdList = make([]int64, 0, len(list))
@@ -47,22 +34,27 @@ func (l *GetSubscribeListLogic) GetSubscribeList(req *dto.GetSubscribeListReques
 	for _, item := range list {
 		subscribeIdList = append(subscribeIdList, item.Id)
 		var sub dto.SubscribeItem
-		mapping.DeepCopy(&sub, item)
+		if err := mapping.Copy(&sub, item); err != nil {
+			return nil, xerr.Wrapf(err, xerr.ERROR, "map plan %d", item.Id)
+		}
 		if item.Discount != "" {
-			err = json.Unmarshal([]byte(item.Discount), &sub.Discount)
-			if err != nil {
-				l.Logger.Error("[GetSubscribeListLogic] JSON unmarshal failed: ", logger.Field("error", err.Error()), logger.Field("discount", item.Discount))
+			if err := json.Unmarshal([]byte(item.Discount), &sub.Discount); err != nil {
+				log.Error("[GetSubscribeListLogic] JSON unmarshal failed: ", logger.Field("error", err.Error()), logger.Field("discount", item.Discount))
 			}
 		}
-		sub.Nodes = dto.StringInt64Slice(slicesx.StringToInt64Slice(item.Nodes))
+		nodes, parseErr := slicesx.ParseInt64CSV(item.Nodes)
+		if parseErr != nil {
+			return nil, xerr.Wrapf(parseErr, xerr.ERROR, "plan %d nodes: %v", item.Id, parseErr)
+		}
+		sub.Nodes = dto.StringInt64Slice(nodes)
 		sub.NodeTags = strings.Split(item.NodeTags, ",")
 		resultList = append(resultList, sub)
 	}
 
-	subscribeMaps, err := l.deps.UserSubs.QueryActiveSubscriptions(l.ctx, subscribeIdList...)
+	subscribeMaps, err := s.deps.UserSubs.QueryActiveSubscriptions(ctx, subscribeIdList...)
 	if err != nil {
-		l.Logger.Error("[GetSubscribeListLogic] get user subscribe failed: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "get user subscribe failed: %v", err.Error())
+		log.Error("[GetSubscribeListLogic] get user subscribe failed: ", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "get user subscribe failed: %v", err.Error())
 	}
 
 	for i, item := range resultList {
@@ -71,9 +63,8 @@ func (l *GetSubscribeListLogic) GetSubscribeList(req *dto.GetSubscribeListReques
 		}
 	}
 
-	resp = &dto.GetSubscribeListResponse{
+	return &dto.GetSubscribeListResponse{
 		Total: total,
 		List:  resultList,
-	}
-	return
+	}, nil
 }

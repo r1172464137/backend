@@ -1,10 +1,14 @@
 package dto
 
 type BatchSendEmailTask struct {
-	Id                int64  `json:"id"`
-	Subject           string `json:"subject"`
-	Content           string `json:"content"`
+	Id      int64  `json:"id"`
+	Subject string `json:"subject"`
+	Content string `json:"content"`
+	// Recipients lists the first recorded recipients, one per line, and
+	// says how many more there are; RecipientCount is the whole audience,
+	// the additional addresses included.
 	Recipients        string `json:"recipients"`
+	RecipientCount    int64  `json:"recipient_count"`
 	Scope             int8   `json:"scope"`
 	RegisterStartTime int64  `json:"register_start_time"`
 	RegisterEndTime   int64  `json:"register_end_time"`
@@ -97,17 +101,6 @@ type QueryQuotaTaskPreCountRequest struct {
 
 type QueryQuotaTaskPreCountResponse struct {
 	Count int64 `json:"count"`
-}
-
-type QueryQuotaTaskStatusRequest struct {
-	Id int64 `json:"id" validate:"required,gt=0"`
-}
-
-type QueryQuotaTaskStatusResponse struct {
-	Status  uint8  `json:"status"`
-	Current int64  `json:"current"`
-	Total   int64  `json:"total"`
-	Errors  string `json:"errors"`
 }
 
 type QuotaTask struct {

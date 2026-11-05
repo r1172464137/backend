@@ -2,48 +2,40 @@ package profile
 
 import (
 	"context"
+	"errors"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/perfect-panel/server/internal/module/identity/internal/devicestate"
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
+	"gorm.io/gorm"
 )
 
-type UnbindDeviceLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Unbind Device
-func newUnbindDeviceLogic(ctx context.Context, deps Deps) *UnbindDeviceLogic {
-	return &UnbindDeviceLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
+// UnbindDevice removes one of the calling account's devices with its
+// identity and sessions, and disconnects it.
+func (s *Service) UnbindDevice(ctx context.Context, req *dto.UnbindDeviceRequest) error {
+	userInfo, ok := user.FromContext(ctx)
+	if !ok {
+		return xerr.Errorf(xerr.InvalidAccess, "no signed-in user")
 	}
-}
-
-func (l *UnbindDeviceLogic) UnbindDevice(req *dto.UnbindDeviceRequest) error {
-	userInfo := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	device, err := l.deps.Devices.FindDeviceForAuth(l.ctx, req.Id)
+	device, err := s.deps.Devices.FindDeviceForAuth(ctx, req.Id)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return xerr.Errorf(xerr.DeviceNotExist, "device %d does not exist", req.Id)
+	}
 	if err != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.DeviceNotExist), "find device")
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "find device %d", req.Id)
 	}
 
 	if device.UserId != userInfo.Id {
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "device not belong to user")
+		return xerr.Errorf(xerr.InvalidParams, "device does not belong to the user")
 	}
 
-	removed, err := devicestate.Delete(l.ctx, l.deps.Store, l.deps.Redis, req.Id, userInfo.Id)
+	removed, err := devicestate.Delete(ctx, s.deps.Store, s.deps.Redis, req.Id, userInfo.Id)
 	if err != nil {
-		return err
+		return xerr.Wrapf(err, xerr.DatabaseDeletedError, "remove device %d", req.Id)
 	}
-	if removed != nil && l.deps.KickDevice != nil {
-		l.deps.KickDevice(removed.UserId, removed.Identifier)
+	if removed != nil && s.deps.KickDevice != nil {
+		s.deps.KickDevice(removed.UserId, removed.Identifier)
 	}
 	return nil
 }

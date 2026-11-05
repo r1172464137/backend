@@ -1,3 +1,5 @@
+// Package maintenance holds the queue handlers of the maintenance tasks: the
+// quota grants administrators schedule and the daily exchange-rate refresh.
 package maintenance
 
 import (
@@ -5,7 +7,9 @@ import (
 	"github.com/perfect-panel/server/internal/repository"
 )
 
+// RateDependencies are the exchange-rate refresh's: the currency settings
+// in the system settings (the platform kernel's) and the rate cache.
 type RateDependencies struct {
-	Store        repository.Store
+	System       repository.SystemRepo
 	ExchangeRate *billing.CurrencyRateCache
 }

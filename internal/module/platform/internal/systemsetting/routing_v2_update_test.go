@@ -6,12 +6,11 @@ import (
 	"testing"
 
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/xerr"
 	"github.com/pkg/errors"
 )
 
-type routingTestUsers struct{ repository.UserRepo }
+type routingTestUsers struct{}
 
 func (routingTestUsers) FindExistingUserIDs(_ context.Context, ids []int64) ([]int64, error) {
 	out := make([]int64, 0, len(ids))
@@ -25,13 +24,13 @@ func (routingTestUsers) FindExistingUserIDs(_ context.Context, ids []int64) ([]i
 
 func TestGlobalV2PartialCASAndDowngrade(t *testing.T) {
 	store := testPlatformStore()
-	deps := Deps{Store: store, RoutingUsers: routingTestUsers{}}
+	deps := Deps{Store: NewSettingsTransactor(store), RoutingUsers: routingTestUsers{}}
 	call := func(body string) error {
 		var req dto.NodeConfig
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			t.Fatal(err)
 		}
-		return newUpdateNodeConfigLogic(context.Background(), deps).UpdateNodeConfig(&req)
+		return NewService(deps).UpdateNodeConfig(context.Background(), &req)
 	}
 	if err := call(`{"routing_revision":2,"routing":{"version":2,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[{"user_id":1,"outbound_id":"direct"}]}}`); err != nil {
 		t.Fatalf("partial v2: %v", err)

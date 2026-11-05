@@ -1,3 +1,6 @@
+// Package traffic holds the network module's traffic log entity, the
+// per-server and per-subscription usage rows the traffic pipeline writes, and
+// the aggregates read from it.
 package traffic
 
 import "time"
@@ -43,7 +46,9 @@ func (TrafficLog) TableName() string {
 	return "traffic_log"
 }
 
-// TrafficLogDetailsFilter traffic 明细查询过滤条件
+// TrafficLogDetailsFilter selects the traffic log entries of a details page:
+// those of a server, user and subscription, logged in [Start, End), where a
+// zero field selects them all.
 type TrafficLogDetailsFilter struct {
 	ServerId    int64
 	UserId      int64

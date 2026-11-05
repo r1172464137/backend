@@ -1,6 +1,7 @@
 package conf
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,23 +10,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LockInitialization serializes setup and staged-secret cleanup across
-// processes sharing the same config path. The lock file contains no secrets.
-func LockInitialization(path string) (func(), error) {
+// LockInitialization serializes setup and staged-secret cleanup across processes.
+func LockInitialization(path string) (func() error, error) {
 	f, err := os.OpenFile(path+".init.lock", os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
 	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		return nil, err
+		return nil, errors.Join(err, f.Close())
 	}
-	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
+	return func() error { return errors.Join(syscall.Flock(int(f.Fd()), syscall.LOCK_UN), f.Close()) }, nil
 }
 
-// ClearStagedAdminHash removes only the exact staged value, preserving all
-// other YAML keys. A crash at any point leaves either the old or cleaned file.
-func ClearStagedAdminHash(path, expected string) error {
+// ClearStagedAdminHash removes only the exact staged value, preserving YAML.
+func ClearStagedAdminHash(path, expected string) (err error) {
 	if expected == "" {
 		return nil
 	}
@@ -33,7 +31,7 @@ func ClearStagedAdminHash(path, expected string) error {
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer func() { err = errors.Join(err, unlock()) }()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -42,8 +40,20 @@ func ClearStagedAdminHash(path, expected string) error {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return err
 	}
+	changed, err := removeStagedHash(&doc, expected)
+	if err != nil || !changed {
+		return err
+	}
+	encoded, err := yaml.Marshal(&doc)
+	if err != nil {
+		return err
+	}
+	return WritePrivateAtomic(path, encoded)
+}
+
+func removeStagedHash(doc *yaml.Node, expected string) (bool, error) {
 	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("invalid staged configuration")
+		return false, fmt.Errorf("invalid staged configuration")
 	}
 	root := doc.Content[0]
 	for i := 0; i+1 < len(root.Content); i += 2 {
@@ -52,52 +62,61 @@ func ClearStagedAdminHash(path, expected string) error {
 		}
 		admin := root.Content[i+1]
 		if admin.Kind != yaml.MappingNode {
-			return fmt.Errorf("invalid administrator configuration")
+			return false, fmt.Errorf("invalid administrator configuration")
 		}
 		for j := 0; j+1 < len(admin.Content); j += 2 {
 			if admin.Content[j].Value != "PasswordHash" {
 				continue
 			}
 			if admin.Content[j+1].Value != expected {
-				return fmt.Errorf("staged administrator hash changed")
+				return false, fmt.Errorf("staged administrator hash changed")
 			}
 			admin.Content = append(admin.Content[:j], admin.Content[j+2:]...)
-			encoded, err := yaml.Marshal(&doc)
-			if err != nil {
-				return err
-			}
-			f, err := os.CreateTemp(filepath.Dir(path), ".ppanel-clean-*")
-			if err != nil {
-				return err
-			}
-			name := f.Name()
-			defer os.Remove(name)
-			if err = f.Chmod(0600); err != nil {
-				f.Close()
-				return err
-			}
-			if _, err = f.Write(encoded); err != nil {
-				f.Close()
-				return err
-			}
-			if err = f.Sync(); err != nil {
-				f.Close()
-				return err
-			}
-			if err = f.Close(); err != nil {
-				return err
-			}
-			if err = os.Rename(name, path); err != nil {
-				return err
-			}
-			dir, err := os.Open(filepath.Dir(path))
-			if err != nil {
-				return err
-			}
-			defer dir.Close()
-			return dir.Sync()
+			return true, nil
 		}
-		return nil
+		return false, nil
 	}
-	return nil
+	return false, nil
+}
+
+// WritePrivateAtomic persists a private file and its directory; cleanup and
+// close errors are reported alongside, never instead of, the primary error.
+func WritePrivateAtomic(path string, data []byte) (err error) {
+	file, err := os.CreateTemp(filepath.Dir(path), ".ppanel-private-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			err = errors.Join(err, file.Close())
+		}
+		if removeErr := os.Remove(name); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, removeErr)
+		}
+	}()
+	if err = file.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err = file.Write(data); err != nil {
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		return err
+	}
+	err = file.Close()
+	closed = true
+	if err != nil {
+		return err
+	}
+	if err = os.Rename(name, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, dir.Close()) }()
+	return dir.Sync()
 }

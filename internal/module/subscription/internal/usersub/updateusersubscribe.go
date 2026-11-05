@@ -2,72 +2,55 @@ package usersub
 
 import (
 	"context"
-	"time"
 
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
 	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type UpdateUserSubscribeLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
+// adminEditedColumns are the columns an administrator's subscription edit
+// sets; the owner's note, the credentials and the dates the edit does not
+// show keep their stored values.
+var adminEditedColumns = []string{"subscribe_id", "expire_time", "traffic", "download", "upload", "status", "finished_at"}
+
+// UpdateUserSubscribe applies an administrator's edit of plan, term and
+// traffic. The status follows the new term: expired or active again.
+func (s *Service) UpdateUserSubscribe(ctx context.Context, req *dto.UpdateUserSubscribeRequest) error {
+	log := logger.WithContext(ctx)
+	current, err := s.deps.UserSubs.FindOneSubscribe(ctx, req.UserSubscribeId)
+	if err != nil {
+		log.Errorw("[UpdateUserSubscribe] Find subscription failed", logger.Field("error", err.Error()), logger.Field("user_subscribe_id", req.UserSubscribeId))
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "find subscription %d", req.UserSubscribeId)
+	}
+	if current.EntitlementSource != "" {
+		return usersub.ErrProviderManaged
+	}
+	edited := *current
+	edited.SubscribeId = req.SubscribeId
+	edited.ExpireTime = usersub.ExpiryFromMilli(req.ExpiredAt)
+	edited.Traffic, edited.Download, edited.Upload = req.Traffic, req.Download, req.Upload
+	edited.Status = usersub.SubscribeStatusActive
+	if edited.ExpiredAt(timeutil.Now()) {
+		edited.Status = usersub.SubscribeStatusExpired
+	}
+	edited.FinishedAt = nil
+	if err := s.deps.UserSubs.UpdateSubscribeColumns(ctx, &edited, adminEditedColumns...); err != nil {
+		log.Errorw("[UpdateUserSubscribe] Update subscription failed", logger.Field("error", err.Error()), logger.Field("user_subscribe_id", req.UserSubscribeId))
+		return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update subscription %d", req.UserSubscribeId)
+	}
+	// The subscription may have moved between plans: both plans' node user
+	// lists change.
+	return s.clearPlanCaches(ctx, current.SubscribeId, edited.SubscribeId)
 }
 
-// NewUpdateUserSubscribeLogic Update user subscribe
-func newUpdateUserSubscribeLogic(ctx context.Context, deps Deps) *UpdateUserSubscribeLogic {
-	return &UpdateUserSubscribeLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *UpdateUserSubscribeLogic) UpdateUserSubscribe(req *dto.UpdateUserSubscribeRequest) error {
-	userSub, err := l.deps.UserSubs.FindOneSubscribe(l.ctx, req.UserSubscribeId)
-	if err != nil {
-		l.Errorw("FindOneUserSubscribe failed:", logger.Field("error", err.Error()), logger.Field("userSubscribeId", req.UserSubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindOneUserSubscribe failed: %v", err.Error())
-	}
-	// ExpiredAt == 0 is the NoLimit sentinel (see tool.AddTime), not an expired epoch time
-	expiredAt := time.UnixMilli(req.ExpiredAt)
-	if req.ExpiredAt != 0 && time.Since(expiredAt).Minutes() > 0 {
-		userSub.Status = 3
-	} else {
-		userSub.Status = 1
-	}
-
-	err = l.deps.UserSubs.UpdateSubscribe(l.ctx, &usersub.Subscribe{
-		Id:          userSub.Id,
-		UserId:      userSub.UserId,
-		OrderId:     userSub.OrderId,
-		SubscribeId: req.SubscribeId,
-		StartTime:   userSub.StartTime,
-		ExpireTime:  time.UnixMilli(req.ExpiredAt),
-		Traffic:     req.Traffic,
-		Download:    req.Download,
-		Upload:      req.Upload,
-		Token:       userSub.Token,
-		UUID:        userSub.UUID,
-		Status:      userSub.Status,
-	})
-
-	if err != nil {
-		l.Errorw("UpdateSubscribe failed:", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "UpdateSubscribe failed: %v", err.Error())
-	}
-	// Clear user subscribe cache
-	if err = l.deps.Cache.ClearSubscribeCache(l.ctx, userSub); err != nil {
-		l.Errorw("ClearSubscribeCache failed:", logger.Field("error", err.Error()), logger.Field("userSubscribeId", userSub.Id))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "ClearSubscribeCache failed: %v", err.Error())
-	}
-	// Clear subscribe cache
-	if err = l.deps.Plans.ClearCache(l.ctx, userSub.SubscribeId); err != nil {
-		l.Errorw("failed to clear subscribe cache", logger.Field("error", err.Error()), logger.Field("subscribeId", userSub.SubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "failed to clear subscribe cache: %v", err.Error())
+// clearPlanCaches drops the cached node user lists of the given plans after a
+// committed change; the subscription's own entries go with its write.
+func (s *Service) clearPlanCaches(ctx context.Context, planIDs ...int64) error {
+	if err := s.deps.Plans.ClearCache(ctx, planIDs...); err != nil {
+		logger.WithContext(ctx).Errorw("[UserSubscribe] Clear plan cache failed", logger.Field("error", err.Error()), logger.Field("subscribe_ids", planIDs))
+		return xerr.Wrapf(err, xerr.ERROR, "clear plan cache")
 	}
 	return nil
 }

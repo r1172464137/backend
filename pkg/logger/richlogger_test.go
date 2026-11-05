@@ -15,44 +15,18 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
+const testlog = "Stay hungry, stay foolish."
+
 func TestTraceLog(t *testing.T) {
 	setRichLoggerTestLevel(t, InfoLevel)
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	writer.lock.RLock()
-	defer func() {
-		writer.lock.RUnlock()
-		writer.Store(old)
-	}()
-
-	otp := otel.GetTracerProvider()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(otp)
-
-	ctx, span := tp.Tracer("trace-id").Start(context.Background(), "span-id")
-	defer span.End()
+	w, ctx := captureTraced(t)
 
 	WithContext(ctx).Info(testlog)
 	validate(t, w.String(), true, true)
 }
 
 func TestTraceDebug(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	writer.lock.RLock()
-	defer func() {
-		writer.lock.RUnlock()
-		writer.Store(old)
-	}()
-
-	otp := otel.GetTracerProvider()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(otp)
-
-	ctx, span := tp.Tracer("foo").Start(context.Background(), "bar")
-	defer span.End()
+	w, ctx := captureTraced(t)
 
 	l := WithContext(ctx)
 	setRichLoggerTestLevel(t, DebugLevel)
@@ -63,12 +37,6 @@ func TestTraceDebug(t *testing.T) {
 	l.WithDuration(time.Second).Debugf(testlog)
 	validate(t, w.String(), true, true)
 	w.Reset()
-	l.WithDuration(time.Second).Debugv(testlog)
-	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Debugv(testobj)
-	validateContentType(t, w.String(), map[string]any{}, true, true)
-	w.Reset()
 	l.WithDuration(time.Second).Debugw(testlog, Field("foo", "bar"))
 	validate(t, w.String(), true, true)
 	assert.True(t, strings.Contains(w.String(), "foo"), w.String())
@@ -76,38 +44,15 @@ func TestTraceDebug(t *testing.T) {
 }
 
 func TestTraceError(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	writer.lock.RLock()
-	defer func() {
-		writer.lock.RUnlock()
-		writer.Store(old)
-	}()
+	w, ctx := captureTraced(t)
 
-	otp := otel.GetTracerProvider()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(otp)
-
-	ctx, span := tp.Tracer("trace-id").Start(context.Background(), "span-id")
-	defer span.End()
-
-	var nilCtx context.Context
-	l := WithContext(context.Background())
-	l = l.WithContext(nilCtx)
-	l = l.WithContext(ctx)
+	l := WithContext(ctx)
 	setRichLoggerTestLevel(t, ErrorLevel)
 	l.WithDuration(time.Second).Error(testlog)
 	validate(t, w.String(), true, true)
 	w.Reset()
 	l.WithDuration(time.Second).Errorf(testlog)
 	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Errorv(testlog)
-	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Errorv(testobj)
-	validateContentType(t, w.String(), map[string]any{}, true, true)
 	w.Reset()
 	l.WithDuration(time.Second).Errorw(testlog, Field("basket", "ball"))
 	validate(t, w.String(), true, true)
@@ -116,21 +61,7 @@ func TestTraceError(t *testing.T) {
 }
 
 func TestTraceInfo(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	writer.lock.RLock()
-	defer func() {
-		writer.lock.RUnlock()
-		writer.Store(old)
-	}()
-
-	otp := otel.GetTracerProvider()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(otp)
-
-	ctx, span := tp.Tracer("trace-id").Start(context.Background(), "span-id")
-	defer span.End()
+	w, ctx := captureTraced(t)
 
 	setRichLoggerTestLevel(t, InfoLevel)
 	l := WithContext(ctx)
@@ -139,12 +70,6 @@ func TestTraceInfo(t *testing.T) {
 	w.Reset()
 	l.WithDuration(time.Second).Infof(testlog)
 	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Infov(testlog)
-	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Infov(testobj)
-	validateContentType(t, w.String(), map[string]any{}, true, true)
 	w.Reset()
 	l.WithDuration(time.Second).Infow(testlog, Field("basket", "ball"))
 	validate(t, w.String(), true, true)
@@ -156,21 +81,7 @@ func TestTraceInfoConsole(t *testing.T) {
 	old := atomic.SwapUint32(&encoding, jsonEncodingType)
 	defer atomic.StoreUint32(&encoding, old)
 
-	w := new(mockWriter)
-	o := writer.Swap(w)
-	writer.lock.RLock()
-	defer func() {
-		writer.lock.RUnlock()
-		writer.Store(o)
-	}()
-
-	otp := otel.GetTracerProvider()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(otp)
-
-	ctx, span := tp.Tracer("trace-id").Start(context.Background(), "span-id")
-	defer span.End()
+	w, ctx := captureTraced(t)
 
 	l := WithContext(ctx)
 	setRichLoggerTestLevel(t, InfoLevel)
@@ -179,46 +90,13 @@ func TestTraceInfoConsole(t *testing.T) {
 	w.Reset()
 	l.WithDuration(time.Second).Infof(testlog)
 	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Infov(testlog)
-	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Infov(testobj)
-	validateContentType(t, w.String(), map[string]any{}, true, true)
 }
 
 func TestTraceSlow(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	writer.lock.RLock()
-	defer func() {
-		writer.lock.RUnlock()
-		writer.Store(old)
-	}()
-
-	otp := otel.GetTracerProvider()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(otp)
-
-	ctx, span := tp.Tracer("trace-id").Start(context.Background(), "span-id")
-	defer span.End()
+	w, ctx := captureTraced(t)
 
 	l := WithContext(ctx)
 	setRichLoggerTestLevel(t, InfoLevel)
-	l.WithDuration(time.Second).Slow(testlog)
-	assert.True(t, strings.Contains(w.String(), traceKey))
-	assert.True(t, strings.Contains(w.String(), spanKey))
-	w.Reset()
-	l.WithDuration(time.Second).Slowf(testlog)
-	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Slowv(testlog)
-	validate(t, w.String(), true, true)
-	w.Reset()
-	l.WithDuration(time.Second).Slowv(testobj)
-	validateContentType(t, w.String(), map[string]any{}, true, true)
-	w.Reset()
 	l.WithDuration(time.Second).Sloww(testlog, Field("basket", "ball"))
 	validate(t, w.String(), true, true)
 	assert.True(t, strings.Contains(w.String(), "basket"), w.String())
@@ -273,7 +151,7 @@ func TestLogWithCallerSkip(t *testing.T) {
 		writer.Store(old)
 	}()
 
-	l := WithCallerSkip(1).WithCallerSkip(0)
+	l := new(richLogger).WithCallerSkip(1).WithCallerSkip(0)
 	p := func(v string) {
 		l.Infow(v)
 	}
@@ -283,31 +161,19 @@ func TestLogWithCallerSkip(t *testing.T) {
 	assert.True(t, w.Contains(fmt.Sprintf("%s:%d", file, line+1)))
 
 	w.Reset()
-	l = WithCallerSkip(0).WithCallerSkip(1)
+	l = new(richLogger).WithCallerSkip(0).WithCallerSkip(1)
 	file, line = getFileLine()
 	p(testlog)
 	assert.True(t, w.Contains(fmt.Sprintf("%s:%d", file, line+1)))
 }
 
 func TestLogWithCallerSkipCopy(t *testing.T) {
-	log1 := WithCallerSkip(2)
+	log1 := new(richLogger).WithCallerSkip(2)
 	log2 := log1.WithCallerSkip(3)
 	log3 := log2.WithCallerSkip(-1)
 	assert.Equal(t, 2, log1.(*richLogger).callerSkip)
 	assert.Equal(t, 3, log2.(*richLogger).callerSkip)
 	assert.Equal(t, 3, log3.(*richLogger).callerSkip)
-}
-
-func TestLogWithContextCopy(t *testing.T) {
-	c1 := context.Background()
-	type ctxKey string // 定义新的字符串类型
-
-	const fooKey ctxKey = "foo" // 使用这个 key
-	c2 := context.WithValue(context.Background(), fooKey, "bar")
-	log1 := WithContext(c1)
-	log2 := log1.WithContext(c2)
-	assert.Equal(t, c1, log1.(*richLogger).ctx)
-	assert.Equal(t, c2, log2.(*richLogger).ctx)
 }
 
 func TestLogWithDurationCopy(t *testing.T) {
@@ -323,44 +189,6 @@ func TestLogWithDurationCopy(t *testing.T) {
 	defer writer.Store(old)
 	log2.Info("hello")
 	assert.Contains(t, w.String(), `"duration":"1000.0ms"`)
-}
-
-func TestLogWithFieldsCopy(t *testing.T) {
-	setRichLoggerTestLevel(t, InfoLevel)
-
-	log1 := WithContext(context.Background())
-	log2 := log1.WithFields(Field("foo", "bar"))
-	log3 := log1.WithFields()
-	assert.Empty(t, log1.(*richLogger).fields)
-	assert.Equal(t, 1, len(log2.(*richLogger).fields))
-	assert.Equal(t, log1, log3)
-	assert.Empty(t, log3.(*richLogger).fields)
-
-	var w mockWriter
-	old := writer.Swap(&w)
-	defer writer.Store(old)
-
-	log2.Info("hello")
-	assert.Contains(t, w.String(), `"foo":"bar"`)
-}
-
-func TestLoggerWithFields(t *testing.T) {
-	setRichLoggerTestLevel(t, InfoLevel)
-
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	writer.lock.RLock()
-	defer func() {
-		writer.lock.RUnlock()
-		writer.Store(old)
-	}()
-
-	l := WithContext(context.Background()).WithFields(Field("foo", "bar"))
-	l.Infow(testlog)
-
-	var val mockValue
-	assert.Nil(t, json.Unmarshal([]byte(w.String()), &val))
-	assert.Equal(t, "bar", val.Foo)
 }
 
 func setRichLoggerTestLevel(t *testing.T, level uint32) {
@@ -392,32 +220,32 @@ func validate(t *testing.T, body string, expectedTrace, expectedSpan bool) {
 	assert.Equal(t, expectedSpan, len(val.Span) > 0, body)
 }
 
-func validateContentType(t *testing.T, body string, expectedType any, expectedTrace, expectedSpan bool) {
-	var val mockValue
-	dec := json.NewDecoder(strings.NewReader(body))
-
-	for {
-		var doc mockValue
-		err := dec.Decode(&doc)
-		if err == io.EOF {
-			// all done
-			break
-		}
-		if err != nil {
-			continue
-		}
-
-		val = doc
-	}
-
-	assert.IsType(t, expectedType, val.Content, body)
-	assert.Equal(t, expectedTrace, len(val.Trace) > 0, body)
-	assert.Equal(t, expectedSpan, len(val.Span) > 0, body)
-}
-
 type mockValue struct {
 	Trace   string `json:"trace"`
 	Span    string `json:"span"`
 	Foo     string `json:"foo"`
 	Content any    `json:"content"`
+}
+
+// captureTraced captures the log output in a mock writer and returns a
+// context carrying a sampled span; the writer, the tracer provider and the
+// span are restored and ended when the test ends.
+func captureTraced(t *testing.T) (*mockWriter, context.Context) {
+	t.Helper()
+	w := new(mockWriter)
+	old := writer.Swap(w)
+	writer.lock.RLock()
+	t.Cleanup(func() {
+		writer.lock.RUnlock()
+		writer.Store(old)
+	})
+
+	otp := otel.GetTracerProvider()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(otp) })
+
+	ctx, span := tp.Tracer("trace-id").Start(context.Background(), "span-id")
+	t.Cleanup(func() { span.End() })
+	return w, ctx
 }

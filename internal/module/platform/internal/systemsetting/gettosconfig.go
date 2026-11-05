@@ -7,32 +7,16 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetTosConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-func newGetTosConfigLogic(ctx context.Context, deps Deps) *GetTosConfigLogic {
-	return &GetTosConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetTosConfigLogic) GetTosConfig() (resp *dto.TosConfig, err error) {
-	resp = &dto.TosConfig{}
-	// get tos config from db
-	configs, err := l.deps.System.GetTosConfig(l.ctx)
+// GetTosConfig returns the stored terms of service.
+func (s *Service) GetTosConfig(ctx context.Context) (*dto.TosConfig, error) {
+	configs, err := s.deps.System.GetTosConfig(ctx)
 	if err != nil {
-		l.Errorw("[GetTosConfig] GetTosConfig error", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetTosConfig error: %v", err.Error())
+		logger.WithContext(ctx).Errorw("[GetTosConfig] query the tos config failed", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "GetTosConfig error: %v", err.Error())
 	}
-	// reflect to response
+	resp := &dto.TosConfig{}
 	config.SystemConfigSliceReflectToStruct(configs, resp)
-	return
+	return resp, nil
 }

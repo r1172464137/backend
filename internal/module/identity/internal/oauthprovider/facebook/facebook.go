@@ -1,3 +1,5 @@
+// Package facebook is the Graph API client of the Facebook sign-in method:
+// the OAuth endpoints and the profile of the signed-in user.
 package facebook
 
 import (
@@ -7,17 +9,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"time"
 
-	"github.com/perfect-panel/server/pkg/logger"
 	"golang.org/x/oauth2"
 )
 
 // Endpoint pins a current Graph API version; the constants shipped with
 // golang.org/x/oauth2/facebook still point at the retired v3.2 dialog.
-var Endpoint = oauth2.Endpoint{
+var Endpoint = oauth2.Endpoint{ //nolint:gosec // G101: OAuth endpoint URLs, not credentials
 	AuthURL:  "https://www.facebook.com/v22.0/dialog/oauth",
 	TokenURL: "https://graph.facebook.com/v22.0/oauth/access_token",
 }
@@ -57,28 +58,25 @@ func New(config *Config) *Client {
 
 // GetUserInfo fetches the user profile from the Graph API. Facebook only
 // returns the email field when the account has a confirmed address and the
-// user granted the email permission, so a non-empty value is verified.
-func (c *Client) GetUserInfo(token string) (*UserInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
+// user granted the email permission, so a non-empty value is verified. The
+// request is bound to ctx, which carries the caller's deadline.
+func (c *Client) GetUserInfo(ctx context.Context, token string) (*UserInfo, error) {
 	query := url.Values{}
 	query.Set("fields", "id,name,email,picture.type(large)")
 	// appsecret_proof is mandatory when the app enables "Require App
 	// Secret" and harmless otherwise.
 	query.Set("appsecret_proof", c.appSecretProof(token))
 
-	client := c.Config.Client(ctx, &oauth2.Token{AccessToken: token})
-	resp, err := client.Get(userInfoURL + "?" + query.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userInfoURL+"?"+query.Encode(), nil)
 	if err != nil {
-		logger.Error("[Facebook OAuth 2.0] Get User Info", logger.Field("error", err.Error()))
 		return nil, err
 	}
-	defer resp.Body.Close()
-
+	resp, err := c.Client(ctx, &oauth2.Token{AccessToken: token}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("facebook graph api request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		logger.Error("[Facebook OAuth 2.0] Get User Info unexpected status",
-			logger.Field("status", resp.StatusCode))
 		return nil, fmt.Errorf("facebook graph api returned status %d", resp.StatusCode)
 	}
 
@@ -92,9 +90,8 @@ func (c *Client) GetUserInfo(token string) (*UserInfo, error) {
 			} `json:"data"`
 		} `json:"picture"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		logger.Error("[Facebook OAuth 2.0] Decode User Info", logger.Field("error", err.Error()))
-		return nil, err
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decode facebook user: %w", err)
 	}
 	if raw.ID == "" {
 		return nil, fmt.Errorf("facebook graph api returned no user id")

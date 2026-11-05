@@ -44,3 +44,41 @@ func commandArguments(msg *models.Message) string {
 	}
 	return msg.Text[entity.Length+1:]
 }
+
+// shortcutCommands are the commands whose first argument is a number — a
+// ticket, subscription or user id, or a page — and which the bot's own
+// listings therefore offer as "/<command>_<n>" shortcuts: a Telegram command
+// cannot contain a space, so the number rides in the command name to make it
+// a single tap.
+var shortcutCommands = []string{
+	"tk", "rp", "close", "reopen", "tickets",
+	"user", "user_sub", "user_log", "reset", "toggle", "ban",
+}
+
+// splitShortcut splits "/user_sub_9" into the command "user_sub" and the
+// number "9". Command names contain underscores themselves, so the longest
+// known command the shortcut starts with wins over the first underscore.
+func splitShortcut(command string) (name, number string, ok bool) {
+	for _, candidate := range shortcutCommands {
+		rest, found := strings.CutPrefix(command, candidate+"_")
+		if !found || rest == "" || strings.Trim(rest, "0123456789") != "" || len(candidate) <= len(name) {
+			continue
+		}
+		name, number, ok = candidate, rest, true
+	}
+	return name, number, ok
+}
+
+// expandShortcut turns the shortcut "/tk_12" into the command "tk" with the
+// arguments "12"; arguments after the shortcut ("/rp_12 text") follow the id.
+// Anything else is returned unchanged.
+func expandShortcut(command, args string) (string, string) {
+	name, number, ok := splitShortcut(command)
+	if !ok {
+		return command, args
+	}
+	if args == "" {
+		return name, number
+	}
+	return name, number + " " + args
+}

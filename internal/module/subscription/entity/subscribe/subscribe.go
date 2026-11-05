@@ -1,8 +1,13 @@
+// Package subscribe holds the subscription module's plan entities: the plans
+// (the subscribe table) and their groups (subscribe_group).
 package subscribe
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
+	"github.com/perfect-panel/server/pkg/slicesx"
 	"gorm.io/gorm"
 )
 
@@ -36,6 +41,22 @@ type Subscribe struct {
 
 func (*Subscribe) TableName() string {
 	return "subscribe"
+}
+
+// NodeScope returns the nodes the plan selects: explicit node ids and node
+// tags, the tags trimmed, without empty entries and duplicates. A node
+// matching either belongs to the plan; a plan selecting neither has no
+// nodes. A damaged node id list is an error rather than a shorter list, so a
+// plan never silently serves fewer (or, read as empty, no) nodes.
+func (s *Subscribe) NodeScope() (nodeIDs []int64, tags []string, err error) {
+	nodeIDs, err = slicesx.ParseInt64CSV(s.Nodes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("plan %d node list: %w", s.Id, err)
+	}
+	for _, tag := range strings.Split(s.NodeTags, ",") {
+		tags = append(tags, strings.TrimSpace(tag))
+	}
+	return nodeIDs, slicesx.RemoveDuplicateElements(tags...), nil
 }
 
 func (s *Subscribe) BeforeCreate(tx *gorm.DB) error {
@@ -90,7 +111,7 @@ func (Group) TableName() string {
 
 const MaxSubscribePageSize = 100
 
-// FilterParams subscribe 列表过滤参数
+// FilterParams filters and pages the plan list.
 type FilterParams struct {
 	Page            int      // Page Number
 	Size            int      // Page Size

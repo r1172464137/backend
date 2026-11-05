@@ -3,6 +3,7 @@ package logger
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -24,7 +25,7 @@ func TestDailyRotateRuleMarkRotated(t *testing.T) {
 	})
 
 	t.Run("daily rule", func(t *testing.T) {
-		rule := DefaultRotateRule("test", "-", 1, false)
+		rule := defaultRotateRule("test", 1, false)
 		_, ok := rule.(*DailyRotateRule)
 		assert.True(t, ok)
 	})
@@ -36,7 +37,7 @@ func TestRotateLoggerEnforcesPrivateFileMode(t *testing.T) {
 	if err := os.WriteFile(filename, []byte("existing\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	logWriter, err := NewLogger(filename, DefaultRotateRule(filename, "-", 1, false), false)
+	logWriter, err := newRotateLogger(filename, defaultRotateRule(filename, 1, false), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +106,7 @@ func TestSizeLimitRotateRuleMarkRotated(t *testing.T) {
 	})
 
 	t.Run("size limit rule", func(t *testing.T) {
-		rule := NewSizeLimitRotateRule("foo", "-", 1, 1, 1, false)
+		rule := newSizeLimitRotateRule("foo", 1, 1, 1, false)
 		rule.MarkRotated()
 		assert.Equal(t, getNowDateInRFC3339Format(), rule.(*SizeLimitRotateRule).rotatedTime)
 	})
@@ -207,12 +208,9 @@ func TestSizeLimitRotateRuleShallRotate(t *testing.T) {
 
 func TestRotateLoggerClose(t *testing.T) {
 	t.Run("close", func(t *testing.T) {
-		filename, err := writeTempLog(t, "foo")
+		filename, err := writeTempLog(t)
 		assert.Nil(t, err)
-		if len(filename) > 0 {
-			defer os.Remove(filename)
-		}
-		logger, err := NewLogger(filename, new(DailyRotateRule), false)
+		logger, err := newRotateLogger(filename, dailyRule(filename), false)
 		assert.Nil(t, err)
 		_, err = logger.Write([]byte("foo"))
 		assert.Nil(t, err)
@@ -228,13 +226,9 @@ func TestRotateLoggerClose(t *testing.T) {
 	})
 
 	t.Run("close without losing logs", func(t *testing.T) {
-		text := "foo"
-		filename, err := writeTempLog(t, text)
+		filename, err := writeTempLog(t)
 		assert.Nil(t, err)
-		if len(filename) > 0 {
-			defer os.Remove(filename)
-		}
-		logger, err := NewLogger(filename, new(DailyRotateRule), false)
+		logger, err := newRotateLogger(filename, dailyRule(filename), false)
 		assert.Nil(t, err)
 		msg := []byte("foo")
 		n := 100
@@ -245,17 +239,32 @@ func TestRotateLoggerClose(t *testing.T) {
 		assert.Nil(t, logger.Close())
 		bs, err := os.ReadFile(filename)
 		assert.Nil(t, err)
-		assert.Equal(t, len(msg)*n+len(text), len(bs))
+		assert.Equal(t, len(msg)*n+len(tempLogBody), len(bs))
 	})
 }
 
-func TestRotateLoggerGetBackupFilename(t *testing.T) {
-	filename, err := writeTempLog(t, "foo")
+// Close waits for the compression a rotation started: once it returns, the
+// archive is complete and the rotated file is gone.
+func TestRotateLoggerCloseWaitsForCompression(t *testing.T) {
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer os.Remove(filename)
-	}
-	logger, err := NewLogger(filename, new(DailyRotateRule), false)
+	logger, err := newRotateLogger(filename, dailyRule(filename), true)
+	assert.Nil(t, err)
+	backup := logger.getBackupFilename()
+
+	assert.Nil(t, logger.rotate())
+	assert.Nil(t, logger.Close())
+
+	_, err = os.Stat(backup + gzipExt)
+	assert.Nil(t, err, "the archive is missing")
+	_, err = os.Stat(backup)
+	assert.ErrorIs(t, err, fs.ErrNotExist, "the rotated file was not removed")
+}
+
+func TestRotateLoggerGetBackupFilename(t *testing.T) {
+	filename, err := writeTempLog(t)
+	assert.Nil(t, err)
+	logger, err := newRotateLogger(filename, dailyRule(filename), false)
 	assert.Nil(t, err)
 	assert.True(t, len(logger.getBackupFilename()) > 0)
 	logger.backup = ""
@@ -263,18 +272,11 @@ func TestRotateLoggerGetBackupFilename(t *testing.T) {
 }
 
 func TestRotateLoggerMayCompressFile(t *testing.T) {
-	old := os.Stdout
-	os.Stdout = os.NewFile(0, os.DevNull)
-	defer func() {
-		os.Stdout = old
-	}()
+	silenceStdout(t)
 
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer os.Remove(filename)
-	}
-	logger, err := NewLogger(filename, new(DailyRotateRule), false)
+	logger, err := newRotateLogger(filename, dailyRule(filename), false)
 	assert.Nil(t, err)
 	logger.maybeCompressFile(filename)
 	_, err = os.Stat(filename)
@@ -282,66 +284,51 @@ func TestRotateLoggerMayCompressFile(t *testing.T) {
 }
 
 func TestRotateLoggerMayCompressFileTrue(t *testing.T) {
-	old := os.Stdout
-	os.Stdout = os.NewFile(0, os.DevNull)
-	defer func() {
-		os.Stdout = old
-	}()
+	silenceStdout(t)
 
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	logger, err := NewLogger(filename, new(DailyRotateRule), true)
+	logger, err := newRotateLogger(filename, dailyRule(filename), true)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer os.Remove(filepath.Base(logger.getBackupFilename()) + ".gz")
-	}
 	logger.maybeCompressFile(filename)
 	_, err = os.Stat(filename)
 	assert.NotNil(t, err)
 }
 
 func TestRotateLoggerRotate(t *testing.T) {
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	logger, err := NewLogger(filename, new(DailyRotateRule), true)
+	logger, err := newRotateLogger(filename, dailyRule(filename), true)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer func() {
-			os.Remove(logger.getBackupFilename())
-			os.Remove(filepath.Base(logger.getBackupFilename()) + ".gz")
-		}()
-	}
+	t.Cleanup(func() { assert.NoError(t, logger.Close()) })
 	err = logger.rotate()
-	switch v := err.(type) {
-	case *os.LinkError:
+	var linkErr *os.LinkError
+	var pathErr *os.PathError
+	switch {
+	case errors.As(err, &linkErr):
 		// avoid rename error on docker container
-		assert.Equal(t, syscall.EXDEV, v.Err)
-	case *os.PathError:
+		assert.Equal(t, syscall.EXDEV, linkErr.Err)
+	case errors.As(err, &pathErr):
 		// ignore remove error for tests,
 		// files are cleaned in GitHub actions.
-		assert.Equal(t, "remove", v.Op)
+		assert.Equal(t, "remove", pathErr.Op)
 	default:
 		assert.Nil(t, err)
 	}
 }
 
 func TestRotateLoggerWrite(t *testing.T) {
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	rule := new(DailyRotateRule)
-	logger, err := NewLogger(filename, rule, true)
+	rule := dailyRule(filename)
+	logger, err := newRotateLogger(filename, rule, true)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer func() {
-			os.Remove(logger.getBackupFilename())
-			os.Remove(filepath.Base(logger.getBackupFilename()) + ".gz")
-		}()
-	}
+	t.Cleanup(func() { assert.NoError(t, logger.Close()) })
 	// the following write calls cannot be changed to Write, because of DATA RACE.
 	logger.write([]byte(`foo`))
 	rule.rotatedTime = time.Now().Add(-time.Hour * 24).Format(dateFormat)
 	logger.write([]byte(`bar`))
-	logger.Close()
+	assert.NoError(t, logger.Close())
 	logger.write([]byte(`baz`))
 }
 
@@ -350,23 +337,17 @@ func TestLogWriterClose(t *testing.T) {
 }
 
 func TestRotateLoggerWithSizeLimitRotateRuleClose(t *testing.T) {
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer os.Remove(filename)
-	}
-	logger, err := NewLogger(filename, new(SizeLimitRotateRule), false)
+	logger, err := newRotateLogger(filename, sizeRule(filename), false)
 	assert.Nil(t, err)
 	_ = logger.Close()
 }
 
 func TestRotateLoggerGetBackupWithSizeLimitRotateRuleFilename(t *testing.T) {
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer os.Remove(filename)
-	}
-	logger, err := NewLogger(filename, new(SizeLimitRotateRule), false)
+	logger, err := newRotateLogger(filename, sizeRule(filename), false)
 	assert.Nil(t, err)
 	assert.True(t, len(logger.getBackupFilename()) > 0)
 	logger.backup = ""
@@ -374,18 +355,11 @@ func TestRotateLoggerGetBackupWithSizeLimitRotateRuleFilename(t *testing.T) {
 }
 
 func TestRotateLoggerWithSizeLimitRotateRuleMayCompressFile(t *testing.T) {
-	old := os.Stdout
-	os.Stdout = os.NewFile(0, os.DevNull)
-	defer func() {
-		os.Stdout = old
-	}()
+	silenceStdout(t)
 
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer os.Remove(filename)
-	}
-	logger, err := NewLogger(filename, new(SizeLimitRotateRule), false)
+	logger, err := newRotateLogger(filename, sizeRule(filename), false)
 	assert.Nil(t, err)
 	logger.maybeCompressFile(filename)
 	_, err = os.Stat(filename)
@@ -393,34 +367,22 @@ func TestRotateLoggerWithSizeLimitRotateRuleMayCompressFile(t *testing.T) {
 }
 
 func TestRotateLoggerWithSizeLimitRotateRuleMayCompressFileTrue(t *testing.T) {
-	old := os.Stdout
-	os.Stdout = os.NewFile(0, os.DevNull)
-	defer func() {
-		os.Stdout = old
-	}()
+	silenceStdout(t)
 
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	logger, err := NewLogger(filename, new(SizeLimitRotateRule), true)
+	logger, err := newRotateLogger(filename, sizeRule(filename), true)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer os.Remove(filepath.Base(logger.getBackupFilename()) + ".gz")
-	}
 	logger.maybeCompressFile(filename)
 	_, err = os.Stat(filename)
 	assert.NotNil(t, err)
 }
 
 func TestRotateLoggerWithSizeLimitRotateRuleMayCompressFileFailed(t *testing.T) {
-	old := os.Stdout
-	os.Stdout = os.NewFile(0, os.DevNull)
-	defer func() {
-		os.Stdout = old
-	}()
+	silenceStdout(t)
 
-	filename := random.KeyNew(8, 1)
-	logger, err := NewLogger(filename, new(SizeLimitRotateRule), true)
-	defer os.Remove(filename)
+	filename := filepath.Join(t.TempDir(), random.KeyNew(8, 1))
+	logger, err := newRotateLogger(filename, sizeRule(filename), true)
 	if assert.NoError(t, err) {
 		assert.NotPanics(t, func() {
 			logger.maybeCompressFile(random.KeyNew(8, 1))
@@ -429,47 +391,39 @@ func TestRotateLoggerWithSizeLimitRotateRuleMayCompressFileFailed(t *testing.T) 
 }
 
 func TestRotateLoggerWithSizeLimitRotateRuleRotate(t *testing.T) {
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	logger, err := NewLogger(filename, new(SizeLimitRotateRule), true)
+	logger, err := newRotateLogger(filename, sizeRule(filename), true)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer func() {
-			os.Remove(logger.getBackupFilename())
-			os.Remove(filepath.Base(logger.getBackupFilename()) + ".gz")
-		}()
-	}
+	t.Cleanup(func() { assert.NoError(t, logger.Close()) })
 	err = logger.rotate()
-	switch v := err.(type) {
-	case *os.LinkError:
+	var linkErr *os.LinkError
+	var pathErr *os.PathError
+	switch {
+	case errors.As(err, &linkErr):
 		// avoid rename error on docker container
-		assert.Equal(t, syscall.EXDEV, v.Err)
-	case *os.PathError:
+		assert.Equal(t, syscall.EXDEV, linkErr.Err)
+	case errors.As(err, &pathErr):
 		// ignore remove error for tests,
 		// files are cleaned in GitHub actions.
-		assert.Equal(t, "remove", v.Op)
+		assert.Equal(t, "remove", pathErr.Op)
 	default:
 		assert.Nil(t, err)
 	}
 }
 
 func TestRotateLoggerWithSizeLimitRotateRuleWrite(t *testing.T) {
-	filename, err := writeTempLog(t, "foo")
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	rule := new(SizeLimitRotateRule)
-	logger, err := NewLogger(filename, rule, true)
+	rule := sizeRule(filename)
+	logger, err := newRotateLogger(filename, rule, true)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer func() {
-			os.Remove(logger.getBackupFilename())
-			os.Remove(filepath.Base(logger.getBackupFilename()) + ".gz")
-		}()
-	}
+	t.Cleanup(func() { assert.NoError(t, logger.Close()) })
 	// the following write calls cannot be changed to Write, because of DATA RACE.
 	logger.write([]byte(`foo`))
 	rule.rotatedTime = time.Now().Add(-time.Hour * 24).Format(dateFormat)
 	logger.write([]byte(`bar`))
-	logger.Close()
+	assert.NoError(t, logger.Close())
 	logger.write([]byte(`baz`))
 }
 
@@ -538,59 +492,36 @@ func TestGzipFile(t *testing.T) {
 }
 
 func TestRotateLogger_WithExistingFile(t *testing.T) {
-	const body = "foo"
-	filename, err := writeTempLog(t, body)
+	filename, err := writeTempLog(t)
 	assert.Nil(t, err)
-	if len(filename) > 0 {
-		defer os.Remove(filename)
-	}
 
-	rule := NewSizeLimitRotateRule(filename, "-", 1, 100, 3, false)
-	logger, err := NewLogger(filename, rule, false)
+	rule := newSizeLimitRotateRule(filename, 1, 100, 3, false)
+	logger, err := newRotateLogger(filename, rule, false)
 	assert.Nil(t, err)
-	assert.Equal(t, int64(len(body)), logger.currentSize)
+	assert.Equal(t, int64(len(tempLogBody)), logger.currentSize)
 	assert.Nil(t, logger.Close())
 }
 
 func BenchmarkRotateLogger(b *testing.B) {
-	filename := "./test.log"
-	filename2 := "./test2.log"
-	dailyRotateRuleLogger, err1 := NewLogger(
-		filename,
-		DefaultRotateRule(
-			filename,
-			backupFileDelimiter,
-			1,
-			true,
-		),
-		true,
-	)
-	if err1 != nil {
-		b.Logf("Failed to new daily rotate rule logger: %v", err1)
-		b.FailNow()
+	dir := b.TempDir()
+	filename := filepath.Join(dir, "test.log")
+	filename2 := filepath.Join(dir, "test2.log")
+	dailyRotateRuleLogger, err := newRotateLogger(filename, defaultRotateRule(filename, 1, true), true)
+	if err != nil {
+		b.Fatalf("Failed to new daily rotate rule logger: %v", err)
 	}
-	sizeLimitRotateRuleLogger, err2 := NewLogger(
-		filename2,
-		NewSizeLimitRotateRule(
-			filename,
-			backupFileDelimiter,
-			1,
-			100,
-			10,
-			true,
-		),
-		true,
-	)
-	if err2 != nil {
-		b.Logf("Failed to new size limit rotate rule logger: %v", err1)
-		b.FailNow()
+	sizeLimitRotateRuleLogger, err := newRotateLogger(filename2, newSizeLimitRotateRule(filename2, 1, 100, 10, true), true)
+	if err != nil {
+		b.Fatalf("Failed to new size limit rotate rule logger: %v", err)
 	}
-	defer func() {
-		dailyRotateRuleLogger.Close()
-		sizeLimitRotateRuleLogger.Close()
-		os.Remove(filename)
-		os.Remove(filename2)
-	}()
+	b.Cleanup(func() {
+		if err := dailyRotateRuleLogger.Close(); err != nil {
+			b.Error(err)
+		}
+		if err := sizeLimitRotateRuleLogger.Close(); err != nil {
+			b.Error(err)
+		}
+	})
 
 	b.Run("daily rotate rule", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
@@ -654,8 +585,38 @@ func (f *fakeFileSystem) Removed() bool {
 	return atomic.LoadInt32(&f.removed) > 0
 }
 
-func writeTempLog(t *testing.T, text string) (string, error) {
+// silenceStdout discards what the test prints to standard output. It opens
+// the null device: wrapping a descriptor number with os.NewFile would let the
+// wrapper's finalizer close whatever file reuses that number later.
+func silenceStdout(t *testing.T) {
+	t.Helper()
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = devNull
+	t.Cleanup(func() {
+		os.Stdout = old
+		assert.NoError(t, devNull.Close())
+	})
+}
+
+// tempLogBody is the content writeTempLog starts a log file with.
+const tempLogBody = "foo"
+
+func writeTempLog(t *testing.T) (string, error) {
 	t.Helper()
 	filename := filepath.Join(t.TempDir(), "fixture.log")
-	return filename, os.WriteFile(filename, []byte(text), 0o600)
+	return filename, os.WriteFile(filename, []byte(tempLogBody), 0o600)
+}
+
+// dailyRule and sizeRule are rules without settings that name their backups
+// after filename, so the backups stay in the test's temporary directory.
+func dailyRule(filename string) *DailyRotateRule {
+	return &DailyRotateRule{filename: filename}
+}
+
+func sizeRule(filename string) *SizeLimitRotateRule {
+	return &SizeLimitRotateRule{DailyRotateRule: DailyRotateRule{filename: filename}}
 }

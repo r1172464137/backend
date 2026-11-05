@@ -3,24 +3,27 @@ package ads
 import (
 	"context"
 
-	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/support/contract"
 	entity "github.com/perfect-panel/server/internal/module/support/entity/ads"
+	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/pkg/timeutil"
 )
 
-// GetPublicAds lists the active ads for the public site.
-func (s *Service) GetPublicAds(ctx context.Context, req *dto.GetAdsRequest) (resp *dto.GetAdsResponse, err error) {
-	// todo: add ads position and device
+// GetPublicAds lists the ads for the public site: enabled and inside their
+// schedule, so a scheduled ad does not show early and an expired one stops.
+// The request's device and position are not filtered on yet.
+func (s *Service) GetPublicAds(ctx context.Context, _ *dto.GetAdsRequest) (*dto.GetAdsResponse, error) {
 	status := 1
-	_, data, err := s.repo.GetAdsListByPage(ctx, 1, 200, entity.Filter{
-		Status: &status,
+	// The schedule the admin API writes (time.UnixMilli) is on the same
+	// clock: the process zone is the application's.
+	now := timeutil.Now()
+	// One page of the largest size the repository serves.
+	_, data, err := s.repo.GetAdsListByPage(ctx, 1, repository.MaxPageSize, entity.Filter{
+		Status:   &status,
+		ActiveAt: &now,
 	})
 	if err != nil {
 		return nil, err
 	}
-	resp = &dto.GetAdsResponse{
-		List: make([]dto.Ads, len(data)),
-	}
-	mapping.DeepCopy(&resp.List, data)
-	return
+	return &dto.GetAdsResponse{List: adsViews(data)}, nil
 }

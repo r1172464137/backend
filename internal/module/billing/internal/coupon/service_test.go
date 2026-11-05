@@ -8,16 +8,20 @@ import (
 
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	entity "github.com/perfect-panel/server/internal/module/billing/entity/coupon"
-	"github.com/perfect-panel/server/internal/repository"
 	"gorm.io/gorm"
 )
 
+// couponInsertRepo records the codes of the inserted coupons and fails the
+// first failures inserts with err. Creation reads nothing else.
 type couponInsertRepo struct {
-	repository.CouponRepo
 	codes    []string
 	failures int
 	err      error
 }
+
+var _ Coupons = (*couponInsertRepo)(nil)
+
+var errUnexpectedCall = errors.New("couponInsertRepo: coupon creation only inserts")
 
 func (r *couponInsertRepo) Insert(_ context.Context, row *entity.Coupon) error {
 	r.codes = append(r.codes, row.Code)
@@ -25,6 +29,20 @@ func (r *couponInsertRepo) Insert(_ context.Context, row *entity.Coupon) error {
 		return r.err
 	}
 	return nil
+}
+
+func (*couponInsertRepo) FindOne(context.Context, int64) (*entity.Coupon, error) {
+	return nil, errUnexpectedCall
+}
+
+func (*couponInsertRepo) Update(context.Context, *entity.Coupon) error { return errUnexpectedCall }
+
+func (*couponInsertRepo) Delete(context.Context, int64) error { return errUnexpectedCall }
+
+func (*couponInsertRepo) BatchDelete(context.Context, []int64) error { return errUnexpectedCall }
+
+func (*couponInsertRepo) QueryCouponListByPage(context.Context, int, int, int64, string) (int64, []*entity.Coupon, error) {
+	return 0, nil, errUnexpectedCall
 }
 
 func TestCreateCouponCodeRetriesOnlyGeneratedCollisions(t *testing.T) {

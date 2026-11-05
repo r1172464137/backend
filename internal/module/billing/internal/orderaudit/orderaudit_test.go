@@ -7,14 +7,15 @@ import (
 
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	logEntity "github.com/perfect-panel/server/internal/module/platform/entity/log"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/requestmeta"
 )
 
+// captureLogRepo keeps the last entry written to the audit log.
 type captureLogRepo struct {
-	repository.LogRepo
 	entry *logEntity.SystemLog
 }
+
+var _ LogWriter = (*captureLogRepo)(nil)
 
 func (r *captureLogRepo) Insert(_ context.Context, entry *logEntity.SystemLog) error {
 	r.entry = entry

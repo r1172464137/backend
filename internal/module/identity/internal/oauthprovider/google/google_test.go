@@ -2,77 +2,73 @@ package google
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"net/http"
+	"net/http/httptest"
 	"testing"
-
-	"golang.org/x/oauth2"
+	"time"
 )
 
-func TestGoogleOAuth(t *testing.T) {
-	t.Skipf("Skip TestGoogleOAuth test")
-	http.HandleFunc("/", handleMain)
-	http.HandleFunc("/login", handleLogin)
-	http.HandleFunc("/auth", handleCallback)
-	http.HandleFunc("/user", handleAuth)
-
-	fmt.Println("Server is running on http://localhost:3001")
-	log.Fatal(http.ListenAndServe(":3001", nil))
+func stubUserInfo(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	original := userInfoURL
+	userInfoURL = server.URL
+	t.Cleanup(func() { userInfoURL = original })
 }
 
-func handleMain(w http.ResponseWriter, r *http.Request) {
-	html := `<html>
-		<body>
-			<a href="/login">Log in with Google</a>
-		</body>
-	</html>`
-	fmt.Fprint(w, html)
-}
-
-func handleLogin(w http.ResponseWriter, r *http.Request) {
-	oauthConfig := New(&Config{
-		ClientID:     "",
-		ClientSecret: "",
-		RedirectURL:  "http://localhost:3001/auth",
+func TestGetUserInfoParsesProfile(t *testing.T) {
+	stubUserInfo(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"id":"1001","email":"user@example.com","picture":"https://cdn.example/p.jpg","verified_email":"true"}`))
 	})
-	url := oauthConfig.AuthCodeURL("randomstate", oauth2.AccessTypeOffline)
-	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
-}
 
-func handleCallback(w http.ResponseWriter, r *http.Request) {
-	if r.FormValue("state") != "randomstate" {
-		http.Error(w, "State is invalid", http.StatusBadRequest)
-		return
-	}
-
-	log.Printf("url: %v", r.URL)
-
-	oauthConfig := New(&Config{
-		ClientID:     "",
-		ClientSecret: "Key",
-		RedirectURL:  "http://localhost:3001/auth",
-	})
-	code := r.FormValue("code")
-	token, err := oauthConfig.Exchange(context.Background(), code)
+	info, err := New(&Config{}).GetUserInfo(context.Background(), "access-token")
 	if err != nil {
-		http.Error(w, "Failed to exchange token", http.StatusInternalServerError)
-		return
+		t.Fatalf("GetUserInfo error = %v", err)
 	}
-	http.Redirect(w, r, "/user?token="+token.AccessToken, http.StatusTemporaryRedirect)
+	if info.OpenID != "1001" || info.Email != "user@example.com" || !info.VerifiedEmail || info.Picture != "https://cdn.example/p.jpg" {
+		t.Fatalf("info = %+v", info)
+	}
 }
 
-func handleAuth(w http.ResponseWriter, r *http.Request) {
-	token := r.FormValue("token")
-	client := New(&Config{
-		ClientID:     "Id",
-		ClientSecret: "Key",
-		RedirectURL:  "http://localhost:3001/auth",
-	})
-	userInfo, err := client.GetUserInfo(token)
-	if err != nil {
-		http.Error(w, "Failed to get user info", http.StatusInternalServerError)
-		return
+// A refused or empty answer is a failed sign-in, not an account without an
+// id.
+func TestGetUserInfoRejectsFailedResponses(t *testing.T) {
+	for name, handler := range map[string]http.HandlerFunc{
+		"unauthorized": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"id":"1001"}`))
+		},
+		"no id":     func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) },
+		"malformed": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{`)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubUserInfo(t, handler)
+			if info, err := New(&Config{}).GetUserInfo(context.Background(), "access-token"); err == nil {
+				t.Fatalf("GetUserInfo = %+v, want an error", info)
+			}
+		})
 	}
-	fmt.Fprintf(w, "Hello, %s", userInfo.Name)
+}
+
+// The request carries the caller's deadline instead of waiting forever.
+func TestGetUserInfoHonoursTheCallerDeadline(t *testing.T) {
+	stubUserInfo(t, func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := New(&Config{}).GetUserInfo(ctx, "access-token"); err == nil {
+		t.Fatal("GetUserInfo succeeded past its deadline")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("GetUserInfo returned after %v, want the 50ms deadline", elapsed)
+	}
 }

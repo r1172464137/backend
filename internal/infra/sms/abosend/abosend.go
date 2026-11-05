@@ -1,18 +1,27 @@
+// Package abosend sends text messages through the Abosend HTTP API.
 package abosend
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"time"
+	"io"
+	"net/http"
+	"strings"
 
-	"github.com/go-resty/resty/v2"
+	"github.com/perfect-panel/server/internal/infra/integration"
 	"github.com/perfect-panel/server/internal/infra/protocolkey"
 	"github.com/perfect-panel/server/pkg/random"
-	"github.com/perfect-panel/server/pkg/templatex"
 )
 
+// BaseURL is the API domain of a configuration that names none.
 const BaseURL = "https://smsapi.abosend.com"
 
+// maxResponseBytes bounds how much of a provider response is read.
+const maxResponseBytes = 1 << 20
+
+// Config is the stored provider configuration.
 type Config struct {
 	ApiDomain string `json:"api_domain"`
 	Access    string `json:"access"`
@@ -20,9 +29,11 @@ type Config struct {
 	Template  string `json:"template"`
 }
 
+// Client sends through one Abosend account.
 type Client struct {
-	config *Config
-	client *resty.Client
+	config  Config
+	baseURL string
+	http    *http.Client
 }
 
 type request struct {
@@ -42,62 +53,59 @@ type response struct {
 	}
 }
 
-func (l *response) Unmarshal(data []byte) error {
-	return json.Unmarshal(data, &l)
-}
-
-func NewClient(config Config) *Client {
-	client := resty.New()
-	client.SetTimeout(10 * time.Second)
+// NewClient sends through httpClient to the configured API domain.
+func NewClient(config Config, httpClient *http.Client) *Client {
+	baseURL := BaseURL
 	if config.ApiDomain != "" {
-		client.SetBaseURL(config.ApiDomain)
-	} else {
-		client.SetBaseURL(BaseURL)
+		baseURL = config.ApiDomain
 	}
-	return &Client{
-		config: &config,
-		client: client,
-	}
+	return &Client{config: config, baseURL: strings.TrimRight(baseURL, "/"), http: httpClient}
 }
 
-func (c *Client) SendCode(area, mobile, code string) error {
-	text, err := templatex.RenderToString(c.config.Template, map[string]interface{}{
-		"code": code,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to render sms template: %s", err.Error())
-	}
-	randNumber := random.Key(6, 0)
-	sign := protocolkey.Md5Encode(fmt.Sprintf("%s%s%s%s", c.config.Access, text, randNumber, c.config.Secret), true)
-	req := request{
+// sign is the request signature: the uppercase MD5 of the organisation
+// code, the text, the nonce and the key.
+func sign(access, text, nonce, secret string) string {
+	return protocolkey.Md5Encode(access+text+nonce+secret, true)
+}
+
+// SendText sends text to the number; Abosend takes the area both separately
+// and as the number's prefix.
+func (c *Client) SendText(ctx context.Context, area, mobile, text string) error {
+	nonce := random.Key(6, 0)
+	body, err := json.Marshal(request{
 		OrgCode:    c.config.Access,
-		MobileArea: fmt.Sprintf("+%s", area),
-		Mobile:     fmt.Sprintf("%s%s", area, mobile),
+		MobileArea: "+" + area,
+		Mobile:     area + mobile,
 		Content:    text,
-		Rand:       randNumber,
-		Sign:       sign,
-	}
-	resp, err := c.client.R().SetBody(req).ForceContentType("application/json").Post("/v2/api/sendSMS")
+		Rand:       nonce,
+		Sign:       sign(c.config.Access, text, nonce, c.config.Secret),
+	})
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode() != 200 {
-		return fmt.Errorf("send sms failed, status code: %d", resp.StatusCode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v2/api/sendSMS", bytes.NewReader(body))
+	if err != nil {
+		return integration.RequestError("abosend", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return integration.RequestError("abosend", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("send sms failed, status code: %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return err
 	}
 	var result response
-	err = result.Unmarshal(resp.Body())
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal response: %s", err.Error())
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("failed to unmarshal response: %w", err)
 	}
-	if result.Code != 200 {
+	if result.Code != http.StatusOK {
 		return fmt.Errorf("send sms failed, code: %d, msg: %s", result.Code, result.Message)
 	}
 	return nil
-}
-
-func (c *Client) GetSendCodeContent(code string) string {
-	text, _ := templatex.RenderToString(c.config.Template, map[string]interface{}{
-		"code": code,
-	})
-	return text
 }

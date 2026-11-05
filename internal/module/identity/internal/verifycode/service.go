@@ -1,12 +1,16 @@
-// Service assembly for the verification-code subdomain: issuing and
-// pre-checking the email/SMS codes that gate registration and account
-// mutations. Only the module facade may reach it.
+// Package verifycode implements the verification-code subdomain of the
+// identity module: issuing and pre-checking the email and SMS codes that gate
+// registration and account mutations. Only the module facade may reach it.
 package verifycode
 
 import (
 	"context"
 
-	dto "github.com/perfect-panel/server/internal/module/identity/contract"
+	"github.com/hibiken/asynq"
+	"github.com/perfect-panel/server/internal/module/identity/entity/auth"
+	"github.com/perfect-panel/server/internal/module/identity/entity/user"
+	"github.com/perfect-panel/server/internal/module/identity/internal/authn/registerpolicy"
+	"github.com/perfect-panel/server/internal/repository"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -18,18 +22,33 @@ type Snapshot struct {
 	VerifyCodeInterval int64
 	VerifyCodeLimit    int64
 	VerifyCodeExpire   int64
-	SiteLogo           string
-	SiteName           string
+	// MobileWhitelist lists the area codes SMS codes may be sent to when
+	// MobileWhitelistEnabled is set.
+	MobileWhitelistEnabled bool
+	MobileWhitelist        []string
+	SiteLogo               string
+	SiteName               string
+}
+
+// VerificationIdentityStore is the persistence surface the code flows use
+// to tell registration from security codes.
+type VerificationIdentityStore interface {
+	UserAuth() repository.UserAuthRepo
+}
+
+// VerificationTaskQueue publishes verification-code delivery tasks.
+type VerificationTaskQueue interface {
+	EnqueueContext(ctx context.Context, task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error)
 }
 
 // Deps declares the subdomain's dependencies; the identity facade forwards
-// them from the composition root and supplies the register policy from the
+// them from the composition root and supplies the account policy from the
 // authentication subdomain.
 type Deps struct {
 	Store  VerificationIdentityStore
 	Redis  *redis.Client
 	Queue  VerificationTaskQueue
-	Policy VerificationCodePolicy
+	Policy registerpolicy.Policy
 	// Config snapshots the runtime-mutable settings per request.
 	Config func() Snapshot
 }
@@ -40,44 +59,24 @@ type Service struct {
 	deps Deps
 }
 
+// NewService builds the subdomain over the dependencies the facade forwards.
 func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
 }
 
-func (s *Service) SendEmailCode(ctx context.Context, req *dto.SendCodeRequest) (*dto.SendCodeResponse, error) {
-	cfg := s.deps.Config()
-	return NewSendEmailCodeLogic(ctx, SendEmailCodeDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Queue: s.deps.Queue,
-		Config: EmailCodeConfig{
-			DomainSuffixList:   cfg.DomainSuffixList,
-			EnableDomainSuffix: cfg.EnableDomainSuffix,
-			VerifyCodeInterval: cfg.VerifyCodeInterval,
-			VerifyCodeLimit:    cfg.VerifyCodeLimit,
-			VerifyCodeExpire:   cfg.VerifyCodeExpire,
-			SiteLogo:           cfg.SiteLogo,
-			SiteName:           cfg.SiteName,
-		},
-		Policy: s.deps.Policy,
-	}).SendEmailCode(req)
-}
-
-func (s *Service) SendSmsCode(ctx context.Context, req *dto.SendSmsCodeRequest) (*dto.SendCodeResponse, error) {
-	cfg := s.deps.Config()
-	return NewSendSmsCodeLogic(ctx, SendSmsCodeDependencies{
-		Store: s.deps.Store,
-		Redis: s.deps.Redis,
-		Queue: s.deps.Queue,
-		Config: SmsCodeConfig{
-			VerifyCodeInterval: cfg.VerifyCodeInterval,
-			VerifyCodeLimit:    cfg.VerifyCodeLimit,
-			VerifyCodeExpire:   cfg.VerifyCodeExpire,
-		},
-		Policy: s.deps.Policy,
-	}).SendSmsCode(req)
-}
-
-func (s *Service) CheckVerificationCode(ctx context.Context, req *dto.CheckVerificationCodeRequest) (*dto.CheckVerificationCodeRespone, error) {
-	return newCheckVerificationCodeLogic(ctx, s.deps).CheckVerificationCode(req)
+// ensureCodeAllowed applies the account policy to a code request. A register
+// code proves an address no account holds: for an anonymous request it
+// starts a registration and needs registration open, while a signed-in
+// account asks for it to bind the address to itself (UpdateBindEmail,
+// UpdateBindMobile), which needs only the method enabled, so closing
+// registration does not stop members from binding or changing an address.
+// A security code proves an address an account holds and needs the method.
+func (s *Service) ensureCodeAllowed(ctx context.Context, verifyType auth.VerifyType, method string) error {
+	if verifyType != auth.Register {
+		return s.deps.Policy.EnsureMethodEnabled(ctx, method)
+	}
+	if _, signedIn := user.FromContext(ctx); signedIn {
+		return s.deps.Policy.EnsureMethodEnabled(ctx, method)
+	}
+	return s.deps.Policy.EnsureRegistrationOpen(ctx, method)
 }

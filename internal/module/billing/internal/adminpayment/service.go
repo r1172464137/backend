@@ -5,51 +5,71 @@ package adminpayment
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"strings"
 
-	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	paymentModel "github.com/perfect-panel/server/internal/module/billing/entity/payment"
+	"github.com/perfect-panel/server/internal/module/billing/internal/gateway"
 	"github.com/perfect-panel/server/internal/module/billing/internal/payment"
-	"github.com/perfect-panel/server/internal/module/billing/internal/payment/stripe"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/random"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-// Transactor mirrors the facade's billing-scoped transaction port.
-type Transactor interface {
-	InBillingTx(ctx context.Context, fn func(repository.BillingStore) error) error
+// Payments is the payment-method persistence administration needs.
+type Payments interface {
+	Insert(ctx context.Context, data *paymentModel.Payment) error
+	FindOne(ctx context.Context, id int64) (*paymentModel.Payment, error)
+	Update(ctx context.Context, data *paymentModel.Payment) error
+	Delete(ctx context.Context, id int64) error
+	FindListByPage(ctx context.Context, page, size int, req *paymentModel.Filter) (int64, []*paymentModel.Payment, error)
+}
+
+// PendingOrders counts the unpaid orders bound to a payment method.
+type PendingOrders interface {
+	CountPendingByPaymentID(ctx context.Context, paymentID int64) (int64, error)
+}
+
+type Deps struct {
+	Payments Payments
+	Orders   PendingOrders
+	// Gateways validates configurations and manages Stripe webhooks; nil
+	// selects the production gateways.
+	Gateways *gateway.Registry
+	// SiteHost reads the public site host a callback URL falls back to when
+	// the method has no domain.
+	SiteHost func() string
 }
 
 type Service struct {
-	payments repository.PaymentRepo
-	orders   repository.OrderRepo
-	tx       Transactor
-	host     string
+	deps Deps
 }
 
-func NewService(payments repository.PaymentRepo, orders repository.OrderRepo, tx Transactor, host string) *Service {
-	return &Service{payments: payments, orders: orders, tx: tx, host: host}
+func NewService(deps Deps) *Service {
+	if deps.Gateways == nil {
+		deps.Gateways = gateway.NewRegistry()
+	}
+	return &Service{deps: deps}
+}
+
+func (s *Service) siteHost() string {
+	if s.deps.SiteHost == nil {
+		return ""
+	}
+	return s.deps.SiteHost()
 }
 
 func (s *Service) Create(ctx context.Context, req *dto.CreatePaymentMethodRequest) (*dto.PaymentConfig, error) {
-	log := logger.WithContext(ctx)
 	if payment.ParsePlatform(req.Platform) == payment.UNSUPPORTED {
-		log.Errorw("unsupported payment platform", logger.Field("mark", req.Platform))
-		return nil, errors.Wrapf(xerr.NewErrCodeMsg(400, "UNSUPPORTED_PAYMENT_PLATFORM"), "unsupported payment platform: %s", req.Platform)
+		return nil, xerr.Errorf(xerr.UnsupportedPaymentPlatform, "unsupported payment platform: %s", req.Platform)
 	}
 	if err := validatePaymentFee(req.FeeMode, req.FeePercent, req.FeeAmount); err != nil {
 		return nil, err
 	}
-	config := parsePaymentPlatformConfig(ctx, payment.ParsePlatform(req.Platform), req.Config)
-	if config == "" {
-		return nil, errors.Wrapf(xerr.NewErrCodeMsg(400, "INVALID_PAYMENT_CONFIG"), "invalid payment config")
+	config, err := s.deps.Gateways.NormalizeConfig(req.Platform, req.Config)
+	if err != nil {
+		return nil, xerr.Wrapf(err, xerr.InvalidPaymentConfig, "invalid payment config")
 	}
-	var paymentMethod = &paymentModel.Payment{
+	method := &paymentModel.Payment{
 		Name:        req.Name,
 		Platform:    req.Platform,
 		Icon:        req.Icon,
@@ -63,63 +83,151 @@ func (s *Service) Create(ctx context.Context, req *dto.CreatePaymentMethodReques
 		Enable:      req.Enable,
 		Token:       random.KeyNew(8, 1),
 	}
-	err := s.tx.InBillingTx(ctx, func(store repository.BillingStore) error {
-		if req.Platform == "Stripe" {
-			var cfg paymentModel.StripeConfig
-			if err := cfg.Unmarshal([]byte(paymentMethod.Config)); err != nil {
-				log.Errorf("[CreatePaymentMethod] unmarshal stripe config error: %s", err.Error())
-				return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "unmarshal stripe config error: %s", err.Error())
-			}
-			if cfg.SecretKey == "" {
-				log.Error("[CreatePaymentMethod] stripe secret key is empty")
-				return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "stripe secret key is empty")
-			}
-
-			// Create Stripe webhook endpoint
-			client := stripe.NewClient(stripe.Config{
-				SecretKey: cfg.SecretKey,
-				PublicKey: cfg.PublicKey,
-			})
-			url := fmt.Sprintf("%s/v1/notify/Stripe/%s", strings.TrimSuffix(req.Domain, "/"), paymentMethod.Token)
-			endpoint, err := client.CreateWebhookEndpoint(url)
-			if err != nil {
-				log.Errorw("[CreatePaymentMethod] create stripe webhook endpoint error", logger.Field("error", err.Error()))
-				return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "create stripe webhook endpoint error: %s", err.Error())
-			}
-			cfg.WebhookSecret = endpoint.Secret
-			content, _ := cfg.Marshal()
-			paymentMethod.Config = string(content)
+	if payment.ParsePlatform(req.Platform) == payment.Stripe {
+		if err := s.createStripeMethod(ctx, method); err != nil {
+			return nil, err
 		}
-		if err := store.Payment().Insert(ctx, paymentMethod); err != nil {
-			return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "insert payment method error: %s", err.Error())
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+	} else if err := s.deps.Payments.Insert(ctx, method); err != nil {
+		return nil, xerr.Wrapf(err, xerr.DatabaseInsertError, "insert payment method")
 	}
+	return paymentConfigResponse(method), nil
+}
 
-	resp := &dto.PaymentConfig{}
-	mapping.DeepCopy(resp, paymentMethod)
-	var configMap map[string]interface{}
-	_ = json.Unmarshal([]byte(paymentMethod.Config), &configMap)
-	resp.Config = configMap
-	return resp, nil
+// createStripeMethod registers the method's webhook endpoint with Stripe and
+// stores the method with the endpoint's signing secret. The endpoint is
+// created before the method is saved, outside any transaction, and deleted
+// again when the method cannot be saved, so no orphaned endpoint keeps
+// receiving events.
+func (s *Service) createStripeMethod(ctx context.Context, method *paymentModel.Payment) error {
+	var config paymentModel.StripeConfig
+	if err := config.Unmarshal([]byte(method.Config)); err != nil {
+		return xerr.Wrapf(err, xerr.InvalidPaymentConfig, "invalid Stripe config")
+	}
+	if config.SecretKey == "" {
+		return xerr.Errorf(xerr.InvalidPaymentConfig, "stripe secret key is empty")
+	}
+	notifyURL, err := gateway.NotifyURL(method, s.siteHost())
+	if err != nil {
+		return err
+	}
+	webhooks := s.deps.Gateways.StripeWebhooks(config.SecretKey)
+	endpointID, secret, err := webhooks.CreateWebhookEndpoint(ctx, notifyURL)
+	if err != nil {
+		return xerr.Wrapf(err, xerr.ERROR, "create stripe webhook endpoint")
+	}
+	config.WebhookSecret, config.WebhookEndpointID = secret, endpointID
+	content, err := config.Marshal()
+	if err == nil {
+		method.Config = string(content)
+		err = s.deps.Payments.Insert(ctx, method)
+	}
+	if err != nil {
+		if deleteErr := webhooks.DeleteWebhookEndpoint(ctx, endpointID); deleteErr != nil {
+			logger.WithContext(ctx).Errorw("[CreatePaymentMethod] remove the Stripe webhook endpoint of an unsaved payment method by hand",
+				logger.Field("endpoint", endpointID), logger.Field("error", deleteErr.Error()))
+		}
+		return xerr.Wrapf(err, xerr.DatabaseInsertError, "insert payment method")
+	}
+	return nil
+}
+
+// stripeUpdate is the webhook side of a Stripe method's update. A secret key
+// that changed selects another Stripe account: the webhook endpoint the
+// method's callbacks arrive through lives in the old account, so a new one
+// is registered in the new account, its secret stored with the method, and
+// the old one removed once the method is saved. An unchanged key keeps the
+// endpoint, whose secret and id an administrator's form need not carry.
+type stripeUpdate struct {
+	old, updated paymentModel.StripeConfig
+	webhooks     gateway.StripeWebhooks
+	endpointID   string // the endpoint registered by this update, if any
+}
+
+// prepareStripeUpdate reads both configurations and, for a changed key,
+// registers the webhook endpoint in the new account. It returns the
+// configuration to store.
+func (s *Service) prepareStripeUpdate(ctx context.Context, method *paymentModel.Payment, config string) (string, *stripeUpdate, error) {
+	update := &stripeUpdate{}
+	if err := update.old.Unmarshal([]byte(method.Config)); err != nil {
+		return "", nil, xerr.Wrapf(err, xerr.InvalidPaymentConfig, "invalid stored Stripe config")
+	}
+	if err := update.updated.Unmarshal([]byte(config)); err != nil {
+		return "", nil, xerr.Wrapf(err, xerr.InvalidPaymentConfig, "invalid Stripe config")
+	}
+	if update.updated.SecretKey == "" {
+		return "", nil, xerr.Errorf(xerr.InvalidPaymentConfig, "stripe secret key is empty")
+	}
+	if update.updated.SecretKey == update.old.SecretKey {
+		if update.updated.WebhookSecret == "" {
+			update.updated.WebhookSecret = update.old.WebhookSecret
+		}
+		if update.updated.WebhookEndpointID == "" {
+			update.updated.WebhookEndpointID = update.old.WebhookEndpointID
+		}
+	} else {
+		notifyURL, err := gateway.NotifyURL(method, s.siteHost())
+		if err != nil {
+			return "", nil, err
+		}
+		update.webhooks = s.deps.Gateways.StripeWebhooks(update.updated.SecretKey)
+		endpointID, secret, err := update.webhooks.CreateWebhookEndpoint(ctx, notifyURL)
+		if err != nil {
+			return "", nil, xerr.Wrapf(err, xerr.ERROR, "create stripe webhook endpoint")
+		}
+		update.endpointID = endpointID
+		update.updated.WebhookSecret, update.updated.WebhookEndpointID = secret, endpointID
+	}
+	content, err := update.updated.Marshal()
+	if err != nil {
+		update.rollback(ctx)
+		return "", nil, xerr.Wrapf(err, xerr.InvalidPaymentConfig, "encode Stripe config")
+	}
+	return string(content), update, nil
+}
+
+// rollback removes the endpoint this update registered when the method could
+// not be saved, so no orphaned endpoint keeps receiving events.
+func (u *stripeUpdate) rollback(ctx context.Context) {
+	if u == nil || u.endpointID == "" {
+		return
+	}
+	if err := u.webhooks.DeleteWebhookEndpoint(ctx, u.endpointID); err != nil {
+		logger.WithContext(ctx).Errorw("[UpdatePaymentMethod] remove the Stripe webhook endpoint of an unsaved payment method by hand",
+			logger.Field("endpoint", u.endpointID), logger.Field("error", err.Error()))
+	}
+}
+
+// retireOldEndpoint removes the endpoint of the old account once the method
+// uses the new one. It is best effort: the old account may already have
+// revoked the key, and an endpoint registered before its id was recorded
+// cannot be found; both are left for the administrator.
+func (s *Service) retireOldEndpoint(ctx context.Context, u *stripeUpdate) {
+	if u == nil || u.endpointID == "" {
+		return
+	}
+	if u.old.WebhookEndpointID == "" {
+		logger.WithContext(ctx).Infow("[UpdatePaymentMethod] the webhook endpoint of the previous Stripe account is not recorded; remove it in the Stripe dashboard by hand")
+		return
+	}
+	if u.old.SecretKey == "" {
+		return
+	}
+	if err := s.deps.Gateways.StripeWebhooks(u.old.SecretKey).DeleteWebhookEndpoint(ctx, u.old.WebhookEndpointID); err != nil {
+		logger.WithContext(ctx).Errorw("[UpdatePaymentMethod] remove the webhook endpoint of the previous Stripe account by hand",
+			logger.Field("endpoint", u.old.WebhookEndpointID), logger.Field("error", err.Error()))
+	}
 }
 
 func (s *Service) Update(ctx context.Context, req *dto.UpdatePaymentMethodRequest) (*dto.PaymentConfig, error) {
-	log := logger.WithContext(ctx)
 	if payment.ParsePlatform(req.Platform) == payment.UNSUPPORTED {
-		log.Errorw("unsupported payment platform", logger.Field("mark", req.Platform))
-		return nil, errors.Wrapf(xerr.NewErrCodeMsg(400, "UNSUPPORTED_PAYMENT_PLATFORM"), "unsupported payment platform: %s", req.Platform)
+		return nil, xerr.Errorf(xerr.UnsupportedPaymentPlatform, "unsupported payment platform: %s", req.Platform)
 	}
-	method, err := s.payments.FindOne(ctx, req.Id)
+	method, err := s.deps.Payments.FindOne(ctx, req.Id)
 	if err != nil {
-		log.Errorw("find payment method error", logger.Field("id", req.Id), logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find payment method error: %s", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find payment method %d", req.Id)
 	}
 	if method.Platform != req.Platform {
-		return nil, errors.Wrapf(xerr.NewErrCodeMsg(400, "PAYMENT_PLATFORM_IMMUTABLE"), "payment platform cannot be changed")
+		return nil, xerr.Errorf(xerr.PaymentPlatformImmutable, "payment platform cannot be changed")
 	}
 	if err := validatePaymentFee(req.FeeMode, req.FeePercent, req.FeeAmount); err != nil {
 		return nil, err
@@ -131,87 +239,94 @@ func (s *Service) Update(ctx context.Context, req *dto.UpdatePaymentMethodReques
 	// to validate and no callback URL, so toggling it must neither parse a
 	// platform config nor be blocked by the pending-order guard.
 	config := method.Config
+	var stripe *stripeUpdate
 	if payment.ParsePlatform(req.Platform) != payment.Balance {
-		config = parsePaymentPlatformConfig(ctx, payment.ParsePlatform(req.Platform), req.Config)
-		if config == "" {
-			return nil, errors.Wrapf(xerr.NewErrCodeMsg(400, "INVALID_PAYMENT_CONFIG"), "invalid payment config")
+		if config, err = s.deps.Gateways.NormalizeConfig(req.Platform, req.Config); err != nil {
+			return nil, xerr.Wrapf(err, xerr.InvalidPaymentConfig, "invalid payment config")
 		}
 		if method.Config != config || method.Domain != req.Domain {
-			pending, err := s.orders.CountPendingByPaymentID(ctx, method.Id)
-			if err != nil {
-				return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "count pending payment orders: %v", err)
+			if err := s.ensureNoPendingOrders(ctx, method.Id); err != nil {
+				return nil, err
 			}
-			if pending > 0 {
-				return nil, errors.Wrapf(xerr.NewErrCodeMsg(409, "PAYMENT_METHOD_HAS_PENDING_ORDERS"), "payment method has %d pending orders", pending)
+		}
+		if payment.ParsePlatform(req.Platform) == payment.Stripe {
+			// The webhook endpoint follows the account the secret key
+			// selects; the call happens outside any transaction.
+			if config, stripe, err = s.prepareStripeUpdate(ctx, method, config); err != nil {
+				return nil, err
 			}
 		}
 	}
-	mapping.DeepCopy(method, req)
+	// The id and the platform are those of the stored method: the platform
+	// was checked above and the token never changes.
+	method.Name = req.Name
+	method.Icon = req.Icon
+	method.Domain = req.Domain
+	method.Description = req.Description
 	method.Config = config
-	if err := s.payments.Update(ctx, method); err != nil {
-		log.Errorw("update payment method error", logger.Field("id", req.Id), logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update payment method error: %s", err.Error())
+	method.FeeMode = req.FeeMode
+	method.FeePercent = req.FeePercent
+	method.FeeAmount = req.FeeAmount
+	method.Sort = req.Sort
+	method.Enable = req.Enable
+	if err := s.deps.Payments.Update(ctx, method); err != nil {
+		stripe.rollback(ctx)
+		return nil, xerr.Wrapf(err, xerr.DatabaseUpdateError, "update payment method %d", req.Id)
 	}
-	resp := &dto.PaymentConfig{}
-	mapping.DeepCopy(resp, method)
-	var configMap map[string]interface{}
-	_ = json.Unmarshal([]byte(method.Config), &configMap)
-	resp.Config = configMap
-	return resp, nil
+	s.retireOldEndpoint(ctx, stripe)
+	return paymentConfigResponse(method), nil
 }
 
 func (s *Service) Delete(ctx context.Context, req *dto.DeletePaymentMethodRequest) error {
-	method, err := s.payments.FindOne(ctx, req.Id)
+	method, err := s.deps.Payments.FindOne(ctx, req.Id)
 	if err != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find payment method error: %v", err)
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "find payment method %d", req.Id)
 	}
 	// The seeded balance method is an internal checkout method the storefront
 	// depends on; deleting it breaks every balance purchase with an opaque
 	// record-not-found until the seed row is restored by hand.
 	if payment.ParsePlatform(method.Platform) == payment.Balance {
-		return errors.Wrapf(xerr.NewErrCodeMsg(400, "PAYMENT_METHOD_INTERNAL"), "the balance payment method cannot be deleted")
+		return xerr.Errorf(xerr.PaymentMethodInternal, "the balance payment method cannot be deleted")
 	}
-	pending, err := s.orders.CountPendingByPaymentID(ctx, req.Id)
+	if err := s.ensureNoPendingOrders(ctx, req.Id); err != nil {
+		return err
+	}
+	if err := s.deps.Payments.Delete(ctx, req.Id); err != nil {
+		return xerr.Wrapf(err, xerr.DatabaseDeletedError, "delete payment method %d", req.Id)
+	}
+	return nil
+}
+
+// ensureNoPendingOrders refuses to change a method pending orders still
+// depend on: their checkout and callbacks use its configuration.
+func (s *Service) ensureNoPendingOrders(ctx context.Context, paymentID int64) error {
+	pending, err := s.deps.Orders.CountPendingByPaymentID(ctx, paymentID)
 	if err != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "count pending payment orders: %v", err)
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "count pending orders of payment method %d", paymentID)
 	}
 	if pending > 0 {
-		return errors.Wrapf(xerr.NewErrCodeMsg(409, "PAYMENT_METHOD_HAS_PENDING_ORDERS"), "payment method has %d pending orders", pending)
-	}
-	if err := s.payments.Delete(ctx, req.Id); err != nil {
-		logger.WithContext(ctx).Errorw("delete payment method error", logger.Field("id", req.Id), logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseDeletedError), "delete payment method error: %s", err.Error())
+		return xerr.Errorf(xerr.PaymentMethodHasPendingOrders, "payment method has %d pending orders", pending)
 	}
 	return nil
 }
 
 func (s *Service) List(ctx context.Context, req *dto.GetPaymentMethodListRequest) (*dto.GetPaymentMethodListResponse, error) {
-	total, list, err := s.payments.FindListByPage(ctx, req.Page, req.Size, &paymentModel.Filter{
+	total, list, err := s.deps.Payments.FindListByPage(ctx, req.Page, req.Size, &paymentModel.Filter{
 		Search: req.Search,
 		Mark:   req.Platform,
 		Enable: req.Enable,
 	})
 	if err != nil {
-		logger.WithContext(ctx).Errorw("find payment method list error", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find payment method list error: %s", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find payment method list")
 	}
 	resp := &dto.GetPaymentMethodListResponse{
 		Total: total,
 		List:  make([]dto.PaymentMethodDetail, len(list)),
 	}
-
+	siteHost := s.siteHost()
 	for i, v := range list {
-		config := make(map[string]interface{})
+		config := make(map[string]any)
 		_ = json.Unmarshal([]byte(v.Config), &config)
-		notifyUrl := ""
-
-		if payment.ParsePlatform(v.Platform) != payment.Balance {
-			notifyUrl = v.Domain
-			if notifyUrl == "" {
-				notifyUrl = "https://" + s.host
-			}
-			notifyUrl = strings.TrimSuffix(notifyUrl, "/") + "/v1/notify/" + v.Platform + "/" + v.Token
-		}
 		resp.List[i] = dto.PaymentMethodDetail{
 			Id:          v.Id,
 			Name:        v.Name,
@@ -223,12 +338,26 @@ func (s *Service) List(ctx context.Context, req *dto.GetPaymentMethodListRequest
 			FeePercent:  v.FeePercent,
 			FeeAmount:   v.FeeAmount,
 			Sort:        v.Sort,
-			Enable:      *v.Enable,
-			NotifyURL:   notifyUrl,
+			Enable:      v.Enable != nil && *v.Enable,
+			NotifyURL:   s.displayNotifyURL(v, siteHost),
 			Description: v.Description,
 		}
 	}
 	return resp, nil
+}
+
+// displayNotifyURL is the callback URL checkout gives the gateway, or empty
+// when the method has none: the balance method, or a method whose callback
+// cannot be built until a domain or site host is configured.
+func (s *Service) displayNotifyURL(method *paymentModel.Payment, siteHost string) string {
+	if !s.deps.Gateways.Handles(method.Platform) {
+		return ""
+	}
+	notifyURL, err := gateway.NotifyURL(method, siteHost)
+	if err != nil {
+		return ""
+	}
+	return notifyURL
 }
 
 func (s *Service) Platforms(_ context.Context) (*dto.PaymentPlatformResponse, error) {
@@ -237,58 +366,28 @@ func (s *Service) Platforms(_ context.Context) (*dto.PaymentPlatformResponse, er
 
 func validatePaymentFee(mode uint, percent, amount int64) error {
 	if mode > 3 || percent < 0 || percent > 100 || amount < 0 {
-		return errors.Wrapf(xerr.NewErrCodeMsg(400, "INVALID_PAYMENT_FEE"), "invalid payment fee configuration")
+		return xerr.Errorf(xerr.InvalidPaymentFee, "invalid payment fee configuration")
 	}
 	return nil
 }
 
-func parsePaymentPlatformConfig(ctx context.Context, platform payment.Platform, config interface{}) string {
-	data, err := json.Marshal(config)
-	if err != nil {
-		logger.WithContext(ctx).Errorw("marshal config error", logger.Field("platform", platform), logger.Field("error", err.Error()))
-		return ""
-	}
-
-	// 通用处理函数
-	handleConfig := func(name string, target interface {
-		Unmarshal([]byte) error
-		Marshal() ([]byte, error)
-	}) string {
-		if err = target.Unmarshal(data); err != nil {
-			logger.WithContext(ctx).Errorw("parse "+name+" config error", logger.Field("error", err.Error()))
-			return ""
-		}
-		content, err := target.Marshal()
-		if err != nil {
-			logger.WithContext(ctx).Errorw("marshal "+name+" config error", logger.Field("error", err.Error()))
-			return ""
-		}
-		return string(content)
-	}
-
-	switch platform {
-	case payment.Stripe:
-		return handleConfig("Stripe", &paymentModel.StripeConfig{})
-	case payment.AlipayF2F:
-		return handleConfig("Alipay", &paymentModel.AlipayF2FConfig{})
-	case payment.EPay:
-		return handleConfig("Epay", &paymentModel.EPayConfig{})
-	case payment.Cryptomus:
-		var cfg paymentModel.CryptomusConfig
-		if err := cfg.Unmarshal(data); err != nil {
-			return ""
-		}
-		cfg.MerchantID = strings.TrimSpace(cfg.MerchantID)
-		cfg.APIKey = strings.TrimSpace(cfg.APIKey)
-		if cfg.MerchantID == "" || cfg.APIKey == "" {
-			return ""
-		}
-		content, err := cfg.Marshal()
-		if err != nil {
-			return ""
-		}
-		return string(content)
-	default:
-		return ""
+// paymentConfigResponse describes a saved method to the administrator, its
+// stored configuration decoded into JSON fields; the notify token stays out.
+func paymentConfigResponse(method *paymentModel.Payment) *dto.PaymentConfig {
+	var configMap map[string]any
+	_ = json.Unmarshal([]byte(method.Config), &configMap)
+	return &dto.PaymentConfig{
+		Id:          method.Id,
+		Name:        method.Name,
+		Platform:    method.Platform,
+		Description: method.Description,
+		Icon:        method.Icon,
+		Domain:      method.Domain,
+		Config:      configMap,
+		FeeMode:     method.FeeMode,
+		FeePercent:  method.FeePercent,
+		FeeAmount:   method.FeeAmount,
+		Sort:        method.Sort,
+		Enable:      method.Enable,
 	}
 }

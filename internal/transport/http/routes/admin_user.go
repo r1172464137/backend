@@ -7,8 +7,7 @@ import (
 )
 
 func registerAdminUserRoutes(router *server.Hertz, deps Dependencies) {
-	adminUserGroupRouter := router.Group("/v1/admin/user")
-	adminUserGroupRouter.Use(deps.authMiddleware())
+	adminUserGroupRouter := deps.adminGroup(router, "/v1/admin/user")
 	{
 		adminUserGroupRouter.DELETE("/", identityAdminUser.DeleteUserHandler(deps.Identity))
 		adminUserGroupRouter.POST("/", identityAdminUser.CreateUserHandler(deps.Identity))

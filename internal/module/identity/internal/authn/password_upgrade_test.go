@@ -1,19 +1,18 @@
-package auth
+package authn
 
 import (
 	"context"
 	"strings"
 	"testing"
 
-	password2 "github.com/perfect-panel/server/internal/auth/password"
+	"github.com/perfect-panel/server/internal/auth/password"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
-	"github.com/perfect-panel/server/internal/repository"
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/logger/logtest"
 )
 
+// passwordUpgradeUserRepo records the rehash it is asked to store and
+// reports updated as its outcome.
 type passwordUpgradeUserRepo struct {
-	repository.UserRepo
 	calls       int
 	currentHash string
 	password    string
@@ -22,10 +21,12 @@ type passwordUpgradeUserRepo struct {
 	updated     bool
 }
 
-func (r *passwordUpgradeUserRepo) UpgradePasswordHash(_ context.Context, _ int64, currentHash, password, algo, salt string) (bool, error) {
+var _ passwordRehasher = (*passwordUpgradeUserRepo)(nil)
+
+func (r *passwordUpgradeUserRepo) UpgradePasswordHash(_ context.Context, _ int64, currentHash, hash, algo, salt string) (bool, error) {
 	r.calls++
 	r.currentHash = currentHash
-	r.password = password
+	r.password = hash
 	r.algo = algo
 	r.salt = salt
 	return r.updated, nil
@@ -38,12 +39,12 @@ func TestUpgradePasswordAfterLoginRehashesLegacyHash(t *testing.T) {
 	repo := &passwordUpgradeUserRepo{updated: true}
 	ctx := context.Background()
 
-	upgradePasswordAfterLogin(ctx, repo, logger.WithContext(ctx), userInfo, "password")
+	upgradePasswordAfterLogin(ctx, repo, userInfo, "password")
 
 	if repo.calls != 1 {
 		t.Fatalf("UpgradePasswordHash calls = %d, want 1", repo.calls)
 	}
-	if repo.algo != password2.PasswordAlgoArgon2id || repo.salt != "" {
+	if repo.algo != password.PasswordAlgoArgon2id || repo.salt != "" {
 		t.Fatalf("updated algo/salt = %q/%q", repo.algo, repo.salt)
 	}
 	if repo.currentHash != legacyHash {
@@ -52,19 +53,19 @@ func TestUpgradePasswordAfterLoginRehashesLegacyHash(t *testing.T) {
 	if !strings.HasPrefix(repo.password, "$argon2id$") {
 		t.Fatalf("updated password is not argon2id PHC: %q", repo.password)
 	}
-	if !password2.MultiPasswordVerify(password2.PasswordAlgoArgon2id, "", "password", userInfo.Password) {
+	if !password.MultiPasswordVerify(password.PasswordAlgoArgon2id, "", "password", userInfo.Password) {
 		t.Fatal("upgraded user password should verify")
 	}
 }
 
 func TestUpgradePasswordAfterLoginSkipsCurrentHash(t *testing.T) {
 	logtest.Discard(t)
-	hash := password2.EncodePassWord("password")
-	userInfo := &user.User{Id: 1, Password: hash, Algo: password2.PasswordAlgoArgon2id}
+	hash := password.EncodePassWord("password")
+	userInfo := &user.User{Id: 1, Password: hash, Algo: password.PasswordAlgoArgon2id}
 	repo := &passwordUpgradeUserRepo{updated: true}
 	ctx := context.Background()
 
-	upgradePasswordAfterLogin(ctx, repo, logger.WithContext(ctx), userInfo, "password")
+	upgradePasswordAfterLogin(ctx, repo, userInfo, "password")
 
 	if repo.calls != 0 {
 		t.Fatalf("UpgradePasswordHash calls = %d, want 0", repo.calls)
@@ -78,7 +79,7 @@ func TestUpgradePasswordAfterLoginKeepsConcurrentPasswordChange(t *testing.T) {
 	repo := &passwordUpgradeUserRepo{updated: false}
 	ctx := context.Background()
 
-	upgradePasswordAfterLogin(ctx, repo, logger.WithContext(ctx), userInfo, "password")
+	upgradePasswordAfterLogin(ctx, repo, userInfo, "password")
 
 	if repo.calls != 1 {
 		t.Fatalf("UpgradePasswordHash calls = %d, want 1", repo.calls)

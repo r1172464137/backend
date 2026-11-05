@@ -3,8 +3,9 @@ package token
 import (
 	"testing"
 
+	"errors"
+
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/pkg/errors"
 )
 
 // TestNewJwtToken test NewJwtToken function

@@ -1,0 +1,149 @@
+package xerr
+
+var message map[uint32]string
+
+func init() {
+	message = make(map[uint32]string)
+	message = map[uint32]string{ //nolint:gosec // G101: user-facing error texts, not credentials
+		// General error
+		SUCCESS: "Success",
+		ERROR:   "Internal Server Error",
+		// parameter error
+		TooManyRequests:   "Too Many Requests",
+		InvalidParams:     "Param Error",
+		ErrorTokenEmpty:   "User token is empty",
+		ErrorTokenInvalid: "User token is invalid",
+		ErrorTokenExpire:  "User token is expired",
+		SecretIsEmpty:     "Secret is empty",
+		InvalidAccess:     "Invalid access",
+		InvalidCiphertext: "Invalid ciphertext",
+		// Database error
+		DatabaseQueryError:   "Database query error",
+		DatabaseUpdateError:  "Database update error",
+		DatabaseInsertError:  "Database insert error",
+		DatabaseDeletedError: "Database deleted error",
+
+		// User error
+		UserExist:           "User already exists",
+		UserNotExist:        "User does not exist",
+		UserPasswordError:   "User password error",
+		UserDisabled:        "User disabled",
+		InsufficientBalance: "Insufficient balance",
+		StopRegister:        "Stop register",
+		TelegramNotBound:    "Telegram not bound ",
+		UserNotBindOauth:    "User not bind oauth method",
+		InviteCodeError:     "Invite code error",
+
+		// Node error
+		NodeExist:                        "Node already exists",
+		NodeNotExist:                     "Node does not exist",
+		NodeGroupExist:                   "Node group already exists",
+		NodeGroupNotExist:                "Node group does not exist",
+		NodeGroupNotEmpty:                "Node group is not empty",
+		NetworkNodeProtocolInvalid:       "Enabled node protocol is not supported or is invalid",
+		NodeRoutingUpgradeRequired:       "Node must support routing version 1",
+		NetworkRoutingRevisionConflict:   "Server routing revision is stale",
+		PlatformRoutingRevisionConflict:  "Global routing revision is stale",
+		PlatformRoutingDowngradeRequired: "Routing downgrade would discard configured capabilities",
+		NetworkRoutingDowngradeRequired:  "Routing downgrade would discard configured capabilities",
+		PlatformLegacyRoutingRemoved:     "Legacy routing writes have been removed",
+		NetworkLegacyRoutingRemoved:      "Legacy routing writes have been removed",
+
+		//coupon error
+		CouponNotExist:          "Coupon does not exist",
+		CouponAlreadyUsed:       "Coupon has already been used",
+		CouponNotApplicable:     "Coupon does not match the order or conditions",
+		CouponInsufficientUsage: "Coupon has insufficient remaining uses",
+		CouponExpired:           "Coupon is expired",
+		CouponDisabled:          "Coupon is disabled",
+
+		// Subscribe
+		SubscribeExpired:                "Subscribe is expired",
+		SubscribeNotAvailable:           "Subscribe is not available",
+		UserSubscribeExist:              "User has subscription",
+		SubscribeIsUsedError:            "Subscribe is used",
+		SingleSubscribeModeExceedsLimit: "Single subscribe mode exceeds limit",
+		SubscribeQuotaLimit:             "Subscribe quota limit",
+		SubscribeOutOfStock:             "Subscribe out of stock",
+
+		// auth error
+		VerifyCodeError: "Verify code error",
+
+		// Identity band
+		OAuthStateInvalid:          "OAuth state is invalid or expired",
+		OAuthProviderError:         "OAuth provider request failed",
+		OAuthCallbackInvalid:       "OAuth callback is invalid",
+		OAuthCallbackExpired:       "OAuth callback has expired",
+		OAuthCallbackReplayed:      "OAuth callback has already been used",
+		OAuthProviderMisconfigured: "OAuth provider is not configured correctly",
+		TelegramBotUnavailable:     "Telegram bot is not configured",
+		DemoModeRestricted:         "This operation is not allowed in demo mode",
+		SenderTestFailed:           "Test message could not be sent",
+		EmailIdentityAmbiguous:     "Email address matches more than one account",
+
+		// EnqueueError
+		QueueEnqueueError: " Queue enqueue error",
+
+		// System error
+		DebugModeError: "Debug mode is enabled",
+
+		GetAuthenticatorError:          "Unsupported login method",
+		AuthenticatorNotSupportedError: "The authenticator does not support this method",
+
+		TelephoneAreaCodeIsEmpty:           "Telephone area code is empty",
+		TodaySendCountExceedsLimit:         "This account has reached the limit of sending times today",
+		SmsNotEnabled:                      "Telephone login is not enabled",
+		EmailNotEnabled:                    "Email function is not enabled yet",
+		PasswordOrVerificationCodeRequired: "Password or verification code required",
+		EmailExist:                         "Email already exists",
+		TelephoneExist:                     "Telephone already exists",
+		DeviceExist:                        "device exists",
+		PasswordIsEmpty:                    "password is empty",
+		TelephoneError:                     "telephone number error",
+		DeviceNotExist:                     "Device does not exist",
+		UseridNotMatch:                     "Userid not match",
+
+		// Order error
+		OrderNotExist:         "Order does not exist",
+		PaymentMethodNotFound: "Payment method not found",
+		OrderStatusError:      "Order status error",
+		InsufficientOfPeriod:  "Insufficient number of period",
+
+		// Billing band
+		PaymentNotifyURLNotConfigured: "PAYMENT_NOTIFY_URL_NOT_CONFIGURED",
+		UnsupportedPaymentPlatform:    "UNSUPPORTED_PAYMENT_PLATFORM",
+		InvalidPaymentConfig:          "INVALID_PAYMENT_CONFIG",
+		PaymentPlatformImmutable:      "PAYMENT_PLATFORM_IMMUTABLE",
+		PaymentMethodHasPendingOrders: "PAYMENT_METHOD_HAS_PENDING_ORDERS",
+		PaymentMethodInternal:         "PAYMENT_METHOD_INTERNAL",
+		InvalidPaymentFee:             "INVALID_PAYMENT_FEE",
+		PaymentStatusUnconfirmed:      "PAYMENT_STATUS_UNCONFIRMED",
+		InvalidInitialOrderStatus:     "INVALID_INITIAL_ORDER_STATUS",
+		InvalidOrderTransition:        "INVALID_ORDER_TRANSITION",
+		TradeNoRequired:               "TRADE_NO_REQUIRED",
+		InvalidOrderCloseRequest:      "INVALID_ORDER_CLOSE_REQUEST",
+		CouponUsedCountImmutable:      "COUPON_USED_COUNT_IMMUTABLE",
+		InvalidCoupon:                 "INVALID_COUPON",
+		InvalidCouponDiscount:         "INVALID_COUPON_DISCOUNT",
+		InvalidCouponType:             "INVALID_COUPON_TYPE",
+		WithdrawalAlreadyReviewed:     "WITHDRAWAL_ALREADY_REVIEWED",
+
+		// Subscription band
+		SubscriptionStatusChanged:       "SUBSCRIPTION_STATUS_CHANGED",
+		SubscriptionStatusNotToggleable: "SUBSCRIPTION_STATUS_NOT_TOGGLEABLE",
+
+		// Platform band
+		SettingsSavedNotApplied: "Settings saved but could not be applied; reload or restart the service",
+	}
+
+}
+
+// MapErrMsg returns the client-facing message of errCode, or that of ERROR
+// for a code without one.
+func MapErrMsg(errCode uint32) string {
+	if msg, ok := message[errCode]; ok {
+		return msg
+	} else {
+		return "Internal Server Error"
+	}
+}

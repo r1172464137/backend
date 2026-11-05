@@ -1,8 +1,9 @@
-// Package notification derives the webhook secret that Telegram echoes
-// back in the X-Telegram-Bot-Api-Secret-Token header of every webhook call.
-// The secret is derived, never stored: it rotates automatically whenever the
-// bot token changes, and a database leak cannot expose it.
 package notification
+
+// The webhook secret is what Telegram echoes back in the
+// X-Telegram-Bot-Api-Secret-Token header of every webhook call. It is
+// derived, never stored: it rotates automatically whenever the bot token
+// changes, and a database leak cannot expose it.
 
 import (
 	"crypto/hmac"

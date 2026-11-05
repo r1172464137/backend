@@ -45,20 +45,24 @@ proxy services. Built with Go, it emphasizes performance, security, and scalabil
 - **Node Management**: Monitor and control server nodes.
 - **API Framework**: Comprehensive RESTful APIs for frontend integration.
 
-## Fork releases
+## Fork distribution / release lines
 
-Use [r1172464137/backend Releases](https://github.com/r1172464137/backend/releases)
-and `ghcr.io/r1172464137/ppanel-server:1.20.4` to retain this fork's REALITY xver
-feature. Release `v1.20.4` is the stable **v1.20.3-based backport**, not master;
-it introduces no database migrations. See [distribution and checksum instructions](docs/releases.md).
+This master worktree forward-ports REALITY `reality_xver` (protobuf tag 66).
+Production `v1.20.4` instead comes from the stable v1.20.3 backport, with no new
+migrations; do not substitute master for that deployment. Fork assets and images
+are documented in [docs/releases.md](docs/releases.md).
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
 - **Go**: 1.27.1 or higher
+- **Database**: MySQL 8.0+, MariaDB 11.8+ or PostgreSQL 16+, and Redis 6.0+
 - **Docker**: Optional, for containerized deployment
 - **Git**: For cloning the repository
+
+Deploying a release binary instead of building? See the [installation guide](docs/guide/install.md)
+(`script/install.sh`, systemd unit, checksum verification) and the [configuration guide](docs/guide/config.md).
 
 ### Installation from Source
 
@@ -73,51 +77,97 @@ it introduces no database migrations. See [distribution and checksum instruction
    go mod download
    ```
 
-3. **Build the project**:
+3. **Build the project** (the binaries land in `bin/`; pick the target of the machine that will run it):
    ```bash
    make linux-amd64
    ```
 
 4. **Run the server**:
    ```bash
-   ./ppanel-server-linux-amd64 run --config etc/ppanel.yaml
+   ./bin/ppanel-server-linux-amd64 run --config etc/ppanel.yaml
    ```
+   With an empty configuration file the first start serves the setup wizard on `127.0.0.1` at the configured
+   `Port` (`http://127.0.0.1:8080/init` by default), reachable from the same machine only. On a remote host open an SSH tunnel
+   (`ssh -L 8080:127.0.0.1:8080 user@host`) or set `PPANEL_DB` and `PPANEL_REDIS` for a non-interactive
+   installation; both are described in the [installation guide](docs/guide/install.md#4-first-start).
 
 ### 🐳 Docker Deployment
+
+The image runs as an unprivileged user (uid 65532), listens on port 8080, reads `/app/etc/ppanel.yaml` and reports its
+health through `ppanel healthcheck` (`HEALTHCHECK`). **The first-run setup wizard listens on `127.0.0.1` inside the
+container and cannot be reached through a published port**, so a container deployment provides the connections in
+one of two ways:
+
+- set `PPANEL_DB` and `PPANEL_REDIS`: on the first start the server completes the empty configuration file with them
+  and a generated JWT secret, applies the migrations and creates the first administrator, whose password is printed
+  once in `docker logs`; or
+- mount a pre-filled `etc/ppanel.yaml` ([configuration guide](docs/guide/config.md)).
+
+| Variable | Format | Example |
+|---|---|---|
+| `PPANEL_DB` | MySQL DSN `user:password@tcp(host:port)/dbname`, or a URL: `mysql://…`, `postgres://user:password@host:5432/dbname?sslmode=require` | `ppanel:secret@tcp(db.internal:3306)/ppanel` |
+| `PPANEL_REDIS` | `redis://[:password@]host[:port][/db]` | `redis://:secret@redis.internal:6379/0` |
 
 1. **Build the Docker image**:
    ```bash
    docker buildx build --platform linux/amd64 -t ppanel-server:latest .
    ```
 
-2. **Run the container**:
+2. **Run the container**. The mounted configuration file must exist and be writable by uid 65532 on the first
+   start, when the server completes it (replace the database and Redis addresses with yours):
    ```bash
-   docker run --rm -p 8080:8080 -v $(pwd)/etc:/app/etc ppanel-server:latest
+   mkdir -p etc && touch etc/ppanel.yaml && sudo chown 65532:65532 etc/ppanel.yaml
+   docker run -d --name ppanel-server -p 8080:8080 \
+     -e PPANEL_DB='ppanel:secret@tcp(db.internal:3306)/ppanel' \
+     -e PPANEL_REDIS='redis://:secret@redis.internal:6379/0' \
+     -v "$(pwd)/etc/ppanel.yaml:/app/etc/ppanel.yaml" \
+     ppanel-server:latest
+   docker logs -f ppanel-server   # prints the first administrator's password once
    ```
 
-3. **Use Docker Compose** (create `docker-compose.yml`):
+3. **Use Docker Compose**. The repository's [`docker-compose.yml`](docker-compose.yml) builds the image, publishes
+   port 8080, mounts `./etc/ppanel.yaml` and checks the container's health:
    ```yaml
-   version: '3.8'
    services:
-     ppanel-server:
-       image: ppanel-server:latest
+     ppanel:
+       container_name: ppanel-server
+       build:
+         context: .
+         dockerfile: Dockerfile
        ports:
          - "8080:8080"
        volumes:
-         - ./etc:/app/etc
-       environment:
-         - TZ=Asia/Shanghai
+         - ./etc/ppanel.yaml:/app/etc/ppanel.yaml
+       # environment:
+       #   PPANEL_DB: "ppanel:password@tcp(db:3306)/ppanel"
+       #   PPANEL_REDIS: "redis://:password@redis:6379/0"
+       healthcheck:
+         test: ["CMD", "/app/ppanel", "healthcheck"]
+         interval: 30s
+         timeout: 5s
+         retries: 3
+         start_period: 30s
+       stop_grace_period: 20s
+       restart: always
    ```
-   Run:
+   `./etc/ppanel.yaml` must exist as a **file** before the first `docker compose up` (Docker creates a directory of
+   that name otherwise) and be writable by uid 65532; uncomment `environment` or pre-fill the file, then:
    ```bash
-   docker-compose up -d
+   mkdir -p etc && touch etc/ppanel.yaml && sudo chown 65532:65532 etc/ppanel.yaml
+   docker compose up -d
+   ```
+   `stop_grace_period` gives the graceful shutdown (HTTP first, then the scheduler, the task worker and the trace
+   exporter, up to about 18 s) the time it needs; with plain `docker run`, stop with `docker stop --time 20`.
+
+4. **Pull a version-pinned fork image**, choosing a release matching this source line.
+   Do not use an upstream image to retain the fork feature. `v1.20.4` is the stable
+   legacy-runtime backport, not the master/rootless runtime described above:
+   ```bash
+   docker pull "ghcr.io/r1172464137/ppanel-server:${VERSION:?set the matching release version}"
    ```
 
-4. **Pull this fork's version-pinned GHCR image** (after CI/CD publishes):
-   ```bash
-   docker pull ghcr.io/r1172464137/ppanel-server:1.20.4
-   docker run --rm -p 8080:8080 ghcr.io/r1172464137/ppanel-server:1.20.4
-   ```
+The server answers `GET /healthz` (liveness) and `GET /readyz` (readiness: database and Redis reachable) for
+monitoring and load balancers; see the [configuration guide](docs/guide/config.md#5-health-checks).
 
 ## 📖 API Documentation
 
@@ -132,7 +182,7 @@ After changing a route, request DTO, or response DTO, run:
 go test ./internal/transport/http/routes -run '^TestSwagger' -count=1
 ```
 
-GitHub Actions on `master` generates the full document plus the `admin.json`, `user.json`, `common.json`, and `node.json` scopes, then syncs them to `public/swagger` in `perfect-panel/ppanel-docs`. The existing `GH_TOKEN` secret needs Contents write access to the documentation repository.
+GitHub Actions on `master` generates the full document plus the `admin.json`, `user.json`, `common.json`, and `node.json` scopes, then syncs them to `docs/public/swagger` in [`perfect-panel/frontend`](https://github.com/perfect-panel/frontend). The `GH_TOKEN` secret needs Contents write access to that repository.
 
 ## 🔗 Related Projects
 
@@ -167,7 +217,7 @@ Visit [ppanel.dev](https://ppanel.dev/) for more details.
 │   ├── repository/   # Repository contracts and transaction assembly
 │   └── transport/    # HTTP, WebSocket and task consumers
 ├── pkg/              # Utility code
-├── script/           # Installation scripts
+├── script/           # Installation and CI helper scripts
 ├── scripts/          # Performance and maintenance scripts
 ├── go.mod            # Go module definition
 ├── Makefile          # Build automation
@@ -185,12 +235,21 @@ make all  # Builds linux-amd64, darwin-amd64, windows-amd64
 make linux-arm64  # Build for specific platform
 ```
 
-Supported platforms include:
+Every binary is static (`CGO_ENABLED=0 -trimpath`), built with the metadata from `script/ldflags.sh`. The release
+publishes `ppanel-server-<os>-<arch>.tar.gz` (`.zip` for Windows) with a `SHA256SUMS` file for:
 
-- Linux: `386`, `amd64`, `arm64`, `armv5-v7`, `mips`, `riscv64`, `loong64`, etc.
-- Windows: `386`, `amd64`, `arm64`, `armv7`
+- Linux: `386`, `amd64`, `arm64` (plus the `linux/amd64` and `linux/arm64` container images)
+- Windows: `386`, `amd64`, `arm64`
 - macOS: `amd64`, `arm64`
-- FreeBSD: `amd64`, `arm64`
+
+`make` additionally builds `linux-amd64-v3`, `linux-armv5`, `linux-armv6`, `linux-armv7`, `windows-amd64-v3`,
+`windows-armv7` and `darwin-amd64-v3`.
+
+## 🔒 Security
+
+Report vulnerabilities privately through
+[GitHub Security Advisories](https://github.com/perfect-panel/backend/security/advisories/new), not in public
+issues. [SECURITY.md](SECURITY.md) lists the supported versions and what to expect.
 
 ## 🤝 Contributing
 

@@ -23,7 +23,7 @@ func signCheckString(t *testing.T, check string) string {
 
 // signedPayload builds a payload the way Telegram does: every field it sends
 // is part of the check string, sorted by key.
-func signedPayload(t *testing.T, fields map[string]interface{}) string {
+func signedPayload(t *testing.T, fields map[string]any) string {
 	t.Helper()
 	keys := make([]string, 0, len(fields))
 	for k := range fields {
@@ -41,7 +41,7 @@ func signedPayload(t *testing.T, fields map[string]interface{}) string {
 	for _, k := range keys {
 		parts = append(parts, k+"="+formatCheckValue(fields[k]))
 	}
-	withHash := make(map[string]interface{}, len(fields)+1)
+	withHash := make(map[string]any, len(fields)+1)
 	for k, v := range fields {
 		withHash[k] = v
 	}
@@ -53,8 +53,8 @@ func signedPayload(t *testing.T, fields map[string]interface{}) string {
 	return string(encoded)
 }
 
-func baseFields() map[string]interface{} {
-	return map[string]interface{}{
+func baseFields() map[string]any {
+	return map[string]any{
 		"id":         float64(42),
 		"first_name": "Ada",
 		"username":   "ada",
@@ -107,7 +107,7 @@ func TestValidateSkipsNullValuedFields(t *testing.T) {
 	fields := baseFields()
 	signed := signedPayload(t, fields)
 
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal([]byte(signed), &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

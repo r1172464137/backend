@@ -10,6 +10,9 @@ const (
 	DefaultTrafficExceedEmailSubject = "Subscription Traffic Exceed"
 )
 
+// Default HTML templates of the notification emails, which the stored
+// configuration falls back to like the subjects above. They are Go
+// templates, bilingual in Chinese and English.
 const (
 	DefaultEmailVerifyTemplate = `<!doctype html>
 <html>

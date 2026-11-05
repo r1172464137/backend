@@ -7,33 +7,17 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type GetPrivacyPolicyLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get Privacy Policy
-func newGetPrivacyPolicyLogic(ctx context.Context, deps Deps) *GetPrivacyPolicyLogic {
-	return &GetPrivacyPolicyLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetPrivacyPolicyLogic) GetPrivacyPolicy() (resp *dto.PrivacyPolicyConfig, err error) {
-	resp = &dto.PrivacyPolicyConfig{}
-	// get tos config from db
-	configs, err := l.deps.Store.System().GetTosConfig(l.ctx)
+// GetPrivacyPolicy returns the privacy policy, which is stored with the
+// terms of service.
+func (s *Service) GetPrivacyPolicy(ctx context.Context) (*dto.PrivacyPolicyConfig, error) {
+	configs, err := s.deps.Settings.GetTosConfig(ctx)
 	if err != nil {
-		l.Errorw("[GetTosConfig] GetTosConfig error", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "GetTosConfig error: %v", err.Error())
+		logger.WithContext(ctx).Errorw("[GetPrivacyPolicy] GetTosConfig error", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "GetTosConfig error: %v", err.Error())
 	}
-	// reflect to response
+	resp := &dto.PrivacyPolicyConfig{}
 	config.SystemConfigSliceReflectToStruct(configs, resp)
-	return
+	return resp, nil
 }

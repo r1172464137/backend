@@ -5,24 +5,31 @@ package orderaudit
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	logEntity "github.com/perfect-panel/server/internal/module/platform/entity/log"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/requestmeta"
 	"github.com/perfect-panel/server/pkg/timeutil"
-	"github.com/pkg/errors"
 )
 
+// The sources an order audit record names as the order's creator.
 const (
 	SourceUser  = "user"
 	SourceGuest = "guest"
 	SourceAdmin = "admin"
 )
 
+// LogWriter appends to the audit log; the transaction-scoped log repository
+// satisfies it.
+type LogWriter interface {
+	Insert(ctx context.Context, data *logEntity.SystemLog) error
+}
+
 // InsertCreated stores a safe order summary and request risk metadata.
-func InsertCreated(ctx context.Context, logs repository.LogRepo, data *order.Order, source string) error {
+func InsertCreated(ctx context.Context, logs LogWriter, data *order.Order, source string) error {
 	if logs == nil {
 		return errors.New("order audit log repository is unavailable")
 	}
@@ -50,7 +57,7 @@ func InsertCreated(ctx context.Context, logs repository.LogRepo, data *order.Ord
 		Timestamp:      now.UnixMilli(),
 	}).Marshal()
 	if err != nil {
-		return errors.Wrap(err, "marshal order audit log")
+		return fmt.Errorf("marshal order audit log: %w", err)
 	}
 
 	return logs.Insert(ctx, &logEntity.SystemLog{

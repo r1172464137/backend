@@ -53,6 +53,9 @@ func (s *Service) RemindExpiringSubscribes(ctx context.Context) error {
 		if mark != nil {
 			continue
 		}
+		if !s.ownerExists(ctx, sub.UserId) {
+			continue
+		}
 
 		planName, renewalAmount := s.planSummary(ctx, sub.SubscribeId)
 		s.deps.Notify.NotifySubscriptionExpiring(ctx, sub.UserId, planName, sub.ExpireTime, renewalAmount)
@@ -72,6 +75,25 @@ func (s *Service) RemindExpiringSubscribes(ctx context.Context) error {
 		logger.Field("reminded", int64(reminded)),
 	)
 	return nil
+}
+
+// ownerExists reports whether the subscription's owner still has an account.
+// Deleting a user only soft-deletes the user row, so its subscriptions keep
+// reaching this sweep. An owner whose state cannot be read is skipped like
+// any other subscription that cannot be announced.
+func (s *Service) ownerExists(ctx context.Context, userID int64) bool {
+	if s.deps.Owners == nil {
+		return false
+	}
+	state, err := s.deps.Owners.FindAccountState(ctx, userID)
+	if err != nil {
+		logger.Errorw("[RemindExpiring] Read owner state failed",
+			logger.Field("error", err.Error()),
+			logger.Field("user_id", userID),
+		)
+		return false
+	}
+	return !state.DeletedAt.Valid
 }
 
 // planSummary resolves the plan's display name and renewal price. A plan that

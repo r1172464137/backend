@@ -1,11 +1,17 @@
 package withdrawal
 
 import (
+	"testing"
+
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/perfect-panel/server/internal/module/billing"
 )
 
-var (
-	_ func(billing.Service) app.HandlerFunc = GetWithdrawalListHandler
-	_ func(billing.Service) app.HandlerFunc = ReviewWithdrawalHandler
-)
+// handlerFactory compiles only for a factory that builds a native Hertz
+// handler from S.
+func handlerFactory[S any](func(S) app.HandlerFunc) {}
+
+func TestHandlerFactories_return_native_hertz_handlers(t *testing.T) {
+	handlerFactory[billing.Service](GetWithdrawalListHandler)
+	handlerFactory[billing.Service](ReviewWithdrawalHandler)
+}

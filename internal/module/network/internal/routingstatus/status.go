@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -190,12 +191,17 @@ func Read(ctx context.Context, client *redis.Client, id int64) (dto.RoutingStatu
 		return dto.RoutingStatusView{Known: false}, nil
 	}
 	data, err := readScript.Run(ctx, client, []string{key(id)}, int(TTL.Seconds()), int(watermarkRetention.Seconds())).Text()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return dto.RoutingStatusView{Known: false}, nil
 	}
 	if err != nil {
 		return dto.RoutingStatusView{Known: false}, err
 	}
+	return decodeStatus(data), nil
+}
+
+// Invalid or conflicting evidence is unknown, not an operational error.
+func decodeStatus(data string) dto.RoutingStatusView {
 	var stored struct {
 		ReceivedAt        int64  `json:"received_at"`
 		ContentReceivedAt int64  `json:"content_received_at"`
@@ -206,17 +212,17 @@ func Read(ctx context.Context, client *redis.Client, id int64) (dto.RoutingStatu
 	}
 	var report dto.RoutingStatusReport
 	if json.Unmarshal([]byte(data), &stored) != nil || !stored.Verified || stored.Conflict || json.Unmarshal([]byte(stored.Payload), &report) != nil {
-		return dto.RoutingStatusView{Known: false}, nil
+		return dto.RoutingStatusView{Known: false}
 	}
 	sequence, err := strconv.ParseUint(stored.Sequence, 10, 64)
 	if err != nil || sequence == 0 || (report.Version != 1 && report.Version != 2) || !instancePattern.MatchString(report.InstanceID) || stored.ReceivedAt <= 0 || stored.ContentReceivedAt <= 0 {
-		return dto.RoutingStatusView{Known: false}, nil
+		return dto.RoutingStatusView{Known: false}
 	}
 	// received_at is the last accepted content, not an old packet heartbeat.
 	report.ReceivedAt = stored.ContentReceivedAt
 	report.LivenessAt = stored.ReceivedAt
 	report.RoutingSequence = sequence
-	return dto.RoutingStatusView{Known: true, ReporterVerified: true, Report: &report}, nil
+	return dto.RoutingStatusView{Known: true, ReporterVerified: true, Report: &report}
 }
 
 func validCandidate(c *dto.RoutingCandidateIdentity, id int64) bool {

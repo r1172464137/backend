@@ -18,10 +18,23 @@ import (
 	"github.com/perfect-panel/server/internal/module/platform"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
+	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func routingResponseData[T any](t *testing.T, r *app.RequestContext) *T {
+	t.Helper()
+	var envelope struct {
+		Code uint32 `json:"code"`
+		Data *T     `json:"data"`
+	}
+	if err := json.Unmarshal(r.Response.Body(), &envelope); err != nil || r.Response.StatusCode() != 200 || envelope.Code != 200 || envelope.Data == nil {
+		t.Fatalf("routing response: HTTP %d %s (%v)", r.Response.StatusCode(), r.Response.Body(), err)
+	}
+	return envelope.Data
+}
 
 func TestV2AdminDesiredDoesNotActivateOrObserveUndeliveredSnapshot(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:v2-desired-readonly-%d?mode=memory&cache=shared", time.Now().UnixNano())), &gorm.Config{})
@@ -63,7 +76,7 @@ func TestV2AdminDesiredDoesNotActivateOrObserveUndeliveredSnapshot(t *testing.T)
 	if err := db.Exec(`INSERT INTO user (id,enable) VALUES (42,1),(43,1)`).Error; err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	start := timeutil.Now().Add(-time.Hour).Truncate(time.Second)
 	expiry := start.Add(48 * time.Hour)
 	if err := db.Exec(`INSERT INTO user_subscribe (id,user_id,subscribe_id,uuid,status,start_time,expire_time,traffic,download,upload) VALUES (1,42,?,?,1,?,?,0,0,0)`, plan.Id, "00000000-0000-4000-8000-000000000001", start, expiry).Error; err != nil {
 		t.Fatal(err)
@@ -71,10 +84,10 @@ func TestV2AdminDesiredDoesNotActivateOrObserveUndeliveredSnapshot(t *testing.T)
 
 	mini := miniredis.RunT(t)
 	redisClient := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	defer redisClient.Close()
+	closeRoutingTestResource(t, redisClient)
 	store := NewStore(db, redisClient)
 	p := platform.New(platform.Deps{System: store.System(), Store: store})
-	svc := network.New(network.Deps{Store: store, Redis: redisClient, ReadGlobalNodeConfig: p.ReadNodeConfigSnapshot})
+	svc := network.New(network.Deps{Store: store, Redis: redisClient, Subscription: newSubscriptionModule(store, &Application{Store: store, Redis: redisClient}), ReadGlobalNodeConfig: p.ReadNodeConfigSnapshot})
 	ctx := context.Background()
 	nodeHandler := nodehttp.QueryServerProtocolConfigHandler(svc, func() string { return "test-secret" })
 	pull := func(etag string) (*dto.QueryServerConfigResponse, string) {
@@ -87,17 +100,11 @@ func TestV2AdminDesiredDoesNotActivateOrObserveUndeliveredSnapshot(t *testing.T)
 			c.Request.Header.Set("If-None-Match", etag)
 		}
 		nodeHandler(ctx, c)
-		if c.Response.StatusCode() != 200 {
-			t.Fatalf("node pull: HTTP %d %s", c.Response.StatusCode(), c.Response.Body())
+		data := routingResponseData[dto.QueryServerConfigResponse](t, c)
+		if data.IdentitySnapshot == nil {
+			t.Fatal("missing node identity snapshot")
 		}
-		var envelope struct {
-			Code uint32                         `json:"code"`
-			Data *dto.QueryServerConfigResponse `json:"data"`
-		}
-		if err := json.Unmarshal(c.Response.Body(), &envelope); err != nil || envelope.Code != 200 || envelope.Data == nil || envelope.Data.IdentitySnapshot == nil {
-			t.Fatalf("node envelope: %s %v", c.Response.Body(), err)
-		}
-		return envelope.Data, string(c.Response.Header.Peek("ETag"))
+		return data, string(c.Response.Header.Peek("ETag"))
 	}
 	first, etag := pull("")
 	firstID := first.IdentitySnapshot.SnapshotID
@@ -115,17 +122,7 @@ func TestV2AdminDesiredDoesNotActivateOrObserveUndeliveredSnapshot(t *testing.T)
 		c := app.NewContext(0)
 		c.Request.SetRequestURI(fmt.Sprintf("/v1/admin/server/node_config?server_id=%d", server.Id))
 		adminHandler(ctx, c)
-		if c.Response.StatusCode() != 200 {
-			t.Fatalf("admin GET: HTTP %d %s", c.Response.StatusCode(), c.Response.Body())
-		}
-		var envelope struct {
-			Code uint32                           `json:"code"`
-			Data *dto.GetServerNodeConfigResponse `json:"data"`
-		}
-		if err := json.Unmarshal(c.Response.Body(), &envelope); err != nil || envelope.Code != 200 || envelope.Data == nil {
-			t.Fatalf("admin envelope: %s %v", c.Response.Body(), err)
-		}
-		return envelope.Data
+		return routingResponseData[dto.GetServerNodeConfigResponse](t, c)
 	}
 	if got := adminGet(); got.DesiredSnapshotID == nil || *got.DesiredSnapshotID != firstID {
 		t.Fatalf("initial desired: %+v", got.DesiredSnapshotID)
@@ -173,6 +170,13 @@ func TestV2AdminDesiredDoesNotActivateOrObserveUndeliveredSnapshot(t *testing.T)
 		t.Fatalf("desired after node pull: %+v", got.DesiredSnapshotID)
 	}
 
+	checkUndeliveredRenewal(t, db, redisClient, server.Id, pendingExpiry, secondID, pull, adminGet)
+}
+
+func checkUndeliveredRenewal(t *testing.T, db *gorm.DB, redisClient *redis.Client, serverID int64, pendingExpiry time.Time, secondID string,
+	pull func(string) (*dto.QueryServerConfigResponse, string), adminGet func() *dto.GetServerNodeConfigResponse) {
+	t.Helper()
+	ctx := t.Context()
 	// A read-only recalculation may produce a new hash, but it is not a delivery.
 	if err := db.Exec(`UPDATE user_subscribe SET expire_time=? WHERE id=2`, pendingExpiry.Add(time.Hour)).Error; err != nil {
 		t.Fatal(err)
@@ -181,7 +185,7 @@ func TestV2AdminDesiredDoesNotActivateOrObserveUndeliveredSnapshot(t *testing.T)
 	if observed.DesiredSnapshotID == nil || *observed.DesiredSnapshotID == secondID {
 		t.Fatalf("desired after renewal: %+v", observed.DesiredSnapshotID)
 	}
-	filterKey := fmt.Sprintf("server:routing-filter:v2:%d:%s", server.Id, *observed.DesiredSnapshotID)
+	filterKey := fmt.Sprintf("server:routing-filter:v2:%d:%s", serverID, *observed.DesiredSnapshotID)
 	if exists, err := redisClient.Exists(ctx, filterKey).Result(); err != nil || exists != 0 {
 		t.Fatalf("admin GET recorded undelivered hash: exists=%d err=%v", exists, err)
 	}

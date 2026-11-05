@@ -1,3 +1,5 @@
+// Package multiplier applies the node traffic multipliers an administrator
+// sets for times of day.
 package multiplier
 
 import "time"
@@ -8,29 +10,35 @@ var timeLayouts = []string{
 	"15:04.000",
 }
 
+// TimePeriod is a daily time range, which may cross midnight, and the
+// multiplier that applies within it.
 type TimePeriod struct {
 	StartTime  string  `json:"start_time"`
 	EndTime    string  `json:"end_time"`
 	Multiplier float32 `json:"multiplier"`
 }
 
+// Manager picks the multiplier in effect at a time from its periods.
 type Manager struct {
 	Periods []TimePeriod
 }
 
+// NewManager returns a manager over periods.
 func NewManager(periods []TimePeriod) *Manager {
 	return &Manager{
 		Periods: periods,
 	}
 }
 
+// GetMultiplier returns the multiplier of the first period containing
+// current's time of day, or 1 when none does.
 func (m *Manager) GetMultiplier(current time.Time) float32 {
 	for _, period := range m.Periods {
 		if m.isInTimePeriod(current, period.StartTime, period.EndTime) {
 			return period.Multiplier
 		}
 	}
-	return 1 // Default multiplier is 1 (no change)
+	return 1
 }
 
 func (m *Manager) isInTimePeriod(current time.Time, start, end string) bool {

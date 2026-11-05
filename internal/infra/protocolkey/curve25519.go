@@ -4,10 +4,12 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
-
-	"github.com/pkg/errors"
+	"errors"
 )
 
+// Curve25519Genkey returns an X25519 key pair for REALITY, base64-encoded
+// (standard or raw URL encoding): the pair of the private key inputBase64
+// when given, or of a new random one.
 func Curve25519Genkey(stdEncoding bool, inputBase64 string) (public, private string, err error) {
 	encoding := base64.RawURLEncoding
 	if stdEncoding {
@@ -20,7 +22,7 @@ func Curve25519Genkey(stdEncoding bool, inputBase64 string) (public, private str
 			return "", "", err
 		}
 		if len(privateKey) != 32 {
-			return "", "", errors.New("Invalid length of private key.")
+			return "", "", errors.New("invalid length of private key")
 		}
 	} else {
 		privateKey = make([]byte, 32)

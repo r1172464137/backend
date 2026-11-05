@@ -3,35 +3,22 @@ package systemsetting
 import (
 	"context"
 
+	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-
-	"github.com/pkg/errors"
-
-	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 )
 
-type UpdateRegisterConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-func newUpdateRegisterConfigLogic(ctx context.Context, deps Deps) *UpdateRegisterConfigLogic {
-	return &UpdateRegisterConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
+// UpdateRegisterConfig stores the registration settings and reloads the
+// register subsystem.
+func (s *Service) UpdateRegisterConfig(ctx context.Context, req *dto.RegisterConfig) error {
+	change := settingsChange{
+		category: "register",
+		next:     convertedConfigFields(*req),
+		previous: previousFields(ctx, "register", s.GetRegisterConfig, convertedConfigFields),
 	}
-}
-
-func (l *UpdateRegisterConfigLogic) UpdateRegisterConfig(req *dto.RegisterConfig) error {
-	err := updateConfigFields(l.ctx, l.deps, "register", convertedConfigFields(*req))
-	if err != nil {
-		l.Errorw("[UpdateRegisterConfig] update register config error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update register config error: %v", err.Error())
+	if err := updateConfigFields(ctx, s.deps, change); err != nil {
+		logger.WithContext(ctx).Errorw("[UpdateRegisterConfig] update register config error", logger.Field("error", err.Error()))
+		return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update register config error: %v", err.Error())
 	}
-	// init system config
-	l.deps.reinit("register")
-	return nil
+	return s.deps.reinit("register")
 }

@@ -8,6 +8,27 @@ import (
 
 const testV2 = `{"version":2,"outbounds":[{"id":"ob_11111111-1111-4111-8111-111111111111","name":"A","protocol":"socks","address":"127.0.0.1","port":1080,"password":"","rules":[],"ip_rules":[],"protocol_rules":[]},{"id":"ob_22222222-2222-4222-8222-222222222222","name":"B","protocol":"socks","address":"127.0.0.1","port":1081,"password":"","via_outbound_id":"ob_11111111-1111-4111-8111-111111111111","rules":[],"ip_rules":[],"protocol_rules":[]}],"rules":[{"id":"rr_33333333-3333-4333-8333-333333333333","enabled":true,"remark":"","kind":"domain","values":["domain:example.com"],"user_ids":[3,1,3],"outbound_id":"direct"}],"default_outbound_id":"direct","user_defaults":[{"user_id":3,"outbound_id":"ob_22222222-2222-4222-8222-222222222222"}],"dns_policy":{"query_strategy":"UseIP","resolvers":[{"id":"dns_44444444-4444-4444-8444-444444444444","protocol":"udp","address":"192.0.2.53","domains":[],"outbound_id":"direct"}]}}`
 
+func TestRoutingV2ValidationStageOrder(t *testing.T) {
+	p, err := ParseNodeRouting([]byte(testV2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Outbounds[0].ViaOutboundID = p.Outbounds[1].ID
+	p.UserDefaults[0].UserID = 0
+	p.DNSPolicy.Resolvers[0].Protocol = "invalid"
+	if _, err := NormalizeNodeRouting(p); err == nil || !strings.Contains(err.Error(), "outbound chain contains a cycle") {
+		t.Fatalf("chain must precede defaults and DNS: %v", err)
+	}
+	p.Outbounds[0].ViaOutboundID = ""
+	if _, err := NormalizeNodeRouting(p); err == nil || !strings.Contains(err.Error(), "invalid or duplicate user") {
+		t.Fatalf("defaults must precede DNS: %v", err)
+	}
+	p.UserDefaults[0].UserID = 3
+	if _, err := NormalizeNodeRouting(p); err == nil || !strings.Contains(err.Error(), "unsupported resolver protocol") {
+		t.Fatalf("resolver protocol must be validated: %v", err)
+	}
+}
+
 func TestRoutingV2NormalizeAndValidate(t *testing.T) {
 	p, err := ParseNodeRouting([]byte(testV2))
 	if err != nil {

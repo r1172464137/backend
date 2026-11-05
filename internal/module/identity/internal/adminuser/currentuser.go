@@ -4,44 +4,32 @@ import (
 	"context"
 
 	"github.com/perfect-panel/server/internal/infra/mapping"
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type CurrentUserLogic struct {
-	ctx  context.Context
-	deps Deps
-	logger.Logger
-}
-
-func newCurrentUserLogic(ctx context.Context, deps Deps) *CurrentUserLogic {
-	return &CurrentUserLogic{
-		ctx:    ctx,
-		deps:   deps,
-		Logger: logger.WithContext(ctx),
-	}
-}
-
-func (l *CurrentUserLogic) CurrentUser() (*dto.User, error) {
-	resp := &dto.User{}
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
+// CurrentUser returns the signed-in administrator's account with its wallet.
+func (s *Service) CurrentUser(ctx context.Context) (*dto.User, error) {
+	log := logger.WithContext(ctx)
+	u, ok := user.FromContext(ctx)
 	if !ok {
-		logger.Error("current user is not found in context")
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
+		log.Error("current user is not found in context")
+		return nil, xerr.Errorf(xerr.InvalidAccess, "Invalid Access")
 	}
 
-	l.Logger.Infow("current user", logger.Field("user_id", u.Id))
-	mapping.DeepCopy(resp, u)
+	log.Infow("current user", logger.Field("user_id", u.Id))
+	resp := &dto.User{}
+	if err := mapping.Copy(resp, u); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "map user %d", u.Id)
+	}
 	// The context user is the middleware's cached identity row; wallet
 	// values come from the billing-owned table, and a read failure fails
 	// the request rather than rendering zero balances.
-	w, err := l.deps.Wallet.FindWallet(l.ctx, u.Id)
+	w, err := s.deps.Wallet.FindWallet(ctx, u.Id)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "load user wallet error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "load user wallet error: %v", err.Error())
 	}
 	if w != nil {
 		resp.Balance = w.Balance

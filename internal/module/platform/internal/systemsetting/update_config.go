@@ -3,9 +3,11 @@ package systemsetting
 import (
 	"context"
 	"reflect"
+	"strings"
 
 	"github.com/perfect-panel/server/internal/config"
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/module/platform/entity/log"
+	"github.com/perfect-panel/server/pkg/logger"
 )
 
 type configFieldValue struct {
@@ -44,7 +46,7 @@ func configFields(data any, valueFn func(reflect.Value) string) []configFieldVal
 }
 
 func configFieldType(value reflect.Value) string {
-	if value.Kind() == reflect.Ptr {
+	if value.Kind() == reflect.Pointer {
 		value = reflect.New(value.Type().Elem()).Elem()
 	}
 	switch value.Kind() {
@@ -59,17 +61,84 @@ func configFieldType(value reflect.Value) string {
 	}
 }
 
-func updateConfigFields(ctx context.Context, deps Deps, category string, fields []configFieldValue) error {
-	return deps.Store.InPlatformTx(ctx, func(store repository.PlatformStore) error {
-		return updateConfigFieldsWithStore(ctx, store.System(), category, fields)
+// settingsChange is what one settings update stores: the fields of the
+// category as they are to be stored, and the same fields as they were, when
+// known. previous is nil when the stored settings could not be read, and
+// then every key written is recorded as changed.
+type settingsChange struct {
+	category string
+	next     []configFieldValue
+	previous []configFieldValue
+}
+
+// changedKeys names the fields whose stored value the update changes; with
+// no previous values every field counts.
+func (c settingsChange) changedKeys() []string {
+	if c.previous == nil {
+		keys := make([]string, 0, len(c.next))
+		for _, field := range c.next {
+			keys = append(keys, field.key)
+		}
+		return keys
+	}
+	before := make(map[string]string, len(c.previous))
+	for _, field := range c.previous {
+		before[field.key] = field.value
+	}
+	var keys []string
+	for _, field := range c.next {
+		if value, ok := before[field.key]; !ok || value != field.value {
+			keys = append(keys, field.key)
+		}
+	}
+	return keys
+}
+
+// updateConfigFields stores the fields of one settings category in a single
+// transaction, with the audit row naming the administrator and the keys the
+// update changed. Values are never recorded: several categories hold
+// secrets.
+func updateConfigFields(ctx context.Context, deps Deps, change settingsChange) error {
+	return deps.Store.InSettingsTx(ctx, func(settings SettingsStore) error {
+		return updateConfigFieldsWithStore(ctx, settings, change)
 	})
 }
 
-func updateConfigFieldsWithStore(ctx context.Context, systemStore repository.SystemRepo, category string, fields []configFieldValue) error {
-	for _, field := range fields {
-		if err := systemStore.UpdateValueByCategoryKey(ctx, category, field.key, field.value, field.valueType); err != nil {
+func updateConfigFieldsWithStore(ctx context.Context, settings SettingsStore, change settingsChange) error {
+	changed := change.changedKeys()
+	for _, field := range change.next {
+		if err := settings.UpdateValueByCategoryKey(ctx, change.category, field.key, field.value, field.valueType); err != nil {
 			return err
 		}
 	}
-	return nil
+	if len(changed) == 0 {
+		return nil
+	}
+	return recordSettingsAction(ctx, settings, "settings.update", change.category, "keys: "+strings.Join(changed, ", "))
+}
+
+// recordSettingsAction writes the audit row of an administrator's settings
+// action on object (the settings category or subsystem).
+func recordSettingsAction(ctx context.Context, audit AuditWriter, action, object, detail string) error {
+	row, err := log.NewAdminActionLog(log.AdminActionFrom(ctx, log.AdminAction{Action: action, Object: object, Detail: detail}))
+	if err != nil {
+		return err
+	}
+	return audit.Insert(ctx, row)
+}
+
+// previousFields reads the stored settings of a category through read, as
+// the fields the update compares against. A read that fails is logged and
+// leaves the previous values unknown: the update still goes through, and
+// its audit row then names every key written.
+func previousFields[T any](ctx context.Context, category string, read func(context.Context) (*T, error), fields func(any) []configFieldValue) []configFieldValue {
+	stored, err := read(ctx)
+	if err != nil || stored == nil {
+		if err != nil {
+			logger.WithContext(ctx).Errorw("[Settings] stored "+category+" settings could not be read before the update",
+				logger.Field("error", err.Error()))
+		}
+		return nil
+	}
+	return fields(*stored)
 }

@@ -5,23 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"regexp"
+	"slices"
 	"time"
 
 	"github.com/perfect-panel/server/internal/module/platform/entity/log"
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 	"github.com/perfect-panel/server/pkg/orm"
 	"github.com/perfect-panel/server/pkg/requestmeta"
 	"gorm.io/gorm"
 )
 
-var _ repository.LogRepo = (*logRepo)(nil)
+var _ kernel.LogRepo = (*logRepo)(nil)
 
 type logRepo struct {
 	*gorm.DB
 }
 
 // NewLogRepo builds the module-owned implementation.
-func NewLogRepo(db *gorm.DB) repository.LogRepo {
+func NewLogRepo(db *gorm.DB) kernel.LogRepo {
 	return &logRepo{
 		DB: db,
 	}
@@ -54,9 +57,13 @@ func (m *logRepo) FindOne(ctx context.Context, id int64) (*log.SystemLog, error)
 	return &data, nil
 }
 
+// Update rewrites the entry's content, the only column of a log row that
+// changes (a message log moves from attempted to sent or failed). A whole-row
+// save would also rewrite the type, date and object of the row from the
+// caller's copy.
 func (m *logRepo) Update(ctx context.Context, data *log.SystemLog) error {
 	attachRequestMetadata(ctx, data)
-	return m.WithContext(ctx).Where("id = ?", data.Id).Save(data).Error
+	return m.WithContext(ctx).Model(&log.SystemLog{}).Where("id = ?", data.Id).Update("content", data.Content).Error
 }
 
 // attachRequestMetadata adds request-origin metadata to every JSON audit row
@@ -143,11 +150,11 @@ func (m *logRepo) FilterSystemLog(ctx context.Context, filter *log.FilterParams)
 	if filter == nil {
 		filter = &log.FilterParams{
 			Page: 1,
-			Size: repository.DefaultPageSize,
+			Size: kernel.DefaultPageSize,
 		}
 	}
 
-	filter.Page, filter.Size = repository.NormalizePage(filter.Page, filter.Size)
+	filter.Page, filter.Size = kernel.NormalizePage(filter.Page, filter.Size)
 
 	if filter.Type != 0 {
 		tx = tx.Where("type = ?", filter.Type)
@@ -168,6 +175,13 @@ func (m *logRepo) FilterSystemLog(ctx context.Context, filter *log.FilterParams)
 	}
 	if filter.Search != "" {
 		tx = tx.Scopes(orm.ContainsLike([]string{"content"}, filter.Search))
+	}
+	for _, field := range slices.Sorted(maps.Keys(filter.ContentInt64)) {
+		expr, err := jsonInt64Expr(m.DB, field)
+		if err != nil {
+			return nil, 0, err
+		}
+		tx = tx.Where(expr+" = ?", filter.ContentInt64[field])
 	}
 
 	var total int64
@@ -243,8 +257,32 @@ func (m *logRepo) SumAmountByTypeAndObjectID(ctx context.Context, typ uint8, obj
 }
 
 func jsonAmountExpr(db *gorm.DB) string {
-	if db != nil && db.Dialector.Name() == orm.DriverPostgres {
-		return "(content::json->>'amount')::bigint"
+	expr, _ := jsonInt64Expr(db, "amount")
+	return expr
+}
+
+// jsonFieldName is the shape of a content field name; the name is spliced
+// into SQL, so nothing else is accepted.
+var jsonFieldName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// jsonInt64Expr is the SQL reading the top-level integer field of a row's
+// JSON content, in the dialect of db: MySQL and MariaDB extract with
+// JSON_EXTRACT, PostgreSQL with ->>, and SQLite (the tests) with
+// json_extract.
+func jsonInt64Expr(db *gorm.DB, field string) (string, error) {
+	if !jsonFieldName.MatchString(field) {
+		return "", fmt.Errorf("log content field %q is not a field name", field)
 	}
-	return "CAST(JSON_EXTRACT(content, '$.amount') AS SIGNED)"
+	dialect := ""
+	if db != nil {
+		dialect = db.Dialector.Name()
+	}
+	switch dialect {
+	case orm.DriverPostgres:
+		return fmt.Sprintf("(content::json->>'%s')::bigint", field), nil
+	case "sqlite":
+		return fmt.Sprintf("CAST(json_extract(content, '$.%s') AS INTEGER)", field), nil
+	default:
+		return fmt.Sprintf("CAST(JSON_EXTRACT(content, '$.%s') AS SIGNED)", field), nil
+	}
 }

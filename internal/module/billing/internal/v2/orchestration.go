@@ -1,6 +1,7 @@
 // Package v2 implements the V2 order orchestration subdomain of the billing
-// module: idempotent create-and-checkout, guest checkout capabilities and the
-// SSE event-stream tickets. Only the module facade may reach it.
+// module: idempotent create-and-checkout, guest checkout capabilities, the
+// SSE event-stream tickets and the event stream itself. Only the module
+// facade may reach it.
 package v2
 
 import (
@@ -10,24 +11,23 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
-	stdErrors "errors"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
-	token2 "github.com/perfect-panel/server/internal/auth/token"
-	"github.com/perfect-panel/server/internal/infra/requestctx"
+	"github.com/perfect-panel/server/internal/auth/password"
+	"github.com/perfect-panel/server/internal/auth/ratelimit"
+	"github.com/perfect-panel/server/internal/auth/token"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	"github.com/perfect-panel/server/internal/module/billing/internal/checkout"
 	"github.com/perfect-panel/server/internal/module/billing/internal/ordercontext"
 	"github.com/perfect-panel/server/internal/module/billing/internal/portal"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
-	"github.com/perfect-panel/server/internal/repository"
-	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/pkg/requestmeta"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 	"gorm.io/gorm"
 )
 
@@ -43,19 +43,45 @@ const (
 
 // ErrIdempotencyKeyReused is handled as HTTP 409 by the V2 handler. It is a
 // distinct transport condition: the original order remains intact.
-var ErrIdempotencyKeyReused = stdErrors.New("idempotency key reused with a different request")
+var ErrIdempotencyKeyReused = errors.New("idempotency key reused with a different request")
+
+// Orders reads the orders the orchestration creates.
+type Orders interface {
+	FindOneByOrderNo(ctx context.Context, orderNo string) (*order.Order, error)
+	FindOneByIdempotencyKey(ctx context.Context, key string) (*order.Order, error)
+}
+
+// ReplayLimiter grants a bounded number of permits per key and period; the
+// auth rate limiter provides it, with its permit states.
+type ReplayLimiter interface {
+	Take(ctx context.Context, key string) (int, error)
+}
+
+// GuestReplayLimits bound how often an anonymous create request may be
+// replayed under an existing idempotency key. A replay proves the guest
+// password against the order, so an unlimited replay is a password oracle
+// for whoever holds the key; the limits apply per key and per client IP. A
+// nil limiter applies no limit.
+type GuestReplayLimits struct {
+	PerKey ReplayLimiter
+	PerIP  ReplayLimiter
+}
 
 // Deps declares the orchestration's dependencies: sibling subdomains are
 // invoked directly, never through the facade.
 type Deps struct {
-	Orders       repository.OrderRepo
+	Orders       Orders
 	Checkout     *checkout.Service
 	Portal       *portal.Service
 	JwtSecret    string
 	CurrencyUnit func() string
+	// GuestReplays bounds the replays of anonymous create requests.
+	GuestReplays GuestReplayLimits
+	// Stream serves the order event streams.
+	Stream StreamDeps
 }
 
-// Service wraps the per-request orchestration flow.
+// Service is the V2 orchestration.
 type Service struct {
 	deps Deps
 }
@@ -64,164 +90,219 @@ func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
 }
 
-func (s *Service) flow(ctx context.Context) *V2OrderLogic {
-	return &V2OrderLogic{Logger: logger.WithContext(ctx), ctx: ctx, deps: s.deps}
-}
-
-// V2OrderLogic is the per-request orchestration state.
-type V2OrderLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
 // CreateAndCheckout is the V2 orchestration boundary. Existing domain
 // creators still own pricing, inventory and coupon policy; this method only
 // gives them an idempotency context and immediately starts checkout.
-func (l *V2OrderLogic) CreateAndCheckout(req *dto.V2CreateOrderRequest, idempotencyKey string) (*dto.V2OrderResponse, error) {
-	if err := validateV2CreateRequest(req, l.currentUser()); err != nil {
+func (s *Service) CreateAndCheckout(ctx context.Context, req *dto.V2CreateOrderRequest, idempotencyKey string) (*dto.V2OrderResponse, error) {
+	currentUser := currentUser(ctx)
+	if err := validateV2CreateRequest(req, currentUser); err != nil {
 		return nil, err
 	}
-	hash, err := l.requestHash(req)
+	hash, err := requestHash(ctx, req)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "invalid order request")
+		return nil, xerr.Wrapf(err, xerr.InvalidParams, "invalid order request")
 	}
 
-	orderInfo, err := l.deps.Orders.FindOneByIdempotencyKey(l.ctx, idempotencyKey)
+	orderInfo, err := s.deps.Orders.FindOneByIdempotencyKey(ctx, idempotencyKey)
 	if err == nil {
-		if !sameIdempotencyHash(orderInfo.IdempotencyHash, hash) {
-			return nil, ErrIdempotencyKeyReused
-		}
-		checkoutToken := l.guestCheckoutToken(idempotencyKey, orderInfo)
-		if err := l.authorizeExistingCreate(orderInfo, req, checkoutToken); err != nil {
-			return nil, err
-		}
-		return l.checkoutResponse(orderInfo, checkoutToken, req.ReturnURL)
+		return s.replayExistingCreate(ctx, orderInfo, req, idempotencyKey, hash)
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find idempotent order: %v", err)
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find idempotent order")
 	}
 
-	checkoutToken := l.derivedGuestCheckoutToken(idempotencyKey)
+	checkoutToken := s.derivedGuestCheckoutToken(idempotencyKey)
 	meta := ordercontext.Idempotency{Key: idempotencyKey, Hash: hash}
-	if l.currentUser() == nil {
+	if currentUser == nil {
 		meta.GuestCheckoutToken = checkoutToken
 	}
-	createCtx := ordercontext.WithIdempotency(l.ctx, meta)
-	orderNo, createdCheckoutToken, err := l.createOrder(createCtx, req)
+	orderNo, createdCheckoutToken, err := s.createOrder(ordercontext.WithIdempotency(ctx, meta), req)
 	if err != nil {
 		// A concurrent request with this key can win after our initial lookup.
-		// Its transaction owns all reservations; this attempt rolls back before
-		// returning the duplicate-key error.
-		existing, findErr := l.deps.Orders.FindOneByIdempotencyKey(l.ctx, idempotencyKey)
+		// Its transaction owns all reservations; this attempt rolled back
+		// before returning the duplicate-key error.
+		existing, findErr := s.deps.Orders.FindOneByIdempotencyKey(ctx, idempotencyKey)
 		if findErr == nil {
-			if !sameIdempotencyHash(existing.IdempotencyHash, hash) {
-				return nil, ErrIdempotencyKeyReused
-			}
-			return l.checkoutResponse(existing, l.guestCheckoutToken(idempotencyKey, existing), req.ReturnURL)
+			return s.replayExistingCreate(ctx, existing, req, idempotencyKey, hash)
 		}
 		return nil, err
 	}
 	if createdCheckoutToken != "" {
 		checkoutToken = createdCheckoutToken
 	}
-	orderInfo, err = l.deps.Orders.FindOneByOrderNo(l.ctx, orderNo)
+	orderInfo, err = s.deps.Orders.FindOneByOrderNo(ctx, orderNo)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "load created order: %v", err)
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "load created order")
 	}
-	return l.checkoutResponse(orderInfo, checkoutToken, req.ReturnURL)
+	return s.checkoutResponse(ctx, orderInfo, checkoutToken, req.ReturnURL)
 }
 
-func (l *V2OrderLogic) Checkout(orderNo string, req *dto.V2CheckoutOrderRequest) (*dto.V2OrderResponse, error) {
-	orderInfo, err := l.deps.Orders.FindOneByOrderNo(l.ctx, orderNo)
-	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.OrderNotExist), "order not found")
+// replayExistingCreate answers a create request whose idempotency key
+// already produced orderInfo: the same request resumes that order's
+// checkout, a different one is refused. An anonymous replay is rate limited
+// first: it proves the guest password against the order, and the refusal
+// tells a correct guess from a wrong one.
+func (s *Service) replayExistingCreate(ctx context.Context, orderInfo *order.Order, req *dto.V2CreateOrderRequest, idempotencyKey, hash string) (*dto.V2OrderResponse, error) {
+	if currentUser(ctx) == nil {
+		if err := s.allowGuestReplay(ctx, idempotencyKey); err != nil {
+			return nil, err
+		}
 	}
-	if err := l.authorizeOrder(orderInfo, req.CheckoutToken); err != nil {
+	if !sameIdempotencyHash(orderInfo.IdempotencyHash, hash) {
+		return nil, ErrIdempotencyKeyReused
+	}
+	checkoutToken := s.guestCheckoutToken(idempotencyKey, orderInfo)
+	if err := s.authorizeExistingCreate(ctx, orderInfo, req, checkoutToken); err != nil {
 		return nil, err
 	}
-	if orderInfo.Status != 1 {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.OrderStatusError), "order is not pending")
-	}
-	return l.checkoutResponse(orderInfo, req.CheckoutToken, req.ReturnURL)
+	return s.checkoutResponse(ctx, orderInfo, checkoutToken, req.ReturnURL)
 }
 
-func (l *V2OrderLogic) GetOrder(orderNo, checkoutToken string) (*dto.V2OrderResponse, error) {
-	orderInfo, err := l.deps.Orders.FindOneByOrderNo(l.ctx, orderNo)
-	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.OrderNotExist), "order not found")
+// allowGuestReplay takes one permit for the replay from the per-key and the
+// per-IP limit; over either, the replay is refused as too many requests. A
+// limiter that cannot answer refuses too: an oracle must not open when the
+// limit store is down.
+func (s *Service) allowGuestReplay(ctx context.Context, idempotencyKey string) error {
+	if err := takeReplayPermit(ctx, s.deps.GuestReplays.PerKey, idempotencyKey); err != nil {
+		return err
 	}
-	if err := l.authorizeOrder(orderInfo, checkoutToken); err != nil {
+	metadata, _ := requestmeta.From(ctx)
+	return takeReplayPermit(ctx, s.deps.GuestReplays.PerIP, metadata.ClientIP)
+}
+
+func takeReplayPermit(ctx context.Context, limiter ReplayLimiter, key string) error {
+	if limiter == nil || key == "" {
+		return nil
+	}
+	state, err := limiter.Take(ctx, key)
+	if err != nil {
+		return xerr.Wrapf(err, xerr.TooManyRequests, "the replay limit could not be checked")
+	}
+	if state == ratelimit.OverQuota || state == ratelimit.Unknown {
+		return xerr.Errorf(xerr.TooManyRequests, "too many replays of this order request; retry later")
+	}
+	return nil
+}
+
+// Checkout resumes the payment of a pending order.
+func (s *Service) Checkout(ctx context.Context, orderNo string, req *dto.V2CheckoutOrderRequest) (*dto.V2OrderResponse, error) {
+	orderInfo, err := s.findOrder(ctx, orderNo)
+	if err != nil {
 		return nil, err
 	}
-	ticket, expiresAt, err := l.mintEventTicket(orderInfo, checkoutToken)
+	if err := s.authorizeOrder(ctx, orderInfo, req.CheckoutToken); err != nil {
+		return nil, err
+	}
+	if !order.CanCheckout(orderInfo.Status) {
+		return nil, xerr.Errorf(xerr.OrderStatusError, "order is not pending")
+	}
+	return s.checkoutResponse(ctx, orderInfo, req.CheckoutToken, req.ReturnURL)
+}
+
+// GetOrder returns the order's state snapshot with a fresh stream ticket.
+func (s *Service) GetOrder(ctx context.Context, orderNo, checkoutToken string) (*dto.V2OrderResponse, error) {
+	orderInfo, err := s.findOrder(ctx, orderNo)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeOrder(ctx, orderInfo, checkoutToken); err != nil {
+		return nil, err
+	}
+	ticket, expiresAt, err := s.mintEventTicket(ctx, orderInfo, checkoutToken)
 	if err != nil {
 		return nil, err
 	}
 	return &dto.V2OrderResponse{
-		Order:  l.snapshot(orderInfo),
-		Events: l.eventResponse(orderInfo.OrderNo, ticket, expiresAt),
+		Order:  s.snapshot(orderInfo),
+		Events: eventResponse(orderInfo.OrderNo, ticket, expiresAt),
 	}, nil
 }
 
-func (l *V2OrderLogic) EventTicket(orderNo, checkoutToken string) (*dto.V2EventTicketResponse, error) {
-	orderInfo, err := l.deps.Orders.FindOneByOrderNo(l.ctx, orderNo)
+// EventTicket mints a fresh stream ticket for the order.
+func (s *Service) EventTicket(ctx context.Context, orderNo, checkoutToken string) (*dto.V2EventTicketResponse, error) {
+	orderInfo, err := s.findOrder(ctx, orderNo)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.OrderNotExist), "order not found")
-	}
-	if err := l.authorizeOrder(orderInfo, checkoutToken); err != nil {
 		return nil, err
 	}
-	ticket, expiresAt, err := l.mintEventTicket(orderInfo, checkoutToken)
+	if err := s.authorizeOrder(ctx, orderInfo, checkoutToken); err != nil {
+		return nil, err
+	}
+	ticket, expiresAt, err := s.mintEventTicket(ctx, orderInfo, checkoutToken)
 	if err != nil {
 		return nil, err
 	}
 	return &dto.V2EventTicketResponse{
-		URL:             l.eventResponse(orderNo, ticket, expiresAt).URL,
+		URL:             eventResponse(orderNo, ticket, expiresAt).URL,
 		TicketExpiresAt: expiresAt,
 	}, nil
 }
 
 // Session exchanges the durable guest checkout capability for an ordinary
-// session after activation has created the account.  It is intentionally a
+// session after activation has created the account, within the window and
+// under the revocation rule the storefront applies.  It is intentionally a
 // separate JSON endpoint: a long-lived access token must never appear in a
 // browser-visible EventSource URL or SSE event payload.
-func (l *V2OrderLogic) Session(orderNo, checkoutToken string) (*dto.V2OrderSessionResponse, error) {
-	orderInfo, err := l.deps.Orders.FindOneByOrderNo(l.ctx, orderNo)
+func (s *Service) Session(ctx context.Context, orderNo, checkoutToken string) (*dto.V2OrderSessionResponse, error) {
+	orderInfo, err := s.findOrder(ctx, orderNo)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.OrderNotExist), "order not found")
+		return nil, err
 	}
-	if err := l.authorizeOrder(orderInfo, checkoutToken); err != nil {
+	if err := s.authorizeOrder(ctx, orderInfo, checkoutToken); err != nil {
 		return nil, err
 	}
 	if orderInfo.GuestCheckoutTokenHash == "" {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "order does not have a guest checkout capability")
+		return nil, xerr.Errorf(xerr.InvalidAccess, "order does not have a guest checkout capability")
 	}
-	if orderInfo.UserId == 0 || (orderInfo.Status != 2 && orderInfo.Status != 5) {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.OrderStatusError), "guest account is not ready")
-	}
-	token, err := l.deps.Portal.IssueSession(l.ctx, orderInfo.UserId)
+	// The storefront owns the exchange rule (settlement window, revocation
+	// since settlement), shared with V1's status endpoint.
+	accessToken, err := s.deps.Portal.ExchangeGuestSession(ctx, orderInfo)
 	if err != nil {
 		return nil, err
 	}
-	return &dto.V2OrderSessionResponse{AccessToken: token}, nil
+	return &dto.V2OrderSessionResponse{AccessToken: accessToken}, nil
 }
 
-func (l *V2OrderLogic) createOrder(ctx context.Context, req *dto.V2CreateOrderRequest) (orderNo, checkoutToken string, err error) {
+// AuthorizeEventStream validates the self-contained stream capability and
+// returns the stream's initial snapshot together with the ticket expiry; the
+// order entity never leaves the module.
+func (s *Service) AuthorizeEventStream(ctx context.Context, orderNo, ticket string) (dto.V2OrderSnapshot, time.Time, error) {
+	orderInfo, err := s.authorizeEventTicket(ctx, orderNo, ticket)
+	if err != nil {
+		return dto.V2OrderSnapshot{}, time.Time{}, err
+	}
+	expiresAt, err := s.eventTicketExpiresAt(ticket)
+	if err != nil {
+		return dto.V2OrderSnapshot{}, time.Time{}, err
+	}
+	return s.snapshot(orderInfo), expiresAt, nil
+}
+
+func (s *Service) findOrder(ctx context.Context, orderNo string) (*order.Order, error) {
+	orderInfo, err := s.deps.Orders.FindOneByOrderNo(ctx, orderNo)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, xerr.Errorf(xerr.OrderNotExist, "order not found")
+	}
+	if err != nil {
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find order %s", orderNo)
+	}
+	return orderInfo, nil
+}
+
+func (s *Service) createOrder(ctx context.Context, req *dto.V2CreateOrderRequest) (orderNo, checkoutToken string, err error) {
 	switch req.Type {
 	case v2OrderTypePurchase:
-		if l.currentUser() == nil {
-			resp, e := l.deps.Portal.Purchase(ctx, &dto.PortalPurchaseRequest{
+		if currentUser(ctx) == nil {
+			resp, e := s.deps.Portal.Purchase(ctx, &dto.PortalPurchaseRequest{
 				AuthType: req.Guest.AuthType, Identifier: req.Guest.Identifier, Password: req.Guest.Password,
 				Payment: req.PaymentID, SubscribeId: req.SubscribeID, Quantity: req.Quantity,
-				Coupon: req.Coupon, InviteCode: req.Guest.InviteCode,
+				Coupon: req.Coupon, InviteCode: req.Guest.InviteCode, TurnstileToken: req.Guest.TurnstileToken,
 			})
 			if e != nil {
 				return "", "", e
 			}
 			return resp.OrderNo, resp.CheckoutToken, nil
 		}
-		resp, e := l.deps.Checkout.Purchase(ctx, &dto.PurchaseOrderRequest{
+		resp, e := s.deps.Checkout.Purchase(ctx, &dto.PurchaseOrderRequest{
 			SubscribeId: req.SubscribeID, Quantity: req.Quantity, Payment: req.PaymentID, Coupon: req.Coupon,
 		})
 		if e != nil {
@@ -229,7 +310,7 @@ func (l *V2OrderLogic) createOrder(ctx context.Context, req *dto.V2CreateOrderRe
 		}
 		return resp.OrderNo, "", nil
 	case v2OrderTypeRenewal:
-		resp, e := l.deps.Checkout.Renewal(ctx, &dto.RenewalOrderRequest{
+		resp, e := s.deps.Checkout.Renewal(ctx, &dto.RenewalOrderRequest{
 			UserSubscribeID: req.UserSubscribeID, Quantity: req.Quantity, Payment: req.PaymentID, Coupon: req.Coupon,
 		})
 		if e != nil {
@@ -237,7 +318,7 @@ func (l *V2OrderLogic) createOrder(ctx context.Context, req *dto.V2CreateOrderRe
 		}
 		return resp.OrderNo, "", nil
 	case v2OrderTypeResetTraffic:
-		resp, e := l.deps.Checkout.ResetTraffic(ctx, &dto.ResetTrafficOrderRequest{
+		resp, e := s.deps.Checkout.ResetTraffic(ctx, &dto.ResetTrafficOrderRequest{
 			UserSubscribeID: req.UserSubscribeID, Payment: req.PaymentID,
 		})
 		if e != nil {
@@ -245,7 +326,7 @@ func (l *V2OrderLogic) createOrder(ctx context.Context, req *dto.V2CreateOrderRe
 		}
 		return resp.OrderNo, "", nil
 	case v2OrderTypeRecharge:
-		resp, e := l.deps.Checkout.Recharge(ctx, &dto.RechargeOrderRequest{
+		resp, e := s.deps.Checkout.Recharge(ctx, &dto.RechargeOrderRequest{
 			Amount: req.Amount, Payment: req.PaymentID,
 		})
 		if e != nil {
@@ -253,14 +334,17 @@ func (l *V2OrderLogic) createOrder(ctx context.Context, req *dto.V2CreateOrderRe
 		}
 		return resp.OrderNo, "", nil
 	default:
-		return "", "", errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "unsupported order type")
+		return "", "", xerr.Errorf(xerr.InvalidParams, "unsupported order type")
 	}
 }
 
-func (l *V2OrderLogic) checkoutResponse(orderInfo *order.Order, checkoutToken, returnURL string) (*dto.V2OrderResponse, error) {
+// checkoutResponse starts or resumes the payment of a pending order and
+// describes the order with a fresh stream ticket. A settled or closed order
+// is described without starting a payment.
+func (s *Service) checkoutResponse(ctx context.Context, orderInfo *order.Order, checkoutToken, returnURL string) (*dto.V2OrderResponse, error) {
 	var paymentResp *dto.V2OrderPayment
-	if orderInfo.Status == 1 {
-		checkout, err := l.deps.Portal.Checkout(l.ctx, &dto.CheckoutOrderRequest{
+	if order.CanCheckout(orderInfo.Status) {
+		checkout, err := s.deps.Portal.Checkout(ctx, &dto.CheckoutOrderRequest{
 			OrderNo: orderInfo.OrderNo, CheckoutToken: checkoutToken, ReturnUrl: returnURL,
 		})
 		if err != nil {
@@ -268,132 +352,144 @@ func (l *V2OrderLogic) checkoutResponse(orderInfo *order.Order, checkoutToken, r
 		}
 		paymentResp = &dto.V2OrderPayment{
 			Type: checkout.Type, CheckoutURL: checkout.CheckoutUrl, Stripe: checkout.Stripe,
-			PaymentStatus: v2PaymentStatus(orderInfo.Status),
+			PaymentStatus: order.PaymentStatusName(orderInfo.Status),
 		}
-		latest, err := l.deps.Orders.FindOneByOrderNo(l.ctx, orderInfo.OrderNo)
-		if err == nil {
+		if latest, err := s.deps.Orders.FindOneByOrderNo(ctx, orderInfo.OrderNo); err == nil {
 			orderInfo = latest
-			paymentResp.PaymentStatus = v2PaymentStatus(orderInfo.Status)
+			paymentResp.PaymentStatus = order.PaymentStatusName(orderInfo.Status)
 		}
 	}
-	ticket, expiresAt, err := l.mintEventTicket(orderInfo, checkoutToken)
+	ticket, expiresAt, err := s.mintEventTicket(ctx, orderInfo, checkoutToken)
 	if err != nil {
 		return nil, err
 	}
 	return &dto.V2OrderResponse{
-		Order:         l.snapshot(orderInfo),
+		Order:         s.snapshot(orderInfo),
 		Payment:       paymentResp,
-		Events:        l.eventResponse(orderInfo.OrderNo, ticket, expiresAt),
+		Events:        eventResponse(orderInfo.OrderNo, ticket, expiresAt),
 		CheckoutToken: checkoutTokenForResponse(orderInfo, checkoutToken),
 	}, nil
 }
 
-func (l *V2OrderLogic) snapshot(orderInfo *order.Order) dto.V2OrderSnapshot {
+func (s *Service) snapshot(orderInfo *order.Order) dto.V2OrderSnapshot {
+	currency := ""
+	if s.deps.CurrencyUnit != nil {
+		currency = s.deps.CurrencyUnit()
+	}
 	return dto.V2OrderSnapshot{
-		OrderNo: orderInfo.OrderNo, Status: v2OrderStatus(orderInfo.Status),
-		PaymentStatus: v2PaymentStatus(orderInfo.Status), FulfillmentStatus: v2FulfillmentStatus(orderInfo.Status),
-		StateVersion: orderInfo.StateVersion, Amount: orderInfo.Amount,
-		Currency:  l.deps.CurrencyUnit(),
-		ExpiresAt: orderInfo.CreatedAt.Add(checkout.CloseOrderTimeMinutes * time.Minute).Unix(),
+		OrderNo:           orderInfo.OrderNo,
+		Status:            order.StatusName(orderInfo.Status),
+		PaymentStatus:     order.PaymentStatusName(orderInfo.Status),
+		FulfillmentStatus: order.FulfillmentStatusName(orderInfo.Status),
+		StateVersion:      orderInfo.StateVersion,
+		Amount:            orderInfo.Amount,
+		Currency:          currency,
+		ExpiresAt:         orderInfo.CreatedAt.Add(order.PaymentWindow).Unix(),
 	}
 }
 
-// Snapshot exposes the event-stream's current-state payload without granting
-// access by itself; callers must authorize the ticket before using it.
-func (l *V2OrderLogic) Snapshot(orderInfo *order.Order) dto.V2OrderSnapshot {
-	return l.snapshot(orderInfo)
-}
-
-func (l *V2OrderLogic) eventResponse(orderNo, ticket string, expiresAt int64) dto.V2OrderEvents {
+func eventResponse(orderNo, ticket string, expiresAt int64) dto.V2OrderEvents {
 	return dto.V2OrderEvents{
 		URL:             fmt.Sprintf("/v2/public/orders/%s/events?ticket=%s", url.PathEscape(orderNo), url.QueryEscape(ticket)),
 		TicketExpiresAt: expiresAt,
 	}
 }
 
-func (l *V2OrderLogic) authorizeExistingCreate(orderInfo *order.Order, req *dto.V2CreateOrderRequest, checkoutToken string) error {
-	if l.currentUser() != nil {
-		return l.authorizeOrder(orderInfo, "")
+// authorizeExistingCreate binds a replayed create request to the order its
+// idempotency key already produced. The guest password is kept out of the
+// request hash (see requestHash), so a guest replay proves it against the
+// stored hash instead; a different password is a different request and gets
+// the same refusal as a changed body.
+func (s *Service) authorizeExistingCreate(ctx context.Context, orderInfo *order.Order, req *dto.V2CreateOrderRequest, checkoutToken string) error {
+	if currentUser(ctx) != nil {
+		return s.authorizeOrder(ctx, orderInfo, "")
 	}
 	if req.Guest == nil || orderInfo.GuestAuthType != req.Guest.AuthType || orderInfo.GuestIdentifier != req.Guest.Identifier {
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "order does not belong to this checkout")
+		return xerr.Errorf(xerr.InvalidAccess, "order does not belong to this checkout")
 	}
-	return l.authorizeOrder(orderInfo, checkoutToken)
+	if req.Guest.Password != "" || orderInfo.GuestPasswordHash != "" {
+		if !password.VerifyPassWord(req.Guest.Password, orderInfo.GuestPasswordHash) {
+			return ErrIdempotencyKeyReused
+		}
+	}
+	return s.authorizeOrder(ctx, orderInfo, checkoutToken)
 }
 
-func (l *V2OrderLogic) authorizeOrder(orderInfo *order.Order, checkoutToken string) error {
-	if currentUser := l.currentUser(); orderInfo.UserId != 0 && currentUser != nil && currentUser.Id == orderInfo.UserId {
+func (s *Service) authorizeOrder(ctx context.Context, orderInfo *order.Order, checkoutToken string) error {
+	if u := currentUser(ctx); orderInfo.UserId != 0 && u != nil && u.Id == orderInfo.UserId {
 		return nil
 	}
 	if guestCheckoutTokenMatches(orderInfo, checkoutToken) {
 		return nil
 	}
-	return errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "order does not belong to the current user")
+	return xerr.Errorf(xerr.InvalidAccess, "order does not belong to the current user")
 }
 
-func (l *V2OrderLogic) mintEventTicket(orderInfo *order.Order, checkoutToken string) (string, int64, error) {
-	if err := l.authorizeOrder(orderInfo, checkoutToken); err != nil {
+func (s *Service) mintEventTicket(ctx context.Context, orderInfo *order.Order, checkoutToken string) (string, int64, error) {
+	if err := s.authorizeOrder(ctx, orderInfo, checkoutToken); err != nil {
 		return "", 0, err
 	}
-	expiresAt := orderInfo.CreatedAt.Add((checkout.CloseOrderTimeMinutes * time.Minute) + v2EventTicketExtra)
+	expiresAt := orderInfo.CreatedAt.Add(order.PaymentWindow + v2EventTicketExtra)
 	if expiresAt.Before(time.Now()) {
 		expiresAt = time.Now().Add(v2EventTicketExtra)
 	}
-	seconds := int64(time.Until(expiresAt).Seconds())
-	if seconds < 1 {
-		seconds = 1
-	}
-	ticket, err := token2.NewJwtToken(l.deps.JwtSecret, time.Now().Unix(), seconds,
-		token2.WithOption("OrderNo", orderInfo.OrderNo),
-		token2.WithOption("Scope", v2EventScope),
-		token2.WithOption("UserId", orderInfo.UserId),
-		token2.WithOption("GuestCheckoutHash", orderInfo.GuestCheckoutTokenHash),
+	seconds := max(int64(time.Until(expiresAt).Seconds()), 1)
+	ticket, err := token.NewJwtToken(s.deps.JwtSecret, time.Now().Unix(), seconds,
+		token.WithOption("OrderNo", orderInfo.OrderNo),
+		token.WithOption("Scope", v2EventScope),
+		token.WithOption("UserId", orderInfo.UserId),
+		token.WithOption("GuestCheckoutHash", orderInfo.GuestCheckoutTokenHash),
 	)
 	if err != nil {
-		return "", 0, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "create event ticket")
+		return "", 0, xerr.Wrapf(err, xerr.ERROR, "create event ticket")
 	}
 	return ticket, expiresAt.Unix(), nil
 }
 
-// AuthorizeEventTicket validates the self-contained stream capability against
+// authorizeEventTicket validates the self-contained stream capability against
 // the current order row. It deliberately does not require a long-lived bearer
 // token in the EventSource URL.
-func (l *V2OrderLogic) AuthorizeEventTicket(orderNo, ticket string) (*order.Order, error) {
-	claims, err := token2.ParseJwtToken(ticket, l.deps.JwtSecret)
+func (s *Service) authorizeEventTicket(ctx context.Context, orderNo, ticket string) (*order.Order, error) {
+	claims, err := token.ParseJwtToken(ticket, s.deps.JwtSecret)
 	if err != nil || claimString(claims, "OrderNo") != orderNo || claimString(claims, "Scope") != v2EventScope {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "event ticket is invalid")
+		return nil, xerr.Errorf(xerr.InvalidAccess, "event ticket is invalid")
 	}
-	orderInfo, err := l.deps.Orders.FindOneByOrderNo(l.ctx, orderNo)
+	orderInfo, err := s.findOrder(ctx, orderNo)
 	if err != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.OrderNotExist), "order not found")
+		return nil, err
 	}
 	if guestCheckoutHashMatches(orderInfo, claimString(claims, "GuestCheckoutHash")) {
 		return orderInfo, nil
 	}
 	if orderInfo.UserId == 0 || claimInt64(claims, "UserId") != orderInfo.UserId {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "event ticket is invalid")
+		return nil, xerr.Errorf(xerr.InvalidAccess, "event ticket is invalid")
 	}
 	return orderInfo, nil
 }
 
-func (l *V2OrderLogic) EventTicketExpiresAt(ticket string) (time.Time, error) {
-	claims, err := token2.ParseJwtToken(ticket, l.deps.JwtSecret)
+func (s *Service) eventTicketExpiresAt(ticket string) (time.Time, error) {
+	claims, err := token.ParseJwtToken(ticket, s.deps.JwtSecret)
 	if err != nil {
-		return time.Time{}, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "event ticket is invalid")
+		return time.Time{}, xerr.Errorf(xerr.InvalidAccess, "event ticket is invalid")
 	}
 	expiresAt := claimInt64(claims, "exp")
 	if expiresAt <= time.Now().Unix() {
-		return time.Time{}, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "event ticket expired")
+		return time.Time{}, xerr.Errorf(xerr.InvalidAccess, "event ticket expired")
 	}
 	return time.Unix(expiresAt, 0), nil
 }
 
-func (l *V2OrderLogic) currentUser() *user.User {
-	currentUser, _ := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	return currentUser
+func currentUser(ctx context.Context) *user.User {
+	u, _ := user.FromContext(ctx)
+	return u
 }
 
-func (l *V2OrderLogic) requestHash(req *dto.V2CreateOrderRequest) (string, error) {
+// requestHash is the stable identity of a create request under its
+// idempotency key. It is stored on the order row, so it carries nothing
+// secret: the guest password stays out (a stored unsalted digest of it would
+// let anyone reading the row test guesses at hash speed) and is proved
+// against the order's password hash on a replay instead.
+func requestHash(ctx context.Context, req *dto.V2CreateOrderRequest) (string, error) {
 	canonical := struct {
 		Type            string
 		PaymentID       int64
@@ -407,11 +503,17 @@ func (l *V2OrderLogic) requestHash(req *dto.V2CreateOrderRequest) (string, error
 	}{
 		Type: req.Type, PaymentID: req.PaymentID, SubscribeID: req.SubscribeID,
 		UserSubscribeID: req.UserSubscribeID, Quantity: req.Quantity, Coupon: req.Coupon,
-		Amount: req.Amount, Guest: req.Guest,
+		Amount: req.Amount,
 	}
-	if currentUser := l.currentUser(); currentUser != nil {
-		canonical.UserID = currentUser.Id
-		canonical.Guest = nil
+	if u := currentUser(ctx); u != nil {
+		canonical.UserID = u.Id
+	} else if req.Guest != nil {
+		// A Turnstile token is single-use, so a retry carries a fresh one; it
+		// must not change the request identity either.
+		guest := *req.Guest
+		guest.TurnstileToken = ""
+		guest.Password = ""
+		canonical.Guest = &guest
 	}
 	data, err := json.Marshal(canonical)
 	if err != nil {
@@ -421,54 +523,61 @@ func (l *V2OrderLogic) requestHash(req *dto.V2CreateOrderRequest) (string, error
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func (l *V2OrderLogic) derivedGuestCheckoutToken(idempotencyKey string) string {
-	mac := hmac.New(sha256.New, []byte(l.deps.JwtSecret))
+func (s *Service) derivedGuestCheckoutToken(idempotencyKey string) string {
+	mac := hmac.New(sha256.New, []byte(s.deps.JwtSecret))
 	_, _ = mac.Write([]byte("v2-guest-checkout:" + idempotencyKey))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (l *V2OrderLogic) guestCheckoutToken(idempotencyKey string, orderInfo *order.Order) string {
+func (s *Service) guestCheckoutToken(idempotencyKey string, orderInfo *order.Order) string {
 	if orderInfo.GuestCheckoutTokenHash == "" {
 		return ""
 	}
-	token := l.derivedGuestCheckoutToken(idempotencyKey)
-	if !guestCheckoutTokenMatches(orderInfo, token) {
+	derived := s.derivedGuestCheckoutToken(idempotencyKey)
+	if !guestCheckoutTokenMatches(orderInfo, derived) {
 		return ""
 	}
-	return token
+	return derived
 }
 
 func validateV2CreateRequest(req *dto.V2CreateOrderRequest, currentUser *user.User) error {
 	if req == nil || req.PaymentID <= 0 {
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "payment_id is required")
+		return xerr.Errorf(xerr.InvalidParams, "payment_id is required")
 	}
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
 	switch req.Type {
 	case v2OrderTypePurchase:
 		if req.SubscribeID <= 0 || req.Quantity <= 0 || req.Quantity > checkout.MaxQuantity || req.UserSubscribeID != 0 || req.Amount != 0 {
-			return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "invalid purchase parameters")
+			return xerr.Errorf(xerr.InvalidParams, "invalid purchase parameters")
 		}
 		if currentUser == nil {
-			if req.Guest == nil || strings.TrimSpace(req.Guest.AuthType) == "" || strings.TrimSpace(req.Guest.Identifier) == "" || len(req.Guest.Password) < 8 || len(req.Guest.Password) > 128 {
-				return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "guest credentials are required")
+			if req.Guest == nil || len(req.Guest.Password) < 8 || len(req.Guest.Password) > 128 {
+				return xerr.Errorf(xerr.InvalidParams, "guest credentials are required")
 			}
+			// Canonicalize in place so the idempotency hash, the replay
+			// ownership check and the created order share one identity.
+			authType, identifier, err := portal.NormalizeGuestIdentity(req.Guest.AuthType, req.Guest.Identifier)
+			if err != nil {
+				return err
+			}
+			req.Guest.AuthType, req.Guest.Identifier = authType, identifier
 		} else if req.Guest != nil {
-			return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "guest is only allowed for anonymous purchase")
+			return xerr.Errorf(xerr.InvalidParams, "guest is only allowed for anonymous purchase")
 		}
 	case v2OrderTypeRenewal:
 		if currentUser == nil || req.UserSubscribeID <= 0 || req.Quantity <= 0 || req.Quantity > checkout.MaxQuantity || req.SubscribeID != 0 || req.Amount != 0 || req.Guest != nil {
-			return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "invalid renewal parameters")
+			return xerr.Errorf(xerr.InvalidParams, "invalid renewal parameters")
 		}
 	case v2OrderTypeResetTraffic:
 		if currentUser == nil || req.UserSubscribeID <= 0 || req.SubscribeID != 0 || req.Quantity != 0 || req.Amount != 0 || req.Coupon != "" || req.Guest != nil {
-			return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "invalid reset traffic parameters")
+			return xerr.Errorf(xerr.InvalidParams, "invalid reset traffic parameters")
 		}
 	case v2OrderTypeRecharge:
 		if currentUser == nil || req.Amount <= 0 || req.SubscribeID != 0 || req.UserSubscribeID != 0 || req.Quantity != 0 || req.Coupon != "" || req.Guest != nil {
-			return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "invalid recharge parameters")
+			return xerr.Errorf(xerr.InvalidParams, "invalid recharge parameters")
 		}
 	default:
-		return errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "unsupported order type")
+		return xerr.Errorf(xerr.InvalidParams, "unsupported order type")
 	}
 	return nil
 }
@@ -496,53 +605,12 @@ func guestCheckoutHashMatches(orderInfo *order.Order, checkoutHash string) bool 
 		subtle.ConstantTimeCompare([]byte(orderInfo.GuestCheckoutTokenHash), []byte(checkoutHash)) == 1
 }
 
-func v2OrderStatus(status uint8) string {
-	switch status {
-	case 1:
-		return "pending_payment"
-	case 2:
-		return "paid"
-	case 3:
-		return "closed"
-	case 4:
-		return "failed"
-	case 5:
-		return "finished"
-	default:
-		return "unknown"
-	}
-}
-
-func v2PaymentStatus(status uint8) string {
-	switch status {
-	case 2, 5:
-		return "paid"
-	case 3:
-		return "closed"
-	case 4:
-		return "failed"
-	default:
-		return "pending"
-	}
-}
-
-func v2FulfillmentStatus(status uint8) string {
-	switch status {
-	case 2:
-		return "pending"
-	case 5:
-		return "finished"
-	default:
-		return "not_started"
-	}
-}
-
-func claimString(claims map[string]interface{}, name string) string {
+func claimString(claims map[string]any, name string) string {
 	value, _ := claims[name].(string)
 	return value
 }
 
-func claimInt64(claims map[string]interface{}, name string) int64 {
+func claimInt64(claims map[string]any, name string) int64 {
 	switch value := claims[name].(type) {
 	case float64:
 		return int64(value)
@@ -554,42 +622,4 @@ func claimInt64(claims map[string]interface{}, name string) int64 {
 	default:
 		return 0
 	}
-}
-
-// Service methods expose the orchestration to the module facade.
-
-func (s *Service) CreateAndCheckout(ctx context.Context, req *dto.V2CreateOrderRequest, idempotencyKey string) (*dto.V2OrderResponse, error) {
-	return s.flow(ctx).CreateAndCheckout(req, idempotencyKey)
-}
-
-func (s *Service) Checkout(ctx context.Context, orderNo string, req *dto.V2CheckoutOrderRequest) (*dto.V2OrderResponse, error) {
-	return s.flow(ctx).Checkout(orderNo, req)
-}
-
-func (s *Service) GetOrder(ctx context.Context, orderNo, checkoutToken string) (*dto.V2OrderResponse, error) {
-	return s.flow(ctx).GetOrder(orderNo, checkoutToken)
-}
-
-func (s *Service) EventTicket(ctx context.Context, orderNo, checkoutToken string) (*dto.V2EventTicketResponse, error) {
-	return s.flow(ctx).EventTicket(orderNo, checkoutToken)
-}
-
-func (s *Service) Session(ctx context.Context, orderNo, checkoutToken string) (*dto.V2OrderSessionResponse, error) {
-	return s.flow(ctx).Session(orderNo, checkoutToken)
-}
-
-// AuthorizeEventStream validates the self-contained stream capability and
-// returns the stream's initial snapshot together with the ticket expiry; the
-// order entity never leaves the module.
-func (s *Service) AuthorizeEventStream(ctx context.Context, orderNo, ticket string) (dto.V2OrderSnapshot, time.Time, error) {
-	l := s.flow(ctx)
-	orderInfo, err := l.AuthorizeEventTicket(orderNo, ticket)
-	if err != nil {
-		return dto.V2OrderSnapshot{}, time.Time{}, err
-	}
-	expiresAt, err := l.EventTicketExpiresAt(ticket)
-	if err != nil {
-		return dto.V2OrderSnapshot{}, time.Time{}, err
-	}
-	return l.snapshot(orderInfo), expiresAt, nil
 }

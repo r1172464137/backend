@@ -11,7 +11,7 @@ import (
 // legacyCodes are the error codes that predate the domain-band convention.
 // They are FROZEN: clients switch on the numeric values, so renumbering or
 // removing one is a breaking change, and this set must never grow — new
-// codes go into their owning module's band (see errCode.go).
+// codes go into their owning module's band (see err_code.go).
 var legacyCodes = map[uint32]bool{
 	200: true, 500: true, 400: true, 401: true,
 	10001: true, 10002: true, 10003: true, 10004: true,
@@ -49,14 +49,14 @@ var bands = map[string]uint32{
 	"BandNotification": BandNotification,
 }
 
-// collectCodes parses errCode.go and returns every declared error-code
+// collectCodes parses err_code.go and returns every declared error-code
 // constant (name -> value), excluding the band markers themselves.
 func collectCodes(t *testing.T) map[string]uint32 {
 	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "errCode.go", nil, 0)
+	file, err := parser.ParseFile(fset, "err_code.go", nil, 0)
 	if err != nil {
-		t.Fatalf("parse errCode.go: %v", err)
+		t.Fatalf("parse err_code.go: %v", err)
 	}
 	codes := make(map[string]uint32)
 	for _, decl := range file.Decls {
@@ -86,7 +86,7 @@ func collectCodes(t *testing.T) map[string]uint32 {
 		}
 	}
 	if len(codes) == 0 {
-		t.Fatal("no error codes found — parser out of sync with errCode.go")
+		t.Fatal("no error codes found — parser out of sync with err_code.go")
 	}
 	return codes
 }
@@ -118,16 +118,16 @@ func TestErrorCodeSegmentation(t *testing.T) {
 			}
 		}
 		if !inBand {
-			t.Errorf("%s = %d: new error codes must be allocated inside a domain band (see errCode.go); the legacy set is frozen", name, value)
+			t.Errorf("%s = %d: new error codes must be allocated inside a domain band (see err_code.go); the legacy set is frozen", name, value)
 		}
 		if _, ok := message[value]; !ok {
-			t.Errorf("%s = %d: new error codes must have a message in errMsg.go", name, value)
+			t.Errorf("%s = %d: new error codes must have a message in err_msg.go", name, value)
 		}
 	}
 
 	for value := range legacyCodes {
 		if !legacySeen[value] {
-			t.Errorf("frozen legacy code %d disappeared from errCode.go — removing a code breaks clients switching on it", value)
+			t.Errorf("frozen legacy code %d disappeared from err_code.go — removing a code breaks clients switching on it", value)
 		}
 	}
 
@@ -137,7 +137,7 @@ func TestErrorCodeSegmentation(t *testing.T) {
 			continue
 		}
 		if _, ok := message[value]; !ok {
-			t.Errorf("legacy code %d lost its message in errMsg.go", value)
+			t.Errorf("legacy code %d lost its message in err_msg.go", value)
 		}
 	}
 }

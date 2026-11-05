@@ -1,3 +1,6 @@
+// Package inbox holds the idempotent-consumer inbox row: the marker a domain
+// step records, inside its own transaction, for every event it has processed,
+// so a redelivered event is skipped (ADR-001 step 2).
 package inbox
 
 import "time"

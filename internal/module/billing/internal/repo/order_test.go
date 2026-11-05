@@ -3,11 +3,14 @@ package repo
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/pkg/timeutil"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
@@ -44,7 +47,10 @@ func TestOrderRepoMarkOrderPaidUsesPendingCondition(t *testing.T) {
 		t.Fatal("dry-run update must not report an affected row")
 	}
 	sql := logs.String()
-	for _, want := range []string{"UPDATE `order`", "`status`=2", "`trade_no`='trade-456'", "WHERE order_no = 'order-123' AND status = 1"} {
+	// The transition binds the trade number: an order that claimed another
+	// gateway payment is left alone.
+	for _, want := range []string{"UPDATE `order`", "`status`=2", "`trade_no`='trade-456'",
+		"WHERE order_no = 'order-123' AND status = 1 AND (trade_no IS NULL OR trade_no = '' OR trade_no = 'trade-456')"} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("SQL missing %q:\n%s", want, sql)
 		}
@@ -271,5 +277,89 @@ func TestApplyOrderListFiltersSkipsBlankSearch(t *testing.T) {
 	}
 	if len(stmt.Vars) != 0 {
 		t.Fatalf("vars len = %d, want 0: %#v", len(stmt.Vars), stmt.Vars)
+	}
+}
+
+// newDryRunOrderRepo returns an order repository whose SQL is rendered into
+// the returned buffer instead of being executed. Times render in UTC.
+func newDryRunOrderRepo(t *testing.T) (repository.OrderRepo, *bytes.Buffer) {
+	t.Helper()
+	var logs bytes.Buffer
+	db, err := gorm.Open(mysql.New(mysql.Config{
+		DSN:                       "gorm:gorm@tcp(localhost:9910)/gorm?charset=utf8&parseTime=True&loc=UTC",
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{
+		DryRun:                 true,
+		DisableAutomaticPing:   true,
+		SkipDefaultTransaction: true,
+		Logger:                 gormlogger.New(log.New(&logs, "", 0), gormlogger.Config{LogLevel: gormlogger.Info}),
+	})
+	if err != nil {
+		t.Fatalf("open gorm db: %v", err)
+	}
+	redisServer := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	return NewOrderRepo(repository.ModuleConn{DB: db, Redis: redisClient}.Conn()), &logs
+}
+
+// useAppLocation switches the application timezone for one test.
+func useAppLocation(t *testing.T, name string) {
+	t.Helper()
+	previous := timeutil.LocationName()
+	if err := timeutil.LoadLocation(name); err != nil {
+		t.Skipf("timezone %s unavailable: %v", name, err)
+	}
+	t.Cleanup(func() { _ = timeutil.LoadLocation(previous) })
+}
+
+func TestOrderRepoCountPendingGuestOrdersFiltersByGuestIdentity(t *testing.T) {
+	repo, logs := newDryRunOrderRepo(t)
+	since := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := repo.CountPendingGuestOrders(context.Background(), "email", "guest@example.com", since); err != nil {
+		t.Fatalf("CountPendingGuestOrders: %v", err)
+	}
+	sql := logs.String()
+	for _, want := range []string{"SELECT count(*) FROM `order`", "WHERE user_id = 0 AND status = 1 AND guest_auth_type = 'email' AND guest_identifier = 'guest@example.com' AND created_at >= '2026-09-01 00:00:00'"} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("SQL missing %q:\n%s", want, sql)
+		}
+	}
+}
+
+// "Today" is the calendar day in the application timezone. 07:30 in Shanghai
+// is still the previous day in UTC, which is the day Truncate(24h) picked.
+func TestOrderRepoQueryDateOrdersUsesAppTimezoneDay(t *testing.T) {
+	useAppLocation(t, "Asia/Shanghai")
+	repo, logs := newDryRunOrderRepo(t)
+
+	now := time.Date(2026, 9, 26, 23, 30, 0, 0, time.UTC) // 2026-09-27 07:30 in Shanghai
+	// Scan cannot complete in dry-run mode; the rendered SQL is still logged.
+	if _, err := repo.QueryDateOrders(context.Background(), now); err != nil && !errors.Is(err, gorm.ErrDryRunModeUnsupported) {
+		t.Fatalf("QueryDateOrders: %v", err)
+	}
+	sql := logs.String()
+	// Shanghai midnight of 2026-09-27 and 2026-09-28, rendered in UTC.
+	for _, want := range []string{"created_at >= '2026-09-26 16:00:00'", "created_at < '2026-09-27 16:00:00'"} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("SQL missing %q:\n%s", want, sql)
+		}
+	}
+}
+
+func TestOrderRepoQueryDailyOrdersListEndsAtAppTimezoneMidnight(t *testing.T) {
+	useAppLocation(t, "Asia/Shanghai")
+	repo, logs := newDryRunOrderRepo(t)
+
+	now := time.Date(2026, 9, 26, 23, 30, 0, 0, time.UTC) // 2026-09-27 07:30 in Shanghai
+	if _, err := repo.QueryDailyOrdersList(context.Background(), now); err != nil && !errors.Is(err, gorm.ErrDryRunModeUnsupported) {
+		t.Fatalf("QueryDailyOrdersList: %v", err)
+	}
+	sql := logs.String()
+	// Shanghai midnight of 2026-09-01 and 2026-09-28, rendered in UTC.
+	for _, want := range []string{"created_at >= '2026-08-31 16:00:00'", "created_at < '2026-09-27 16:00:00'"} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("SQL missing %q:\n%s", want, sql)
+		}
 	}
 }

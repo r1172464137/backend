@@ -8,57 +8,35 @@ import (
 	"math"
 	"time"
 
+	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
+	"github.com/perfect-panel/server/internal/module/subscription/internal/period"
 	"github.com/perfect-panel/server/pkg/timeutil"
-)
-
-const (
-	// Time unit constants for subscription billing
-	UnitTimeNoLimit = "NoLimit" // Unlimited time subscription
-	UnitTimeYear    = "Year"    // Annual subscription
-	UnitTimeMonth   = "Month"   // Monthly subscription
-	UnitTimeDay     = "Day"     // Daily subscription
-	UnitTimeHour    = "Hour"    // Hourly subscription
-	UnitTimeMinute  = "Minute"  // Per-minute subscription
-
-	// Reset cycle constants for traffic resets
-	ResetCycleNone    = 0 // No reset cycle
-	ResetCycle1st     = 1 // Reset on 1st of each month
-	ResetCycleMonthly = 2 // Reset monthly based on start date
-	ResetCycleYear    = 3 // Reset yearly based on start date
-
-	// Safety limits for overflow protection
-	maxInt64 = math.MaxInt64
-	minInt64 = math.MinInt64
 )
 
 // Error definitions for validation and calculation failures
 var (
-	ErrInvalidQuantity       = errors.New("order quantity cannot be zero or negative")
 	ErrInvalidAmount         = errors.New("order amount cannot be negative")
 	ErrInvalidTraffic        = errors.New("traffic values cannot be negative")
 	ErrInvalidTimeRange      = errors.New("expire time must be after start time")
 	ErrInvalidUnitTime       = errors.New("invalid unit time")
 	ErrInvalidDeductionRatio = errors.New("deduction ratio must be between 0 and 100")
-	ErrOverflow              = errors.New("calculation overflow")
 )
 
 // Subscribe represents a subscription with time and traffic limits
 type Subscribe struct {
-	StartTime      time.Time // Subscription start time
-	ExpireTime     time.Time // Subscription expiration time
-	Traffic        int64     // Total traffic allowance in bytes
-	Download       int64     // Downloaded traffic in bytes
-	Upload         int64     // Uploaded traffic in bytes
-	UnitTime       string    // Time unit for billing (Year, Month, Day, etc.)
-	UnitPrice      int64     // Price per unit time
-	ResetCycle     int64     // Traffic reset cycle
-	DeductionRatio int64     // Deduction ratio for weighted calculations (0-100)
+	StartTime      time.Time    // Subscription start time
+	ExpireTime     time.Time    // Subscription expiration time
+	Traffic        int64        // Traffic allowance per reset cycle in bytes (0 = unlimited)
+	Download       int64        // Downloaded traffic in the current cycle in bytes
+	Upload         int64        // Uploaded traffic in the current cycle in bytes
+	UnitTime       period.Unit  // Time unit the term was bought in
+	ResetCycle     period.Cycle // Traffic reset cycle
+	DeductionRatio int64        // Deduction ratio for weighted calculations (0-100)
 }
 
-// Order represents a purchase order for subscription calculation
+// Order represents what was paid for the subscription term
 type Order struct {
-	Amount   int64 // Total order amount
-	Quantity int64 // Order quantity
+	Amount int64 // Total amount paid for the term from StartTime to ExpireTime
 }
 
 // Validate checks if the Subscribe struct contains valid data
@@ -67,11 +45,12 @@ func (s *Subscribe) Validate() error {
 		return ErrInvalidTraffic
 	}
 
-	if s.Download+s.Upload > s.Traffic {
-		return fmt.Errorf("download + upload (%d) cannot exceed total traffic (%d)", s.Download+s.Upload, s.Traffic)
-	}
+	// Usage above the quota is not an error: traffic reports can land after
+	// the quota ran out, and an unlimited quota (0) has no bound at all. Both
+	// simply leave no unused traffic to refund.
 
-	if !s.ExpireTime.After(s.StartTime) {
+	// A subscription without a time limit has no term to measure.
+	if !s.noTimeLimit() && !s.ExpireTime.After(s.StartTime) {
 		return ErrInvalidTimeRange
 	}
 
@@ -79,15 +58,7 @@ func (s *Subscribe) Validate() error {
 		return ErrInvalidDeductionRatio
 	}
 
-	validUnitTimes := []string{UnitTimeNoLimit, UnitTimeYear, UnitTimeMonth, UnitTimeDay, UnitTimeHour, UnitTimeMinute}
-	valid := false
-	for _, ut := range validUnitTimes {
-		if s.UnitTime == ut {
-			valid = true
-			break
-		}
-	}
-	if !valid {
+	if _, err := period.ParseUnit(string(s.UnitTime)); err != nil {
 		return ErrInvalidUnitTime
 	}
 
@@ -96,57 +67,21 @@ func (s *Subscribe) Validate() error {
 
 // Validate checks if the Order struct contains valid data
 func (o *Order) Validate() error {
-	if o.Quantity <= 0 {
-		return ErrInvalidQuantity
-	}
 	if o.Amount < 0 {
 		return ErrInvalidAmount
 	}
 	return nil
 }
 
-// safeMultiply performs multiplication with overflow protection
-func safeMultiply(a, b int64) (int64, error) {
-	if a == 0 || b == 0 {
-		return 0, nil
-	}
-
-	if a > 0 && b > 0 {
-		if a > maxInt64/b {
-			return 0, ErrOverflow
-		}
-	} else if a < 0 && b < 0 {
-		if a < maxInt64/b {
-			return 0, ErrOverflow
-		}
-	} else {
-		if (a > 0 && b < minInt64/a) || (a < 0 && b > minInt64/a) {
-			return 0, ErrOverflow
-		}
-	}
-
-	return a * b, nil
-}
-
-// safeAdd performs addition with overflow protection
-func safeAdd(a, b int64) (int64, error) {
-	if (b > 0 && a > maxInt64-b) || (b < 0 && a < minInt64-b) {
-		return 0, ErrOverflow
-	}
-	return a + b, nil
-}
-
-// safeDivide performs division with zero-division protection
-func safeDivide(a, b int64) (int64, error) {
-	if b == 0 {
-		return 0, errors.New("division by zero")
-	}
-	return a / b, nil
-}
-
-// CalculateRemainingAmount calculates the remaining refund amount for a subscription
-// based on unused time and traffic. Returns the amount and any calculation errors.
+// CalculateRemainingAmount returns the refundable share of what was paid for
+// the subscription. Time after the current traffic-reset cycle refunds pro
+// rata; the current cycle refunds by its unused time and traffic. The result
+// is always between zero and the amount paid.
 func CalculateRemainingAmount(sub Subscribe, order Order) (int64, error) {
+	return calculateRemainingAmount(period.App(), sub, order, timeutil.Now())
+}
+
+func calculateRemainingAmount(cal period.Calendar, sub Subscribe, order Order, now time.Time) (int64, error) {
 	if err := sub.Validate(); err != nil {
 		return 0, fmt.Errorf("invalid subscription: %w", err)
 	}
@@ -155,144 +90,80 @@ func CalculateRemainingAmount(sub Subscribe, order Order) (int64, error) {
 		return 0, fmt.Errorf("invalid order: %w", err)
 	}
 
-	if sub.UnitTime == UnitTimeNoLimit && sub.ResetCycle != 0 {
+	if sub.noTimeLimit() {
+		if sub.ResetCycle != period.CycleNone {
+			return 0, nil
+		}
+		return calculateNoLimitAmount(sub, order), nil
+	}
+
+	if order.Amount == 0 || !now.Before(sub.ExpireTime) {
 		return 0, nil
 	}
-
-	unitPrice, err := safeDivide(order.Amount, order.Quantity)
-	if err != nil {
-		return 0, fmt.Errorf("failed to calculate unit price: %w", err)
-	}
-	sub.UnitPrice = unitPrice
-
-	loc, err := time.LoadLocation(sub.StartTime.Location().String())
-	if err != nil {
-		loc = time.UTC
-	}
-	now := time.Now().In(loc)
-
-	switch sub.UnitTime {
-	case UnitTimeNoLimit:
-		return calculateNoLimitAmount(sub, order)
-
-	case UnitTimeYear:
-		remainingYears := timeutil.YearDiff(now, sub.ExpireTime)
-		remainingUnitTimeAmount, err := calculateRemainingUnitTimeAmount(sub)
-		if err != nil {
-			return 0, err
-		}
-
-		yearAmount, err := safeMultiply(int64(remainingYears), sub.UnitPrice)
-		if err != nil {
-			return 0, fmt.Errorf("year calculation overflow: %w", err)
-		}
-
-		total, err := safeAdd(yearAmount, remainingUnitTimeAmount)
-		if err != nil {
-			return 0, fmt.Errorf("total calculation overflow: %w", err)
-		}
-
-		return total, nil
-
-	case UnitTimeMonth:
-		remainingMonths := timeutil.MonthDiff(now, sub.ExpireTime)
-		remainingUnitTimeAmount, err := calculateRemainingUnitTimeAmount(sub)
-		if err != nil {
-			return 0, err
-		}
-
-		monthAmount, err := safeMultiply(int64(remainingMonths), sub.UnitPrice)
-		if err != nil {
-			return 0, fmt.Errorf("month calculation overflow: %w", err)
-		}
-
-		total, err := safeAdd(monthAmount, remainingUnitTimeAmount)
-		if err != nil {
-			return 0, fmt.Errorf("total calculation overflow: %w", err)
-		}
-
-		return total, nil
-
-	case UnitTimeDay:
-		remainingDays := timeutil.DayDiff(now, sub.ExpireTime)
-		remainingUnitTimeAmount, err := calculateRemainingUnitTimeAmount(sub)
-		if err != nil {
-			return 0, err
-		}
-
-		dayAmount, err := safeMultiply(remainingDays, sub.UnitPrice)
-		if err != nil {
-			return 0, fmt.Errorf("day calculation overflow: %w", err)
-		}
-
-		total, err := safeAdd(dayAmount, remainingUnitTimeAmount)
-		if err != nil {
-			return 0, fmt.Errorf("total calculation overflow: %w", err)
-		}
-
-		return total, nil
+	if now.Before(sub.StartTime) {
+		now = sub.StartTime
 	}
 
-	return 0, nil
+	cycleStart, cycleEnd := currentResetCycle(cal, sub, now)
+	remaining := float64(sub.ExpireTime.Sub(cycleEnd))
+	if cycle := cycleEnd.Sub(cycleStart); cycle > 0 {
+		remaining += float64(cycle) * remainingShare(sub, float64(cycleEnd.Sub(now))/float64(cycle))
+	}
+	return proportion(order.Amount, remaining/float64(sub.ExpireTime.Sub(sub.StartTime))), nil
 }
 
-// calculateNoLimitAmount calculates refund amount for unlimited time subscriptions
-// based on unused traffic only
-func calculateNoLimitAmount(sub Subscribe, order Order) (int64, error) {
+// noTimeLimit reports whether the subscription has no term: bought without a
+// time limit, or set to never expire.
+func (s *Subscribe) noTimeLimit() bool {
+	return s.UnitTime == period.UnitNoLimit || usersub.NoExpiry(s.ExpireTime)
+}
+
+// calculateNoLimitAmount refunds a time-unlimited subscription by its unused
+// traffic; without a traffic cap there is nothing left to measure.
+func calculateNoLimitAmount(sub Subscribe, order Order) int64 {
 	if sub.Traffic == 0 {
-		return 0, nil
+		return 0
 	}
-
-	usedTraffic := sub.Traffic - sub.Download - sub.Upload
-	if usedTraffic < 0 {
-		usedTraffic = 0
-	}
-
-	unitPrice := float64(order.Amount) / float64(sub.Traffic)
-	result := float64(usedTraffic) * unitPrice
-
-	if result > float64(maxInt64) || result < float64(minInt64) {
-		return 0, ErrOverflow
-	}
-
-	return int64(result), nil
+	return proportion(order.Amount, unusedTrafficShare(sub))
 }
 
-// calculateRemainingUnitTimeAmount calculates the remaining amount based on
-// both time and traffic usage, applying deduction ratios when specified
-func calculateRemainingUnitTimeAmount(sub Subscribe) (int64, error) {
-	now := time.Now()
+// unusedTrafficShare is the unused part of the quota in [0, 1]: usage that
+// went past the quota leaves none.
+func unusedTrafficShare(sub Subscribe) float64 {
+	return math.Max(0, math.Min(1, float64(sub.Traffic-sub.Download-sub.Upload)/float64(sub.Traffic)))
+}
+
+// currentResetCycle returns the traffic-reset cycle containing now, clamped
+// to the subscription term: the calendar reset's own cycle (period), so a
+// refund counts the traffic period the owner is in. Without a reset cycle the
+// whole term is one cycle.
+func currentResetCycle(cal period.Calendar, sub Subscribe, now time.Time) (time.Time, time.Time) {
+	cycleStart, cycleEnd, ok := cal.CycleAt(sub.ResetCycle, sub.StartTime, now)
+	if !ok {
+		return sub.StartTime, sub.ExpireTime
+	}
+	if cycleStart.Before(sub.StartTime) {
+		cycleStart = sub.StartTime
+	}
+	if cycleEnd.After(sub.ExpireTime) {
+		cycleEnd = sub.ExpireTime
+	}
+	return cycleStart, cycleEnd
+}
+
+// remainingShare combines the unused time and traffic of the current cycle
+// the way the plan asks: the smaller of the two by default, or a weighted mix
+// when the plan sets a deduction ratio.
+func remainingShare(sub Subscribe, timeRatio float64) float64 {
+	if sub.Traffic == 0 {
+		return timeRatio
+	}
+	trafficRatio := unusedTrafficShare(sub)
+	if sub.DeductionRatio == 0 {
+		return math.Min(timeRatio, trafficRatio)
+	}
 	trafficWeight, timeWeight := calculateWeights(sub.DeductionRatio)
-	remainingDays, totalDays := getRemainingAndTotalDays(sub, now)
-
-	if totalDays == 0 {
-		return 0, nil
-	}
-
-	remainingTraffic := sub.Traffic - sub.Download - sub.Upload
-	if remainingTraffic < 0 {
-		remainingTraffic = 0
-	}
-
-	remainingTimeAmount, err := calculateProportionalAmount(sub.UnitPrice, remainingDays, totalDays)
-	if err != nil {
-		return 0, fmt.Errorf("time amount calculation failed: %w", err)
-	}
-
-	if sub.Traffic == 0 {
-		return remainingTimeAmount, nil
-	}
-
-	remainingTrafficAmount, err := calculateProportionalAmount(sub.UnitPrice, remainingTraffic, sub.Traffic)
-	if err != nil {
-		return 0, fmt.Errorf("traffic amount calculation failed: %w", err)
-	}
-
-	if sub.DeductionRatio != 0 {
-		return calculateWeightedAmount(sub.UnitPrice, remainingTraffic, sub.Traffic, remainingDays, totalDays, trafficWeight, timeWeight)
-	}
-
-	return min(remainingTimeAmount, remainingTrafficAmount), nil
+	return trafficWeight*trafficRatio + timeWeight*timeRatio
 }
 
 // calculateWeights converts deduction ratio to traffic and time weights
@@ -306,69 +177,13 @@ func calculateWeights(deductionRatio int64) (float64, float64) {
 	return trafficWeight, timeWeight
 }
 
-// getRemainingAndTotalDays calculates remaining and total days based on
-// the subscription's reset cycle configuration
-func getRemainingAndTotalDays(sub Subscribe, now time.Time) (int64, int64) {
-	switch sub.ResetCycle {
-	case ResetCycleNone:
-		remaining := sub.ExpireTime.Sub(now).Hours() / 24
-		total := sub.ExpireTime.Sub(sub.StartTime).Hours() / 24
-		if remaining < 0 {
-			remaining = 0
-		}
-		if total < 0 {
-			total = 0
-		}
-		return int64(remaining), int64(total)
-
-	case ResetCycle1st:
-		return timeutil.DaysToNextMonth(now), timeutil.GetLastDayOfMonth(now)
-
-	case ResetCycleMonthly:
-		remaining := timeutil.DaysToMonthDay(now, sub.StartTime.Day()) - 1
-		total := timeutil.DaysToMonthDay(now, sub.StartTime.Day())
-		if remaining < 0 {
-			remaining = 0
-		}
-		return remaining, total
-
-	case ResetCycleYear:
-		return timeutil.DaysToYearDay(now, int(sub.StartTime.Month()), sub.StartTime.Day()),
-			timeutil.GetYearDays(now, int(sub.StartTime.Month()), sub.StartTime.Day())
+// proportion returns the given share of amount, clamped to [0, amount].
+func proportion(amount int64, share float64) int64 {
+	switch {
+	case math.IsNaN(share) || share <= 0:
+		return 0
+	case share >= 1:
+		return amount
 	}
-	return 0, 0
-}
-
-// calculateWeightedAmount applies weighted calculation combining both time and traffic
-// remaining ratios based on the specified weights
-func calculateWeightedAmount(unitPrice, remainingTraffic, totalTraffic, remainingDays, totalDays int64, trafficWeight, timeWeight float64) (int64, error) {
-	if totalDays == 0 || totalTraffic == 0 {
-		return 0, nil
-	}
-
-	remainingTimeRatio := float64(remainingDays) / float64(totalDays)
-	remainingTrafficRatio := float64(remainingTraffic) / float64(totalTraffic)
-	weightedRemainingRatio := (timeWeight * remainingTimeRatio) + (trafficWeight * remainingTrafficRatio)
-
-	result := float64(unitPrice) * weightedRemainingRatio
-	if result > float64(maxInt64) || result < float64(minInt64) {
-		return 0, ErrOverflow
-	}
-
-	return int64(result), nil
-}
-
-// calculateProportionalAmount calculates proportional amount based on
-// remaining vs total ratio with overflow protection
-func calculateProportionalAmount(unitPrice, remaining, total int64) (int64, error) {
-	if total == 0 {
-		return 0, nil
-	}
-
-	result := float64(unitPrice) * (float64(remaining) / float64(total))
-	if result > float64(maxInt64) || result < float64(minInt64) {
-		return 0, ErrOverflow
-	}
-
-	return int64(result), nil
+	return int64(float64(amount) * share)
 }

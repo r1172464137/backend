@@ -7,20 +7,24 @@ import (
 	"github.com/perfect-panel/server/internal/module/network"
 )
 
+// handlerFactory compiles only for a factory that takes the service S and
+// returns a native Hertz handler.
+func handlerFactory[S any](func(S) app.HandlerFunc) {}
+
 func TestHandlerFactories_return_native_hertz_handlers(t *testing.T) {
-	var _ func(network.Service) app.HandlerFunc = CreateNodeHandler
-	var _ func(network.Service) app.HandlerFunc = CreateServerHandler
-	var _ func(network.Service) app.HandlerFunc = DeleteNodeHandler
-	var _ func(network.Service) app.HandlerFunc = DeleteServerHandler
-	var _ func(network.Service) app.HandlerFunc = FilterNodeListHandler
-	var _ func(network.Service) app.HandlerFunc = FilterServerListHandler
-	var _ func(network.Service) app.HandlerFunc = GetServerNodeConfigHandler
-	var _ func(network.Service) app.HandlerFunc = GetServerProtocolsHandler
-	var _ func(network.Service) app.HandlerFunc = QueryNodeTagHandler
-	var _ func(network.Service) app.HandlerFunc = ResetSortWithNodeHandler
-	var _ func(network.Service) app.HandlerFunc = ResetSortWithServerHandler
-	var _ func(network.Service) app.HandlerFunc = ToggleNodeStatusHandler
-	var _ func(network.Service) app.HandlerFunc = UpdateNodeHandler
-	var _ func(network.Service) app.HandlerFunc = UpdateServerHandler
-	var _ func(network.Service) app.HandlerFunc = UpdateServerNodeConfigHandler
+	handlerFactory[network.Service](CreateNodeHandler)
+	handlerFactory[network.Service](CreateServerHandler)
+	handlerFactory[network.Service](DeleteNodeHandler)
+	handlerFactory[network.Service](DeleteServerHandler)
+	handlerFactory[network.Service](FilterNodeListHandler)
+	handlerFactory[network.Service](FilterServerListHandler)
+	handlerFactory[network.Service](GetServerNodeConfigHandler)
+	handlerFactory[network.Service](GetServerProtocolsHandler)
+	handlerFactory[network.Service](QueryNodeTagHandler)
+	handlerFactory[network.Service](ResetSortWithNodeHandler)
+	handlerFactory[network.Service](ResetSortWithServerHandler)
+	handlerFactory[network.Service](ToggleNodeStatusHandler)
+	handlerFactory[network.Service](UpdateNodeHandler)
+	handlerFactory[ServerUpdater](UpdateServerHandler)
+	handlerFactory[ServerNodeConfigUpdater](UpdateServerNodeConfigHandler)
 }

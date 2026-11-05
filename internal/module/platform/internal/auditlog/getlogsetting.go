@@ -8,29 +8,14 @@ import (
 	"github.com/perfect-panel/server/pkg/logger"
 )
 
-type GetLogSettingLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get log setting
-func newGetLogSettingLogic(ctx context.Context, deps Deps) *GetLogSettingLogic {
-	return &GetLogSettingLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *GetLogSettingLogic) GetLogSetting() (resp *dto.LogSetting, err error) {
-	configs, err := l.deps.System.GetLogConfig(l.ctx)
+// GetLogSetting returns the stored log retention settings.
+func (s *Service) GetLogSetting(ctx context.Context) (*dto.LogSetting, error) {
+	configs, err := s.deps.System.GetLogConfig(ctx)
 	if err != nil {
-		l.Errorw("[GetLogSetting] Database query error", logger.Field("error", err.Error()))
+		logger.WithContext(ctx).Errorw("[GetLogSetting] Database query error", logger.Field("error", err.Error()))
 		return nil, err
 	}
-	resp = &dto.LogSetting{}
-	// reflect to response
+	resp := &dto.LogSetting{}
 	config.SystemConfigSliceReflectToStruct(configs, resp)
-	return
+	return resp, nil
 }

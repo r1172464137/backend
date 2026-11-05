@@ -13,6 +13,7 @@ import (
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
 	adminserver "github.com/perfect-panel/server/internal/module/network/transport/http/admin/server"
 	"github.com/perfect-panel/server/internal/module/platform"
+	"github.com/perfect-panel/server/internal/module/platform/entity/log"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	adminsystem "github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system"
 	"gorm.io/driver/sqlite"
@@ -28,9 +29,9 @@ func TestV2IPRuleDowngradeHTTPAndInheritance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	closeRoutingTestResource(t, pool)
 	pool.SetMaxOpenConns(1)
-	if err = db.AutoMigrate(&system.System{}, &node.Server{}, &node.ServerConfigOverride{}); err != nil {
+	if err = db.AutoMigrate(&system.System{}, &log.SystemLog{}, &node.Server{}, &node.ServerConfigOverride{}); err != nil {
 		t.Fatal(err)
 	}
 	rows := []system.System{

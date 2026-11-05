@@ -7,32 +7,19 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type QuerySubscribeGroupListLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Get subscribe group list
-func newQuerySubscribeGroupListLogic(ctx context.Context, deps Deps) *QuerySubscribeGroupListLogic {
-	return &QuerySubscribeGroupListLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *QuerySubscribeGroupListLogic) QuerySubscribeGroupList() (resp *dto.QuerySubscribeGroupListResponse, err error) {
-	total, list, err := l.deps.Plans.QueryGroupList(l.ctx)
+// QuerySubscribeGroupList lists every plan group for the storefront.
+func (s *Service) QuerySubscribeGroupList(ctx context.Context) (*dto.QuerySubscribeGroupListResponse, error) {
+	total, list, err := s.deps.Plans.QueryGroupList(ctx)
 	if err != nil {
-		l.Logger.Error("[QuerySubscribeGroupListLogic] get subscribe group list failed: ", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "get subscribe group list failed: %v", err.Error())
+		logger.WithContext(ctx).Error("[QuerySubscribeGroupListLogic] get subscribe group list failed: ", logger.Field("error", err.Error()))
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "get subscribe group list failed: %v", err.Error())
 	}
 	groupList := make([]dto.SubscribeGroup, 0)
-	mapping.DeepCopy(&groupList, list)
+	if err := mapping.Copy(&groupList, list); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "map subscribe groups")
+	}
 	return &dto.QuerySubscribeGroupListResponse{
 		Total: total,
 		List:  groupList,

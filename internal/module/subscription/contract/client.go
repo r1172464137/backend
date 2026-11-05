@@ -44,7 +44,7 @@ type PreviewSubscribeTemplateRequest struct {
 }
 
 type PreviewSubscribeTemplateResponse struct {
-	Template string `json:"template"` // 预览的模板内容
+	Template string `json:"template"` // The rendered template preview
 }
 
 type SubscribeApplication struct {

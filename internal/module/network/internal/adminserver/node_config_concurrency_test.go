@@ -11,7 +11,6 @@ import (
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/xerr"
 	"github.com/pkg/errors"
-	"gorm.io/gorm"
 )
 
 type serializedAdminNodeStore struct {
@@ -80,7 +79,7 @@ func (r *serializedNodeRepo) SaveServerRoutingOverride(_ context.Context, value 
 	r.owner.override = &v
 	return nil
 }
-func (r *serializedNodeRepo) DeleteServerConfigOverride(context.Context, int64, ...*gorm.DB) error {
+func (r *serializedNodeRepo) DeleteServerConfigOverride(context.Context, int64) error {
 	r.owner.override = nil
 	return nil
 }
@@ -112,7 +111,7 @@ func TestConcurrentOrderedOverrideRejectsStaleRevision(t *testing.T) {
 		go func(req *dto.UpdateServerNodeConfigRequest) {
 			defer wg.Done()
 			<-start
-			errs <- newUpdateServerNodeConfigLogic(context.Background(), deps).UpdateServerNodeConfig(req)
+			errs <- NewService(deps).UpdateServerNodeConfig(context.Background(), req)
 		}(req)
 	}
 	close(start)

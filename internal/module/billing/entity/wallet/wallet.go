@@ -18,6 +18,17 @@ func (Wallet) TableName() string {
 	return "user_wallet"
 }
 
+// Adjustment is an administrator's edit of a wallet: each amount that is set
+// becomes the wallet's; a nil amount is left as it is, so a form that only
+// carries the amounts the administrator edited cannot revert the purchases,
+// refunds and claw-backs that happened since it was loaded.
+type Adjustment struct {
+	UserId     int64
+	Balance    *int64
+	GiftAmount *int64
+	Commission *int64
+}
+
 type Withdrawal struct {
 	Id        int64     `gorm:"primaryKey"`
 	UserId    int64     `gorm:"index:idx_user_id;not null;comment:User ID"`

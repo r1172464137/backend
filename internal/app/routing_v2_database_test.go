@@ -82,7 +82,7 @@ func testV2DeliveryIsolation(t *testing.T, dialect, dsn string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	closeRoutingTestResource(t, pool)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	row := &node.Server{Name: fmt.Sprintf("v2-isolation-%d", time.Now().UnixNano()), Address: "127.0.0.1", Protocols: `[]`}

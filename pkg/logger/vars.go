@@ -2,7 +2,6 @@ package logger
 
 import (
 	"errors"
-	"sync/atomic"
 )
 
 const (
@@ -12,7 +11,8 @@ const (
 	InfoLevel
 	// ErrorLevel includes errors, slows, stacks
 	ErrorLevel
-	// SevereLevel only log severe messages
+	// SevereLevel, the "severe" configuration level, is above every level
+	// the server writes, so it silences the log.
 	SevereLevel
 	// disableLevel doesn't log any messages
 	disableLevel = 0xff
@@ -30,20 +30,15 @@ const (
 
 	accessFilename = "access.log"
 	errorFilename  = "error.log"
-	severeFilename = "severe.log"
 	slowFilename   = "slow.log"
-	statFilename   = "stat.log"
 
 	fileMode   = "file"
 	volumeMode = "volume"
 
-	levelAlert  = "alert"
 	levelInfo   = "info"
 	levelError  = "error"
 	levelSevere = "severe"
-	levelFatal  = "fatal"
 	levelSlow   = "slow"
-	levelStat   = "stat"
 	levelDebug  = "debug"
 
 	backupFileDelimiter = "-"
@@ -67,12 +62,6 @@ var (
 	ErrLogPathNotSet = errors.New("log path must be set")
 	// ErrLogServiceNameNotSet is an error that indicates that the service name is not set.
 	ErrLogServiceNameNotSet = errors.New("log service name must be set")
-	// ExitOnFatal defines whether to exit on fatal errors, defined here to make it easier to test.
-	ExitOnFatal atomic.Bool
 
 	truncatedField = Field(truncatedKey, true)
 )
-
-func init() {
-	ExitOnFatal.Store(true)
-}

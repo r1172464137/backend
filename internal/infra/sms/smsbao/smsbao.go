@@ -1,69 +1,74 @@
+// Package smsbao sends text messages through the SMSBao HTTP API.
 package smsbao
 
 import (
+	"context"
 	"fmt"
-	"time"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 
-	"github.com/go-resty/resty/v2"
+	"github.com/perfect-panel/server/internal/infra/integration"
 	"github.com/perfect-panel/server/internal/infra/protocolkey"
-	"github.com/perfect-panel/server/pkg/templatex"
 )
 
+// BaseURL is the API the client sends to.
 const BaseURL = "https://api.smsbao.com"
 
+// maxResponseBytes bounds how much of a provider response is read; the
+// answer is a short status code.
+const maxResponseBytes = 1 << 10
+
+// Config is the stored provider configuration.
 type Config struct {
 	Access   string `json:"access"`
 	Secret   string `json:"secret"`
 	Template string `json:"template"`
 }
 
+// Client sends through one SMSBao account.
 type Client struct {
-	config *Config
-	client *resty.Client
+	config  Config
+	baseURL string
+	http    *http.Client
 }
 
-func NewClient(config Config) *Client {
-	client := resty.New()
-	client.SetBaseURL(BaseURL)
-	client.SetTimeout(10 * time.Second)
-	return &Client{
-		config: &config,
-		client: client,
-	}
+// NewClient sends through httpClient.
+func NewClient(config Config, httpClient *http.Client) *Client {
+	return &Client{config: config, baseURL: BaseURL, http: httpClient}
 }
 
-func (c *Client) SendCode(area, mobile, code string) error {
-	apiUrl := "/sms"
-	text, err := templatex.RenderToString(c.config.Template, map[string]interface{}{
-		"code": code,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to render sms template: %s", err.Error())
-	}
-	param := map[string]string{
-		"u": c.config.Access,
-		"p": protocolkey.Md5Encode(c.config.Secret, false),
-		"m": mobile,
-		"c": text,
-	}
+// SendText sends text to the number. Mainland China numbers (area 86) go
+// through the domestic endpoint without a prefix, every other number through
+// the international one in +<area><number> form.
+func (c *Client) SendText(ctx context.Context, area, mobile, text string) error {
+	path := "/sms"
+	number := mobile
 	if area != "86" {
-		apiUrl = "/wsms"
-		param["m"] = fmt.Sprintf("+%s%s", area, mobile)
+		path = "/wsms"
+		number = fmt.Sprintf("+%s%s", area, mobile)
 	}
-	resp, err := c.client.R().SetQueryParams(param).Get(apiUrl)
+	query := url.Values{
+		"u": {c.config.Access},
+		"p": {protocolkey.Md5Encode(c.config.Secret, false)},
+		"m": {number},
+		"c": {text},
+	}
+	// The account, the password hash, the number and the code travel in the
+	// URL, so a failure is reported without it (integration.RequestError).
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path+"?"+query.Encode(), nil)
+	if err != nil {
+		return integration.RequestError("smsbao", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return integration.RequestError("smsbao", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return err
 	}
-	err = parseError(resp.Body())
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *Client) GetSendCodeContent(code string) string {
-	text, _ := templatex.RenderToString(c.config.Template, map[string]interface{}{
-		"code": code,
-	})
-	return text
+	return parseError([]byte(strings.TrimSpace(string(body))))
 }

@@ -1,3 +1,5 @@
+// Package edge holds the HTTP handler of the edge manifest, authenticated by
+// the edge credential.
 package edge
 
 import (
@@ -16,10 +18,15 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var _ dto.EdgeManifestResponse
+// ManifestBuilder is the part of the network facade ManifestHandler calls.
+type ManifestBuilder interface {
+	EdgeManifest(ctx context.Context, token string) (*dto.EdgeManifestResponse, error)
+}
+
+var _ ManifestBuilder = network.Service(nil)
 
 type ManifestDeps struct {
-	Network network.Service
+	Network ManifestBuilder
 	Redis   *redis.Client
 	Config  func() config.EdgeSubscribeConfig
 }
@@ -46,7 +53,14 @@ func ManifestHandler(deps ManifestDeps) app.HandlerFunc {
 			ctx.String(consts.StatusNotFound, "Not Found")
 			return
 		}
-		claimed, err := edgeauth.ClaimManifestRequest(c, deps.Redis, kid, string(ctx.GetHeader("X-Request-ID")), config)
+		// A nil client must reach ClaimManifestRequest as a nil interface:
+		// wrapped in redis.Cmdable it would pass its fail-closed check and
+		// panic.
+		var replayCache redis.Cmdable
+		if deps.Redis != nil {
+			replayCache = deps.Redis
+		}
+		claimed, err := edgeauth.ClaimManifestRequest(c, replayCache, kid, string(ctx.GetHeader("X-Request-ID")), config)
 		if err != nil {
 			logger.WithContext(c).Errorw("[Edge Manifest] replay protection unavailable", logger.Field("error", err.Error()))
 			ctx.String(consts.StatusServiceUnavailable, "Service Unavailable")

@@ -3,45 +3,29 @@ package wallet
 import (
 	"context"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type QueryUserAffiliateListLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Query User Affiliate List
-func newQueryUserAffiliateListLogic(ctx context.Context, deps Deps) *QueryUserAffiliateListLogic {
-	return &QueryUserAffiliateListLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *QueryUserAffiliateListLogic) QueryUserAffiliateList(req *dto.QueryUserAffiliateListRequest) (resp *dto.QueryUserAffiliateListResponse, err error) {
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
+// QueryUserAffiliateList pages the accounts the current user referred, each
+// shown by a masked login identifier.
+func (s *Service) QueryUserAffiliateList(ctx context.Context, req *dto.QueryUserAffiliateListRequest) (*dto.QueryUserAffiliateListResponse, error) {
+	u, ok := user.FromContext(ctx)
 	if !ok {
-		logger.Error("current user is not found in context")
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
+		logger.WithContext(ctx).Error("current user is not found in context")
+		return nil, xerr.Errorf(xerr.InvalidAccess, "Invalid Access")
 	}
-	data, total, err := l.deps.Affiliates.QueryAffiliateList(l.ctx, u.Id, req.Page, req.Size)
+	data, total, err := s.deps.Affiliates.QueryAffiliateList(ctx, u.Id, req.Page, req.Size)
 	if err != nil {
-		l.Errorw("Query User Affiliate List failed: %v", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Query User Affiliate List failed: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "Query User Affiliate List failed")
 	}
 
 	list := make([]dto.UserAffiliate, 0)
 	for _, item := range data {
 		list = append(list, dto.UserAffiliate{
-			Identifier:   GetAuthMethod(l, item).AuthIdentifier,
+			Identifier:   s.maskedAuthMethod(ctx, item).AuthIdentifier,
 			Avatar:       item.Avatar,
 			RegisteredAt: item.CreatedAt.UnixMilli(),
 			Enable:       *item.Enable,
@@ -53,12 +37,16 @@ func (l *QueryUserAffiliateListLogic) QueryUserAffiliateList(req *dto.QueryUserA
 	}, nil
 }
 
-func GetAuthMethod(l *QueryUserAffiliateListLogic, item *user.User) user.AuthMethods {
+// maskedAuthMethod picks the login method an affiliate is shown by, auth
+// types "6" and "7" first and otherwise the first one, and masks the middle
+// third of its identifier. Methods the user row does not carry are read from
+// the identity domain; a failed read leaves the affiliate unnamed.
+func (s *Service) maskedAuthMethod(ctx context.Context, item *user.User) user.AuthMethods {
 	authMethod := user.AuthMethods{}
 	authMethods := item.AuthMethods
 	if len(authMethods) == 0 {
-		methods, errs := l.deps.AuthMethods.FindUserAuthMethods(l.ctx, item.Id)
-		if errs == nil {
+		methods, err := s.deps.AuthMethods.FindUserAuthMethods(ctx, item.Id)
+		if err == nil {
 			for _, method := range methods {
 				authMethods = append(authMethods, *method)
 			}

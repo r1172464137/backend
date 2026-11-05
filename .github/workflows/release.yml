@@ -65,6 +65,7 @@ jobs:
             ./internal/module/network/internal/serverapi \
             ./internal/module/network/transport/http/admin/server \
             ./internal/module/network/transport/http/server \
+            ./internal/module/platform/entity/system \
             ./internal/module/platform/internal/repo \
             ./internal/module/platform/internal/systemsetting \
             ./internal/module/platform/transport/http/admin/system \

@@ -2,7 +2,7 @@ package routes
 
 import (
 	"github.com/cloudwego/hertz/pkg/app/server"
-	adminAuthMethod "github.com/perfect-panel/server/internal/module/identity/transport/http/admin/authMethod"
+	adminAuthMethod "github.com/perfect-panel/server/internal/module/identity/transport/http/admin/authmethod"
 	adminServer "github.com/perfect-panel/server/internal/module/network/transport/http/admin/server"
 	adminConsole "github.com/perfect-panel/server/internal/module/platform/transport/http/admin/console"
 	adminLog "github.com/perfect-panel/server/internal/module/platform/transport/http/admin/log"
@@ -12,8 +12,7 @@ import (
 )
 
 func registerAdminAuthMethodRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/auth-method")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/auth-method")
 	group.GET("/config", adminAuthMethod.GetAuthMethodConfigHandler(deps.Identity))
 	group.PUT("/config", adminAuthMethod.UpdateAuthMethodConfigHandler(deps.Identity))
 	group.GET("/email_platform", adminAuthMethod.GetEmailPlatformHandler(deps.Identity))
@@ -24,8 +23,7 @@ func registerAdminAuthMethodRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminConsoleRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/console")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/console")
 	group.GET("/revenue", adminConsole.QueryRevenueStatisticsHandler(deps.Platform))
 	group.GET("/server", adminConsole.QueryServerTotalDataHandler(deps.Platform))
 	group.GET("/ticket", adminConsole.QueryTicketWaitReplyHandler(deps.Platform))
@@ -33,8 +31,8 @@ func registerAdminConsoleRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminLogRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/log")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/log")
+	group.GET("/admin/list", adminLog.FilterAdminActionLogHandler(deps.Platform))
 	group.GET("/balance/list", adminLog.FilterBalanceLogHandler(deps.Platform))
 	group.GET("/commission/list", adminLog.FilterCommissionLogHandler(deps.Platform))
 	group.GET("/email/list", adminLog.FilterEmailLogHandler(deps.Platform))
@@ -42,6 +40,7 @@ func registerAdminLogRoutes(router *server.Hertz, deps Dependencies) {
 	group.GET("/login/list", adminLog.FilterLoginLogHandler(deps.Platform))
 	group.GET("/message/list", adminLog.GetMessageLogListHandler(deps.Platform))
 	group.GET("/mobile/list", adminLog.FilterMobileLogHandler(deps.Platform))
+	group.GET("/payment/unmatched/list", adminLog.FilterUnmatchedPaymentLogHandler(deps.Platform))
 	group.GET("/order/list", adminLog.FilterOrderLogHandler(deps.Platform))
 	group.GET("/register/list", adminLog.FilterRegisterLogHandler(deps.Platform))
 	group.GET("/server/traffic/list", adminLog.FilterServerTrafficLogHandler(deps.Platform))
@@ -54,8 +53,7 @@ func registerAdminLogRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminServerRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/server")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/server")
 	group.POST("/create", adminServer.CreateServerHandler(deps.Network))
 	group.POST("/delete", adminServer.DeleteServerHandler(deps.Network))
 	group.GET("/list", adminServer.FilterServerListHandler(deps.Network))
@@ -74,8 +72,7 @@ func registerAdminServerRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminSystemRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/system")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/system")
 	group.GET("/interface_config", adminSystem.GetInterfaceConfigHandler(deps.Platform))
 	group.PUT("/interface_config", adminSystem.UpdateInterfaceConfigHandler(deps.Platform))
 	group.GET("/currency_config", adminSystem.GetCurrencyConfigHandler(deps.Platform))
@@ -105,8 +102,7 @@ func registerAdminSystemRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminTicketRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/ticket")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/ticket")
 	group.PUT("/", adminTicket.UpdateTicketStatusHandler(deps.Support))
 	group.GET("/detail", adminTicket.GetTicketHandler(deps.Support))
 	group.POST("/follow", adminTicket.CreateTicketFollowHandler(deps.Support))
@@ -114,10 +110,11 @@ func registerAdminTicketRoutes(router *server.Hertz, deps Dependencies) {
 }
 
 func registerAdminToolRoutes(router *server.Hertz, deps Dependencies) {
-	group := router.Group("/v1/admin/tool")
-	group.Use(deps.authMiddleware())
+	group := deps.adminGroup(router, "/v1/admin/tool")
 	group.GET("/ip/location", adminTool.QueryIPLocationHandler(deps.Platform))
 	group.GET("/log", adminTool.GetSystemLogHandler(deps.Platform))
-	group.GET("/restart", adminTool.RestartSystemHandler(deps.Platform))
+	// A restart is a mutation: it takes a POST, which a browser does not
+	// issue from a link or a prefetch.
+	group.POST("/restart", adminTool.RestartSystemHandler(deps.Platform))
 	group.GET("/version", adminTool.GetVersionHandler(deps.Platform))
 }

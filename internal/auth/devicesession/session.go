@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"time"
 	"uuid"
 
 	"github.com/redis/go-redis/v9"
@@ -17,10 +18,27 @@ const (
 	EpochClaim = "DeviceEpoch"
 )
 
+// Store is the Redis surface the generations use; *redis.Client satisfies it.
+type Store interface {
+	Get(ctx context.Context, key string) *redis.StringCmd
+	Set(ctx context.Context, key string, value any, expiration time.Duration) *redis.StatusCmd
+	SetNX(ctx context.Context, key string, value any, expiration time.Duration) *redis.BoolCmd
+}
+
 func key(id int64) string { return "auth:device_epoch:" + strconv.FormatInt(id, 10) }
 
-func Epoch(ctx context.Context, client *redis.Client, id int64) (string, error) {
-	if client == nil || id <= 0 {
+// missing reports a store that is absent, including a nil *redis.Client
+// passed as a Store.
+func missing(client Store) bool {
+	if client == nil {
+		return true
+	}
+	rdb, ok := client.(*redis.Client)
+	return ok && rdb == nil
+}
+
+func Epoch(ctx context.Context, client Store, id int64) (string, error) {
+	if missing(client) || id <= 0 {
 		return "", errors.New("device session store unavailable")
 	}
 	value, err := client.Get(ctx, key(id)).Result()
@@ -33,8 +51,8 @@ func Epoch(ctx context.Context, client *redis.Client, id int64) (string, error) 
 // AcquireEpoch is used only when issuing a new, authenticated session. A
 // missing generation during token validation must never default to an old
 // value: eviction of a key must not resurrect a previously revoked token.
-func AcquireEpoch(ctx context.Context, client *redis.Client, id int64) (string, error) {
-	if client == nil || id <= 0 {
+func AcquireEpoch(ctx context.Context, client Store, id int64) (string, error) {
+	if missing(client) || id <= 0 {
 		return "", errors.New("device session store unavailable")
 	}
 	if err := client.SetNX(ctx, key(id), uuid.NewV7().String(), 0).Err(); err != nil {
@@ -43,8 +61,8 @@ func AcquireEpoch(ctx context.Context, client *redis.Client, id int64) (string, 
 	return Epoch(ctx, client, id)
 }
 
-func Revoke(ctx context.Context, client *redis.Client, id int64) error {
-	if client == nil || id <= 0 {
+func Revoke(ctx context.Context, client Store, id int64) error {
+	if missing(client) || id <= 0 {
 		return errors.New("device session store unavailable")
 	}
 	// Do not expire the generation: an old token must not become valid again
@@ -54,7 +72,7 @@ func Revoke(ctx context.Context, client *redis.Client, id int64) error {
 
 // Binding rejects malformed and legacy unbound device sessions. IDs are
 // strings so JSON's float64 conversion cannot round a database ID.
-func Binding(claims map[string]interface{}) (id int64, epoch string, err error) {
+func Binding(claims map[string]any) (id int64, epoch string, err error) {
 	idValue, hasID := claims[IDClaim]
 	epochValue, hasEpoch := claims[EpochClaim]
 	if !hasID && !hasEpoch && claims["LoginType"] != "device" {

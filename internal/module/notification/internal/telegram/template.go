@@ -1,10 +1,12 @@
+package telegram
+
 // The templates in this file are MarkdownV2 (bold is *single asterisks*,
 // italic is _underscores_). Render them exclusively with RenderMarkdownV2 so
 // every data value is escaped; the fullwidth punctuation (！：。，) in the
 // static text needs no escaping because MarkdownV2 only reserves ASCII
 // syntax characters.
-package telegram
 
+// BindNotify tells a user that their panel account is bound to the bot.
 const BindNotify = `🤖 *尊敬的用户，您已成功绑定 Bot！*
 
 *绑定账号*: {{.Id}}
@@ -14,6 +16,7 @@ const BindNotify = `🤖 *尊敬的用户，您已成功绑定 Bot！*
 您现在可以通过该 Bot 随时管理您的账户和服务。如有任何问题，请联系客服。💬
 `
 
+// PurchaseNotify tells a user that a purchase completed.
 const PurchaseNotify = `🎉 *尊敬的用户，您已成功购买服务！*
 
 *订单编号*: {{.OrderNo}}
@@ -25,6 +28,7 @@ const PurchaseNotify = `🎉 *尊敬的用户，您已成功购买服务！*
 您的服务已成功激活，随时为您提供高速、稳定、安全的网络体验。
 如有疑问，请联系客服，我们将竭诚为您服务！💬`
 
+// RenewalNotify tells a user that a renewal completed.
 const RenewalNotify = `🎉 *尊敬的用户，您已成功续费服务！*
 
 *订单编号*: {{.OrderNo}}
@@ -36,7 +40,7 @@ const RenewalNotify = `🎉 *尊敬的用户，您已成功续费服务！*
 您的服务已成功激活，随时为您提供高速、稳定、安全的网络体验。
 如有疑问，请联系客服，我们将竭诚为您服务！💬`
 
-// RechargeNotify 充值通知
+// RechargeNotify tells a user that a balance recharge completed.
 const RechargeNotify = `💳 *尊敬的用户，您的账户充值已完成！*
 
 💰 *充值金额*: {{.OrderAmount}}
@@ -48,7 +52,7 @@ const RechargeNotify = `💳 *尊敬的用户，您的账户充值已完成！*
 余额可用于购买套餐或其他服务。
 如有疑问，请联系客服，我们将竭诚为您服务！💬`
 
-// AdminOrderNotify 管理员订单通知
+// AdminOrderNotify tells the administrators about an order.
 const AdminOrderNotify = `
 📦 *订单通知*
 
@@ -62,7 +66,7 @@ const AdminOrderNotify = `
 💳 *支付方式*: _{{.PaymentMethod}}_
 `
 
-// AdminOrderDaily 管理员每日订单统计
+// AdminOrderDaily is the administrators' daily order report.
 const AdminOrderDaily = `
 📊 *每日流水统计*
 
@@ -80,7 +84,8 @@ const AdminOrderDaily = `
 以上数据为系统自动统计，仅供参考。如需详细数据或对账，请查看管理后台。
 `
 
-// SubscribeExpireNotify 订阅到期通知
+// SubscribeExpireNotify tells a user that a subscription is about to
+// expire.
 const SubscribeExpireNotify = `尊敬的用户，您的订阅即将到期。
 
 📦 *订阅名称*: _{{.SubscribeName}}_
@@ -90,7 +95,8 @@ const SubscribeExpireNotify = `尊敬的用户，您的订阅即将到期。
 为确保服务不受影响，请尽快续费。
 如有疑问，请联系客服，我们将竭诚为您服务！💬`
 
-// UnbindNotify 解绑通知
+// UnbindNotify tells a user that their panel account was unbound from the
+// bot.
 const UnbindNotify = `🤖 尊敬的用户，您好！
 
 您的账户已成功解绑：
@@ -104,7 +110,7 @@ const UnbindNotify = `🤖 尊敬的用户，您好！
 如有任何疑问，请随时联系客服，我们将竭诚为您服务！
 感谢您的理解与支持！`
 
-// ResetTrafficNotify 重置流量通知
+// ResetTrafficNotify tells a user that a subscription's traffic was reset.
 const ResetTrafficNotify = `📊 尊敬的用户，您好！
 
 您的账户流量已成功重置：

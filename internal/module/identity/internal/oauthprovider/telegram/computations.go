@@ -15,7 +15,7 @@ import (
 // from the raw payload rather than the known struct fields: an unrecognised
 // field would otherwise be dropped here and the hash would never match.
 // Ref: https://core.telegram.org/widgets/login#checking-authorization
-func getAuthDataCheckString(raw map[string]interface{}) string {
+func getAuthDataCheckString(raw map[string]any) string {
 	fields := make([]string, 0, len(raw))
 	for key, value := range raw {
 		if key == "hash" {
@@ -40,7 +40,7 @@ func getAuthDataCheckString(raw map[string]interface{}) string {
 // formatCheckValue renders a JSON value the way Telegram had it before
 // signing. json.Unmarshal decodes every number into float64, so integral
 // values must not be printed in scientific notation.
-func formatCheckValue(value interface{}) string {
+func formatCheckValue(value any) string {
 	switch v := value.(type) {
 	case string:
 		return v
@@ -58,7 +58,7 @@ func formatCheckValue(value interface{}) string {
 
 // computeHash returns a hash calculated for the raw auth payload.
 // Ref: https://core.telegram.org/widgets/login#checking-authorization
-func computeHash(raw map[string]interface{}, botToken []byte) string {
+func computeHash(raw map[string]any, botToken []byte) string {
 	checkString := getAuthDataCheckString(raw)
 	key := sha256.Sum256(botToken)
 	h := hmac.New(sha256.New, key[:])

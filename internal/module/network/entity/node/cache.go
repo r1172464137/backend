@@ -6,6 +6,7 @@ import (
 )
 
 type (
+	// Status is the resource usage a server last reported.
 	Status struct {
 		Cpu       float64 `json:"cpu"`
 		Mem       float64 `json:"mem"`
@@ -13,10 +14,12 @@ type (
 		UpdatedAt int64   `json:"updated_at"`
 	}
 
+	// OnlineUserSubscribe maps the subscriptions online on a server to their
+	// IPs.
 	OnlineUserSubscribe map[int64][]string
 )
 
-// Marshal  to json string
+// Marshal returns the status's JSON form.
 func (s *Status) Marshal() string {
 	type Alias Status
 	data, _ := json.Marshal(&struct {
@@ -27,7 +30,7 @@ func (s *Status) Marshal() string {
 	return string(data)
 }
 
-// Unmarshal from json string
+// Unmarshal fills the status from its JSON form.
 func (s *Status) Unmarshal(data string) error {
 	type Alias Status
 	aux := &struct {

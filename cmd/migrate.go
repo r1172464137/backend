@@ -21,6 +21,7 @@ func init() {
 	flags.BoolVar(&mysql2postgresConfig.Yes, "yes", false, "confirm destructive operations")
 	flags.BoolVar(&mysql2postgresConfig.DryRun, "dry-run", false, "print plan without copying data")
 	flags.IntVar(&mysql2postgresConfig.BatchSize, "batch-size", mysql2postgresConfig.BatchSize, "rows per progress log")
+	flags.StringVar(&mysql2postgresConfig.Location, "location", mysql2postgresConfig.Location, "IANA zone the MySQL DATETIME values are in: the panel's AppLocation")
 }
 
 var migrateCmd = &cobra.Command{

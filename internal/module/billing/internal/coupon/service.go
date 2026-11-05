@@ -5,24 +5,34 @@ package coupon
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 
-	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	entity "github.com/perfect-panel/server/internal/module/billing/entity/coupon"
-	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/random"
 	"github.com/perfect-panel/server/pkg/slicesx"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 	"gorm.io/gorm"
 )
 
-type Service struct {
-	repo repository.CouponRepo
+// Coupons is the coupon persistence the administration uses; the coupon
+// repository satisfies it.
+type Coupons interface {
+	Insert(ctx context.Context, data *entity.Coupon) error
+	FindOne(ctx context.Context, id int64) (*entity.Coupon, error)
+	Update(ctx context.Context, data *entity.Coupon) error
+	Delete(ctx context.Context, id int64) error
+	BatchDelete(ctx context.Context, ids []int64) error
+	QueryCouponListByPage(ctx context.Context, page, size int, subscribe int64, search string) (total int64, list []*entity.Coupon, err error)
 }
 
-func NewService(repo repository.CouponRepo) *Service {
+// Service is the coupon administration used by the billing facade.
+type Service struct {
+	repo Coupons
+}
+
+func NewService(repo Coupons) *Service {
 	return &Service{repo: repo}
 }
 
@@ -31,9 +41,7 @@ func (s *Service) Create(ctx context.Context, req *dto.CreateCouponRequest) erro
 		return err
 	}
 	generateCode := req.Code == ""
-	couponInfo := &entity.Coupon{}
-	mapping.DeepCopy(couponInfo, req)
-	couponInfo.Subscribe = slicesx.Int64SliceToString(req.Subscribe)
+	couponInfo := couponRow(req)
 	if req.Enable == nil {
 		enabled := true
 		couponInfo.Enable = &enabled
@@ -55,8 +63,7 @@ func (s *Service) Create(ctx context.Context, req *dto.CreateCouponRequest) erro
 			break
 		}
 	}
-	logger.WithContext(ctx).Errorw("[CreateCoupon] Database Error", logger.Field("error", err.Error()))
-	return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "create coupon error: %v", err)
+	return xerr.Wrapf(err, xerr.DatabaseInsertError, "create coupon")
 }
 
 func (s *Service) Update(ctx context.Context, req *dto.UpdateCouponRequest) error {
@@ -70,36 +77,32 @@ func (s *Service) Update(ctx context.Context, req *dto.UpdateCouponRequest) erro
 	}
 	existing, err := s.repo.FindOne(ctx, req.Id)
 	if err != nil {
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find coupon error: %v", err)
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "find coupon %d", req.Id)
 	}
 	if req.UsedCount < existing.UsedCount {
-		return errors.Wrapf(xerr.NewErrCodeMsg(400, "COUPON_USED_COUNT_IMMUTABLE"), "used count cannot be reduced")
+		return xerr.Errorf(xerr.CouponUsedCountImmutable, "used count cannot be reduced")
 	}
-	couponInfo := &entity.Coupon{}
-	mapping.DeepCopy(couponInfo, req)
-	couponInfo.Subscribe = slicesx.Int64SliceToString(req.Subscribe)
+	couponInfo := couponRow(input)
+	couponInfo.Id = req.Id
 	if couponInfo.Enable == nil {
 		couponInfo.Enable = existing.Enable
 	}
 	if err := s.repo.Update(ctx, couponInfo); err != nil {
-		logger.WithContext(ctx).Errorw("[UpdateCoupon] Database Error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update coupon error: %v", err.Error())
+		return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update coupon %d", req.Id)
 	}
 	return nil
 }
 
 func (s *Service) Delete(ctx context.Context, req *dto.DeleteCouponRequest) error {
 	if err := s.repo.Delete(ctx, req.Id); err != nil {
-		logger.WithContext(ctx).Errorw("[DeleteCoupon] Database Error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseDeletedError), "delete coupon error: %v", err.Error())
+		return xerr.Wrapf(err, xerr.DatabaseDeletedError, "delete coupon %d", req.Id)
 	}
 	return nil
 }
 
 func (s *Service) BatchDelete(ctx context.Context, req *dto.BatchDeleteCouponRequest) error {
 	if err := s.repo.BatchDelete(ctx, req.Ids); err != nil {
-		logger.WithContext(ctx).Errorw("[BatchDeleteCoupon] Database Error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseDeletedError), "batch delete coupon error: %v", err.Error())
+		return xerr.Wrapf(err, xerr.DatabaseDeletedError, "batch delete coupons")
 	}
 	return nil
 }
@@ -108,38 +111,78 @@ func (s *Service) List(ctx context.Context, req *dto.GetCouponListRequest) (*dto
 	resp := &dto.GetCouponListResponse{}
 	total, list, err := s.repo.QueryCouponListByPage(ctx, int(req.Page), int(req.Size), req.Subscribe, req.Search)
 	if err != nil {
-		logger.WithContext(ctx).Errorw("[GetCouponList] Database Error", logger.Field("error", err.Error()))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "get coupon list error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "get coupon list")
 	}
 	resp.Total = total
 	resp.List = make([]dto.Coupon, 0)
 	for _, item := range list {
-		couponInfo := dto.Coupon{}
-		mapping.DeepCopy(&couponInfo, item)
-		couponInfo.Subscribe = slicesx.StringToInt64Slice(item.Subscribe)
-		resp.List = append(resp.List, couponInfo)
+		plans, parseErr := slicesx.ParseInt64CSV(item.Subscribe)
+		if parseErr != nil {
+			// A damaged plan list must not hide the whole page: the row is
+			// listed without plans so the administrator can find and repair
+			// it. Checkout keeps refusing the coupon meanwhile, as pricing
+			// reads the same column fail-closed.
+			logger.WithContext(ctx).Errorw("[GetCouponList] coupon plan list is damaged",
+				logger.Field("coupon_id", item.Id), logger.Field("error", parseErr.Error()))
+			plans = nil
+		}
+		resp.List = append(resp.List, dto.Coupon{
+			Id:         item.Id,
+			Name:       item.Name,
+			Code:       item.Code,
+			Count:      item.Count,
+			Type:       item.Type,
+			Discount:   item.Discount,
+			StartTime:  item.StartTime,
+			ExpireTime: item.ExpireTime,
+			UserLimit:  item.UserLimit,
+			Subscribe:  plans,
+			UsedCount:  item.UsedCount,
+			Enable:     item.IsEnabled(),
+			CreatedAt:  item.CreatedAt.UnixMilli(),
+			UpdatedAt:  item.UpdatedAt.UnixMilli(),
+		})
 	}
 	return resp, nil
 }
 
+// couponRow is the stored form of a coupon request: the plans it is limited
+// to become the comma-separated column. A nil Enable is left for the caller
+// to default.
+func couponRow(req *dto.CreateCouponRequest) *entity.Coupon {
+	return &entity.Coupon{
+		Name:       req.Name,
+		Code:       req.Code,
+		Count:      req.Count,
+		Type:       req.Type,
+		Discount:   req.Discount,
+		StartTime:  req.StartTime,
+		ExpireTime: req.ExpireTime,
+		UserLimit:  req.UserLimit,
+		Subscribe:  slicesx.Int64SliceToString(req.Subscribe),
+		UsedCount:  req.UsedCount,
+		Enable:     req.Enable,
+	}
+}
+
 func validateCouponInput(req *dto.CreateCouponRequest) error {
 	if req.Count < 0 || req.UsedCount < 0 || req.UserLimit < 0 || req.StartTime <= 0 || req.ExpireTime <= req.StartTime {
-		return errors.Wrapf(xerr.NewErrCodeMsg(400, "INVALID_COUPON"), "invalid coupon limits or validity window")
+		return xerr.Errorf(xerr.InvalidCoupon, "invalid coupon limits or validity window")
 	}
 	if req.Count > 0 && req.UsedCount > req.Count {
-		return errors.Wrapf(xerr.NewErrCodeMsg(400, "INVALID_COUPON"), "used count exceeds coupon count")
+		return xerr.Errorf(xerr.InvalidCoupon, "used count exceeds coupon count")
 	}
 	switch req.Type {
-	case 1:
+	case entity.TypePercentage:
 		if req.Discount <= 0 || req.Discount > 100 {
-			return errors.Wrapf(xerr.NewErrCodeMsg(400, "INVALID_COUPON_DISCOUNT"), "percentage discount must be between 1 and 100")
+			return xerr.Errorf(xerr.InvalidCouponDiscount, "percentage discount must be between 1 and 100")
 		}
-	case 2:
+	case entity.TypeFixed:
 		if req.Discount <= 0 {
-			return errors.Wrapf(xerr.NewErrCodeMsg(400, "INVALID_COUPON_DISCOUNT"), "fixed discount must be positive")
+			return xerr.Errorf(xerr.InvalidCouponDiscount, "fixed discount must be positive")
 		}
 	default:
-		return errors.Wrapf(xerr.NewErrCodeMsg(400, "INVALID_COUPON_TYPE"), "unsupported coupon type")
+		return xerr.Errorf(xerr.InvalidCouponType, "unsupported coupon type")
 	}
 	return nil
 }

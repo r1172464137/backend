@@ -17,7 +17,10 @@ package.json
 /bin
 .local/
 
-# Local agent instructions
+# Release archives assembled by the release workflow
+/dist/
+
+# Local agent instructions and sessions
 AGENT.md
 AGENTS.md
 agent.md
@@ -26,6 +29,7 @@ CLAUDE.md
 claude.md
 BRANCH_STRATEGY.md
 /.omo/
+.claude/
 
 # Plugin WASM binaries (built elsewhere)
 plugins/**/*.wasm

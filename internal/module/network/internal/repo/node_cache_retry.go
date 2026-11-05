@@ -40,6 +40,8 @@ func newServerCacheInvalidationRetrierWithFunc(invalidate func(context.Context, 
 	}
 }
 
+// Enqueue schedules the invalidation of the servers' caches, starting the
+// retry loop unless it is already running.
 func (r *ServerCacheInvalidationRetrier) Enqueue(serverIDs ...int64) {
 	if r == nil {
 		return
@@ -60,6 +62,8 @@ func (r *ServerCacheInvalidationRetrier) Enqueue(serverIDs ...int64) {
 	go r.run()
 }
 
+// run retries the pending invalidations, backing off while any fails, until
+// none is left.
 func (r *ServerCacheInvalidationRetrier) run() {
 	delay := r.delay
 	for {
@@ -77,6 +81,9 @@ func (r *ServerCacheInvalidationRetrier) run() {
 
 		failed := make(map[int64]struct{})
 		for serverID := range pending {
+			// The loop outlives the requests whose writes queued these
+			// servers and serves all of them, so it bounds each attempt
+			// under its own root context rather than any request's.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			err := r.invalidate(ctx, serverID)
 			cancel()

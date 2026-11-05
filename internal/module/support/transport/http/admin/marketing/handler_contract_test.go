@@ -7,14 +7,17 @@ import (
 	"github.com/perfect-panel/server/internal/module/support"
 )
 
+// handlerFactory compiles only for a factory that builds a native Hertz
+// handler from the facade S.
+func handlerFactory[S any](func(S) app.HandlerFunc) {}
+
 func TestHandlerFactories_return_native_hertz_handlers(t *testing.T) {
-	var _ func(support.Service) app.HandlerFunc = CreateBatchSendEmailTaskHandler
-	var _ func(support.Service) app.HandlerFunc = CreateQuotaTaskHandler
-	var _ func(support.Service) app.HandlerFunc = GetBatchSendEmailTaskListHandler
-	var _ func(support.Service) app.HandlerFunc = GetBatchSendEmailTaskStatusHandler
-	var _ func(support.Service) app.HandlerFunc = GetPreSendEmailCountHandler
-	var _ func(support.Service) app.HandlerFunc = QueryQuotaTaskListHandler
-	var _ func(support.Service) app.HandlerFunc = QueryQuotaTaskPreCountHandler
-	var _ func(support.Service) app.HandlerFunc = QueryQuotaTaskStatusHandler
-	var _ func(support.Service) app.HandlerFunc = StopBatchSendEmailTaskHandler
+	handlerFactory[support.Service](CreateBatchSendEmailTaskHandler)
+	handlerFactory[support.Service](CreateQuotaTaskHandler)
+	handlerFactory[support.Service](GetBatchSendEmailTaskListHandler)
+	handlerFactory[support.Service](GetBatchSendEmailTaskStatusHandler)
+	handlerFactory[support.Service](GetPreSendEmailCountHandler)
+	handlerFactory[support.Service](QueryQuotaTaskListHandler)
+	handlerFactory[support.Service](QueryQuotaTaskPreCountHandler)
+	handlerFactory[support.Service](StopBatchSendEmailTaskHandler)
 }

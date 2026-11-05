@@ -8,6 +8,21 @@ type TrafficAggregator = trafficagg.Aggregator
 type TrafficAggregatorDeps = trafficagg.Deps
 type UserTraffic = trafficagg.UserTraffic
 
+// TrafficAggregatorStore is the pipeline's network persistence, and
+// TrafficAggregatorAppStore the part of the application store that
+// NewTrafficAggregatorStore adapts to it.
+type (
+	TrafficAggregatorStore    = trafficagg.Store
+	TrafficAggregatorAppStore = trafficagg.AppStore
+)
+
+// NewTrafficAggregator returns the traffic pipeline over deps.
 func NewTrafficAggregator(deps TrafficAggregatorDeps) *TrafficAggregator {
 	return trafficagg.New(deps)
+}
+
+// NewTrafficAggregatorStore adapts the application store to the pipeline's
+// network persistence.
+func NewTrafficAggregatorStore(store TrafficAggregatorAppStore) TrafficAggregatorStore {
+	return trafficagg.NewStore(store)
 }

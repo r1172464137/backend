@@ -3,7 +3,6 @@ package render
 import (
 	"bytes"
 	"encoding/base64"
-	"reflect"
 	"text/template"
 	"time"
 
@@ -22,15 +21,13 @@ type Proxy struct {
 	Network string
 
 	// Security Options
-	Security          string
-	SNI               string // Server Name Indication for TLS
-	ALPN              []string
-	AllowInsecure     bool   // Allow insecure connections (skip certificate verification)
-	Fingerprint       string // Client fingerprint for TLS connections
-	RealityServerAddr string // Reality server address
-	RealityServerPort int    // Reality server port
-	RealityPublicKey  string // Reality public key for authentication
-	RealityShortId    string // Reality short ID for authentication
+	Security         string
+	SNI              string // Server Name Indication for TLS
+	ALPN             []string
+	AllowInsecure    bool   // Allow insecure connections (skip certificate verification)
+	Fingerprint      string // Client fingerprint for TLS connections
+	RealityPublicKey string // Reality public key for authentication
+	RealityShortId   string // Reality short ID for authentication
 	// Transport Options
 	Transport   string // Transport protocol (e.g., ws, http, grpc)
 	Host        string // For WebSocket/HTTP/HTTPS
@@ -83,9 +80,9 @@ type Proxy struct {
 	XhttpExtra string // xhttp path
 
 	// encryption
-	Encryption              string // encryption，'none', 'mlkem768x25519plus'
-	EncryptionMode          string // encryption mode，'native', 'xorpub', 'random'
-	EncryptionRtt           string // encryption rtt，'0rtt', '1rtt'
+	Encryption              string // encryption, 'none', 'mlkem768x25519plus'
+	EncryptionMode          string // encryption mode, 'native', 'xorpub', 'random'
+	EncryptionRtt           string // encryption rtt, '0rtt', '1rtt'
 	EncryptionClientPadding string // encryption client padding
 	EncryptionPassword      string // encryption password
 
@@ -93,11 +90,13 @@ type Proxy struct {
 	EchEnable     bool   // ECH enable
 	EchServerName string // ECH SNI
 
-	Ratio           float64 // Traffic ratio, default is 1
-	CertMode        string  // Certificate mode, `none`｜`http`｜`dns`｜`self`
-	CertDNSProvider string  // DNS provider for certificate
-	CertDNSEnv      string  // Environment for DNS provider
-	CertPinSHA256   string  // SHA256 fingerprint of the self-signed certificate (lowercase hex)
+	Ratio    float64 // Traffic ratio, default is 1
+	CertMode string  // Certificate mode, `none`|`http`|`dns`|`self`
+	// The DNS provider and its credentials (CertDNSProvider, CertDNSEnv) and
+	// the REALITY handshake target (RealityServerAddr, RealityServerPort)
+	// stay on the server: a client only needs the pin below, the SNI and the
+	// REALITY public key and short id.
+	CertPinSHA256 string // SHA256 fingerprint of the self-signed certificate (lowercase hex)
 }
 
 type User struct {
@@ -120,19 +119,34 @@ type Client struct {
 	Params         map[string]string // Additional parameters
 }
 
+// templateFuncs is sprig's text function map without the functions that
+// reach outside the template: env and expandenv read the server process
+// environment (env-based deployments keep the database and Redis
+// credentials there) and getHostByName performs DNS lookups. Templates are
+// admin-authored and their output goes to every subscriber, so none of these
+// may be reachable. The other non-hermetic helpers stay: the seeded
+// templates call now and date.
+var templateFuncs = func() template.FuncMap {
+	funcs := sprig.TxtFuncMap()
+	for _, name := range []string{"env", "expandenv", "getHostByName"} {
+		delete(funcs, name)
+	}
+	return funcs
+}()
+
 func (c *Client) Build() ([]byte, error) {
 	var buf bytes.Buffer
-	tmpl, err := template.New("client").Funcs(sprig.TxtFuncMap()).Parse(c.ClientTemplate)
+	tmpl, err := parsedTemplates.get(c.ClientTemplate)
 	if err != nil {
 		return nil, err
 	}
 
-	proxies := make([]map[string]interface{}, len(c.Proxies))
+	proxies := make([]map[string]any, len(c.Proxies))
 	for i, p := range c.Proxies {
-		proxies[i] = StructToMap(p)
+		proxies[i] = p.templateData()
 	}
 
-	err = tmpl.Execute(&buf, map[string]interface{}{
+	err = tmpl.Execute(&buf, map[string]any{
 		"SiteName":      c.SiteName,
 		"SubscribeName": c.SubscribeName,
 		"OutputFormat":  c.OutputFormat,
@@ -151,16 +165,4 @@ func (c *Client) Build() ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
-}
-
-func StructToMap(obj interface{}) map[string]interface{} {
-	m := make(map[string]interface{})
-	v := reflect.ValueOf(obj)
-	t := reflect.TypeOf(obj)
-
-	for i := 0; i < v.NumField(); i++ {
-		field := t.Field(i)
-		m[field.Name] = v.Field(i).Interface()
-	}
-	return m
 }

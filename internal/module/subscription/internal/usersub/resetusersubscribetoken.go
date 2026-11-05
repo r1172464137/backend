@@ -2,57 +2,37 @@ package usersub
 
 import (
 	"context"
-	"fmt"
-
-	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
-
 	"uuid"
 
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
+	"github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
+	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type ResetUserSubscribeTokenLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// NewResetUserSubscribeTokenLogic Reset user subscribe token
-func newResetUserSubscribeTokenLogic(ctx context.Context, deps Deps) *ResetUserSubscribeTokenLogic {
-	return &ResetUserSubscribeTokenLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *ResetUserSubscribeTokenLogic) ResetUserSubscribeToken(req *dto.ResetUserSubscribeTokenRequest) error {
-	userSub, err := l.deps.UserSubs.FindOneSubscribe(l.ctx, req.UserSubscribeId)
+// ResetUserSubscribeToken rotates the subscription URL token and the node
+// credential together: rotating only the token would leave anyone who
+// already pulled the config connected. The previous credentials read under
+// the row lock lose their cache entries with the commit.
+func (s *Service) ResetUserSubscribeToken(ctx context.Context, req *dto.ResetUserSubscribeTokenRequest) error {
+	var rotated *usersub.Subscribe
+	err := s.deps.Store.InSubscriptionTx(ctx, func(store repository.SubscriptionStore) error {
+		sub, err := store.UserSubscription().FindOneSubscribeForUpdate(ctx, req.UserSubscribeId)
+		if err != nil {
+			return xerr.Wrapf(err, xerr.DatabaseQueryError, "find subscription %d", req.UserSubscribeId)
+		}
+		rotation := repository.SubscriptionCredentialRotation{Previous: sub, Token: usersub.NewToken(), UUID: uuid.NewV4().String()}
+		if err := store.UserSubscription().RotateSubscribeCredentials(ctx, []repository.SubscriptionCredentialRotation{rotation}); err != nil {
+			return xerr.Wrapf(err, xerr.DatabaseUpdateError, "rotate credentials of subscription %d", req.UserSubscribeId)
+		}
+		rotated = sub
+		return nil
+	})
 	if err != nil {
-		logger.Errorf("[ResetUserSubscribeToken] FindOneSubscribe error: %v", err.Error())
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "FindOneSubscribe error: %v", err.Error())
+		logger.WithContext(ctx).Errorw("[ResetUserSubscribeToken] Rotate failed", logger.Field("error", err.Error()), logger.Field("user_subscribe_id", req.UserSubscribeId))
+		return err
 	}
-	userSub.Token = usersub.TokenFromOrder(fmt.Sprintf("AdminUpdate:%d", timeutil.Now().UnixMilli()))
-	userSub.UUID = uuid.NewV4().String()
-
-	err = l.deps.UserSubs.UpdateSubscribe(l.ctx, userSub)
-	if err != nil {
-		logger.Errorf("[ResetUserSubscribeToken] UpdateSubscribe error: %v", err.Error())
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "UpdateSubscribe error: %v", err.Error())
-	}
-	// Clear user subscribe cache
-	if err = l.deps.Cache.ClearSubscribeCache(l.ctx, userSub); err != nil {
-		l.Errorw("ClearSubscribeCache failed:", logger.Field("error", err.Error()), logger.Field("userSubscribeId", userSub.Id))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "ClearSubscribeCache failed: %v", err.Error())
-	}
-	// Clear subscribe cache
-	if err = l.deps.Plans.ClearCache(l.ctx, userSub.SubscribeId); err != nil {
-		l.Errorw("failed to clear subscribe cache", logger.Field("error", err.Error()), logger.Field("subscribeId", userSub.SubscribeId))
-		return errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "failed to clear subscribe cache: %v", err.Error())
-	}
-	return nil
+	// The node user lists carry the UUID.
+	return s.clearPlanCaches(ctx, rotated.SubscribeId)
 }

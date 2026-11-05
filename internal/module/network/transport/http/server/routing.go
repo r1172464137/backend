@@ -60,36 +60,8 @@ func validateRoutingDelivery(response *dto.QueryServerConfigResponse, serverID i
 		return fmt.Errorf("version 1 cannot contain identity snapshot")
 	}
 	if p.Version == config.RoutingVersion2 {
-		if response.IdentitySnapshot == nil || len(response.IdentitySnapshot.SnapshotID) != 64 {
-			return fmt.Errorf("v2 identity snapshot is required")
-		}
-		snapshot := response.IdentitySnapshot
-		if _, err := hex.DecodeString(snapshot.SnapshotID); err != nil || snapshot.SnapshotID != strings.ToLower(snapshot.SnapshotID) {
-			return fmt.Errorf("invalid snapshot ID")
-		}
-		expected := map[string]bool{}
-		for _, v := range response.Protocols {
-			expected[v.Type] = true
-		}
-		seen := map[string]bool{}
-		for _, v := range snapshot.Protocols {
-			if !expected[v.Protocol] || seen[v.Protocol] || v.Users == nil {
-				return fmt.Errorf("invalid snapshot protocol")
-			}
-			seen[v.Protocol] = true
-			ids := map[int64]bool{}
-			uuids := map[string]bool{}
-			for _, u := range v.Users {
-				parsed, err := uuid.Parse(u.UUID)
-				if err != nil || u.Id <= 0 || u.AccountID <= 0 || u.SpeedLimit < 0 || u.DeviceLimit < 0 || ids[u.Id] || uuids[parsed.String()] {
-					return fmt.Errorf("invalid snapshot user")
-				}
-				ids[u.Id] = true
-				uuids[parsed.String()] = true
-			}
-		}
-		if len(seen) != len(expected) {
-			return fmt.Errorf("snapshot missing protocol")
+		if err := validateIdentitySnapshot(response); err != nil {
+			return err
 		}
 		defaults = &p.UserDefaults
 	}
@@ -107,6 +79,43 @@ func validateRoutingDelivery(response *dto.QueryServerConfigResponse, serverID i
 	}
 	if _, err := config.ParseNodeRouting(body); err != nil {
 		return fmt.Errorf("invalid routing: %w", err)
+	}
+	return nil
+}
+
+// Validate the snapshot against exactly the delivered protocol set before an
+// ETag or 304 can acknowledge it.
+func validateIdentitySnapshot(response *dto.QueryServerConfigResponse) error {
+	snapshot := response.IdentitySnapshot
+	if snapshot == nil || len(snapshot.SnapshotID) != 64 {
+		return fmt.Errorf("v2 identity snapshot is required")
+	}
+	if _, err := hex.DecodeString(snapshot.SnapshotID); err != nil || snapshot.SnapshotID != strings.ToLower(snapshot.SnapshotID) {
+		return fmt.Errorf("invalid snapshot ID")
+	}
+	expected := map[string]bool{}
+	for _, v := range response.Protocols {
+		expected[v.Type] = true
+	}
+	seen := map[string]bool{}
+	for _, v := range snapshot.Protocols {
+		if !expected[v.Protocol] || seen[v.Protocol] || v.Users == nil {
+			return fmt.Errorf("invalid snapshot protocol")
+		}
+		seen[v.Protocol] = true
+		ids := map[int64]bool{}
+		uuids := map[string]bool{}
+		for _, u := range v.Users {
+			parsed, err := uuid.Parse(u.UUID)
+			if err != nil || u.Id <= 0 || u.AccountID <= 0 || u.SpeedLimit < 0 || u.DeviceLimit < 0 || ids[u.Id] || uuids[parsed.String()] {
+				return fmt.Errorf("invalid snapshot user")
+			}
+			ids[u.Id] = true
+			uuids[parsed.String()] = true
+		}
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("snapshot missing protocol")
 	}
 	return nil
 }

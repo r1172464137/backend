@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,11 +19,28 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestOrderRepoWritesDurableEventsWithStateTransitions(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:order-events?mode=memory&cache=shared"), &gorm.Config{})
+var memoryDatabases atomic.Int64
+
+// openMemoryDB opens an in-memory database of its own for the test, shared
+// by the pool's connections and closed with the test, so a later run in the
+// same process starts from an empty one.
+func openMemoryDB(t *testing.T, name string) *gorm.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", name, memoryDatabases.Add(1))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	return db
+}
+
+func TestOrderRepoWritesDurableEventsWithStateTransitions(t *testing.T) {
+	db := openMemoryDB(t, "order-events")
 	if err := db.AutoMigrate(&order.Order{}, &order.Event{}); err != nil {
 		t.Fatalf("migrate schema: %v", err)
 	}
@@ -75,10 +94,7 @@ func TestOrderRepoWritesDurableEventsWithStateTransitions(t *testing.T) {
 }
 
 func TestOrderEventRepoReplaysByOrderAndMarksPublished(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:order-event-replay?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
+	db := openMemoryDB(t, "order-event-replay")
 	if err := db.AutoMigrate(&order.Event{}); err != nil {
 		t.Fatalf("migrate schema: %v", err)
 	}
@@ -122,10 +138,7 @@ func TestOrderEventRepoReplaysByOrderAndMarksPublished(t *testing.T) {
 }
 
 func TestOrderStatusTransitionRollsBackWhenOutboxWriteFails(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:order-event-rollback?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
+	db := openMemoryDB(t, "order-event-rollback")
 	// Deliberately omit order_event. The state write and event write must be
 	// atomic, so a missing outbox table cannot leave a paid order with no event.
 	if err := db.AutoMigrate(&order.Order{}); err != nil {
@@ -153,10 +166,7 @@ func TestOrderStatusTransitionRollsBackWhenOutboxWriteFails(t *testing.T) {
 }
 
 func TestOrderRepoUpdateRejectsStateMutationOutsideTransition(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:order-update-state-guard?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
+	db := openMemoryDB(t, "order-update-state-guard")
 	if err := db.AutoMigrate(&order.Order{}, &order.Event{}); err != nil {
 		t.Fatalf("migrate schema: %v", err)
 	}
@@ -190,10 +200,7 @@ func TestOrderRepoUpdateRejectsStateMutationOutsideTransition(t *testing.T) {
 }
 
 func TestOrderRepoUpdatePreservesIdempotencyAndGuestHashes(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:order-update-immutable-hashes?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
+	db := openMemoryDB(t, "order-update-immutable-hashes")
 	if err := db.AutoMigrate(&order.Order{}, &order.Event{}); err != nil {
 		t.Fatalf("migrate schema: %v", err)
 	}

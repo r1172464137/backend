@@ -1,15 +1,31 @@
 package adminserver
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
-	"uuid"
 
 	"github.com/perfect-panel/server/internal/infra/protocolkey"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
 )
 
-const generatedServerKeyLength = 32
+const (
+	generatedServerKeyLength = 32
+	// generatedServerKeySeedBytes is how much randomness a generated server
+	// key is derived from.
+	generatedServerKeySeedBytes = 32
+)
+
+// randomServerKeySeed returns the random seed of a generated server key,
+// hex-encoded. The key was derived from a UUIDv7 before: at most 74 random
+// bits, and the time it was issued in the rest.
+func randomServerKeySeed() string {
+	seed := make([]byte, generatedServerKeySeedBytes)
+	// crypto/rand.Read never returns an error (Go 1.24 and later).
+	_, _ = rand.Read(seed)
+	return hex.EncodeToString(seed)
+}
 
 type realityProtocolKey struct {
 	privateKey string
@@ -49,7 +65,7 @@ func mergeMissingProtocolFields(next node.Protocol, existing node.Protocol, prov
 		return node.Protocol{}, err
 	}
 	for field, value := range existingMap {
-		if _, ok := provided[field]; !ok {
+		if !providedField(provided, field) {
 			nextMap[field] = value
 		}
 	}
@@ -62,6 +78,21 @@ func mergeMissingProtocolFields(next node.Protocol, existing node.Protocol, prov
 		return node.Protocol{}, err
 	}
 	return merged, nil
+}
+
+// providedField reports whether the request named field. The request body
+// is decoded case-insensitively, like encoding/json, so a key sent as
+// "Enable" set the enable field and counts as provided.
+func providedField(provided map[string]struct{}, field string) bool {
+	if _, ok := provided[field]; ok {
+		return true
+	}
+	for key := range provided {
+		if strings.EqualFold(key, field) {
+			return true
+		}
+	}
+	return false
 }
 
 func protocolJSONMap(protocol node.Protocol) (map[string]json.RawMessage, error) {
@@ -109,7 +140,7 @@ func ensureGeneratedProtocolKey(protocol *node.Protocol, existing map[string]str
 		protocol.ServerKey = key
 		return
 	}
-	protocol.ServerKey = protocolkey.GenerateCipher(uuid.NewV7().String(), generatedServerKeyLength)
+	protocol.ServerKey = protocolkey.GenerateCipher(randomServerKeySeed(), generatedServerKeyLength)
 }
 
 func ensureShadowsocks2022ServerKey(protocol *node.Protocol, existing map[string]string) {

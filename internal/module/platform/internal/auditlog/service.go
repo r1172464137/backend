@@ -5,25 +5,36 @@ package auditlog
 
 import (
 	"context"
+	"time"
 
-	dto "github.com/perfect-panel/server/internal/module/platform/contract"
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/module/platform/internal/readmodel"
+	"github.com/perfect-panel/server/internal/repository/kernel"
 )
 
 // TrafficReader is the subdomain's port onto the network domain's traffic
-// statistics; the legacy traffic repository satisfies it structurally.
-type TrafficReader = repository.TrafficRepo
+// statistics, typed with the platform's read models; the composition root
+// adapts the network facade to it.
+type TrafficReader interface {
+	QueryServerTrafficRanking(ctx context.Context, start, end time.Time) ([]readmodel.ServerTrafficRanking, error)
+	QueryUserTrafficRanking(ctx context.Context, start, end time.Time) ([]readmodel.UserTrafficRanking, error)
+	QueryTrafficLogDetails(ctx context.Context, filter *readmodel.TrafficLogDetailsFilter) ([]*readmodel.TrafficLog, int64, error)
+}
 
 // PlatformTransactor mirrors the store's platform-scoped transaction.
 type PlatformTransactor interface {
-	InPlatformTx(ctx context.Context, fn func(repository.PlatformStore) error) error
+	InPlatformTx(ctx context.Context, fn func(kernel.PlatformStore) error) error
 }
 
+// Deps declares the subdomain's dependencies; the module facade forwards
+// them from the composition root.
 type Deps struct {
-	Logs    repository.LogRepo
-	System  repository.SystemRepo
+	Logs    kernel.LogRepo
+	System  kernel.SystemRepo
 	Traffic TrafficReader
-	Store   PlatformTransactor
+	// TrafficRetention prunes the network's raw traffic log along with the
+	// system log.
+	TrafficRetention TrafficLogPruner
+	Store            PlatformTransactor
 	// OnLogSettingChanged propagates a committed retention change to the
 	// running configuration.
 	OnLogSettingChanged func(autoClear bool, clearDays int64)
@@ -38,74 +49,12 @@ func (d Deps) logRetention() (bool, int64) {
 	return d.LogRetention()
 }
 
+// Service serves the audit and message logs for the platform facade.
 type Service struct {
 	deps Deps
 }
 
+// NewService builds the audit log service.
 func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
-}
-
-func (s *Service) FilterBalanceLog(ctx context.Context, req *dto.FilterBalanceLogRequest) (*dto.FilterBalanceLogResponse, error) {
-	return newFilterBalanceLogLogic(ctx, s.deps).FilterBalanceLog(req)
-}
-
-func (s *Service) FilterCommissionLog(ctx context.Context, req *dto.FilterCommissionLogRequest) (*dto.FilterCommissionLogResponse, error) {
-	return newFilterCommissionLogLogic(ctx, s.deps).FilterCommissionLog(req)
-}
-
-func (s *Service) FilterEmailLog(ctx context.Context, req *dto.FilterLogParams) (*dto.FilterEmailLogResponse, error) {
-	return newFilterEmailLogLogic(ctx, s.deps).FilterEmailLog(req)
-}
-
-func (s *Service) FilterGiftLog(ctx context.Context, req *dto.FilterGiftLogRequest) (*dto.FilterGiftLogResponse, error) {
-	return newFilterGiftLogLogic(ctx, s.deps).FilterGiftLog(req)
-}
-
-func (s *Service) FilterLoginLog(ctx context.Context, req *dto.FilterLoginLogRequest) (*dto.FilterLoginLogResponse, error) {
-	return newFilterLoginLogLogic(ctx, s.deps).FilterLoginLog(req)
-}
-
-func (s *Service) FilterMobileLog(ctx context.Context, req *dto.FilterLogParams) (*dto.FilterMobileLogResponse, error) {
-	return newFilterMobileLogLogic(ctx, s.deps).FilterMobileLog(req)
-}
-
-func (s *Service) FilterOrderLog(ctx context.Context, req *dto.FilterOrderLogRequest) (*dto.FilterOrderLogResponse, error) {
-	return newFilterOrderLogLogic(ctx, s.deps).FilterOrderLog(req)
-}
-
-func (s *Service) FilterRegisterLog(ctx context.Context, req *dto.FilterRegisterLogRequest) (*dto.FilterRegisterLogResponse, error) {
-	return newFilterRegisterLogLogic(ctx, s.deps).FilterRegisterLog(req)
-}
-
-func (s *Service) FilterResetSubscribeLog(ctx context.Context, req *dto.FilterResetSubscribeLogRequest) (*dto.FilterResetSubscribeLogResponse, error) {
-	return newFilterResetSubscribeLogLogic(ctx, s.deps).FilterResetSubscribeLog(req)
-}
-
-func (s *Service) FilterServerTrafficLog(ctx context.Context, req *dto.FilterServerTrafficLogRequest) (*dto.FilterServerTrafficLogResponse, error) {
-	return newFilterServerTrafficLogLogic(ctx, s.deps).FilterServerTrafficLog(req)
-}
-
-func (s *Service) FilterSubscribeLog(ctx context.Context, req *dto.FilterSubscribeLogRequest) (*dto.FilterSubscribeLogResponse, error) {
-	return newFilterSubscribeLogLogic(ctx, s.deps).FilterSubscribeLog(req)
-}
-
-func (s *Service) FilterTrafficLogDetails(ctx context.Context, req *dto.FilterTrafficLogDetailsRequest) (*dto.FilterTrafficLogDetailsResponse, error) {
-	return newFilterTrafficLogDetailsLogic(ctx, s.deps).FilterTrafficLogDetails(req)
-}
-
-func (s *Service) FilterUserSubscribeTrafficLog(ctx context.Context, req *dto.FilterSubscribeTrafficRequest) (*dto.FilterSubscribeTrafficResponse, error) {
-	return newFilterUserSubscribeTrafficLogLogic(ctx, s.deps).FilterUserSubscribeTrafficLog(req)
-}
-
-func (s *Service) GetLogSetting(ctx context.Context) (*dto.LogSetting, error) {
-	return newGetLogSettingLogic(ctx, s.deps).GetLogSetting()
-}
-
-func (s *Service) UpdateLogSetting(ctx context.Context, req *dto.LogSetting) error {
-	return newUpdateLogSettingLogic(ctx, s.deps).UpdateLogSetting(req)
-}
-
-func (s *Service) GetMessageLogList(ctx context.Context, req *dto.GetMessageLogListRequest) (*dto.GetMessageLogListResponse, error) {
-	return newGetMessageLogListLogic(ctx, s.deps).GetMessageLogList(req)
 }

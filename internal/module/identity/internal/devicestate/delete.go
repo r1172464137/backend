@@ -1,20 +1,26 @@
 // Package devicestate owns consistent device removal shared by user and admin
 // entry points. Redis generations revoke sessions; the database transaction
-// removes both copies of the device identity.
+// removes both copies of the device identity. It also keeps the presence the
+// device WebSocket reports: the online flag and the online time of each
+// connection.
 package devicestate
 
 import (
 	"context"
+	"errors"
 
 	"github.com/perfect-panel/server/internal/auth/devicesession"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
+// Delete removes the device id with its identity and ends its sessions, in
+// one identity transaction, and returns the removed device; a device that
+// does not exist is no error and returns nil. A positive ownerID refuses a
+// device of another account.
 func Delete(ctx context.Context, store Store, client *redis.Client, id, ownerID int64) (*user.Device, error) {
 	var removed *user.Device
 	err := store.InIdentityTx(ctx, func(tx repository.IdentityStore) error {

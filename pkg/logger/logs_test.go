@@ -24,17 +24,9 @@ var (
 	_    Writer = (*mockWriter)(nil)
 )
 
-func init() {
-	ExitOnFatal.Store(false)
-}
-
 type mockWriter struct {
 	lock    sync.Mutex
 	builder strings.Builder
-}
-
-func (mw *mockWriter) Alert(v any) {
-	mw.write(levelAlert, v)
 }
 
 func (mw *mockWriter) Debug(v any, fields ...LogField) {
@@ -49,20 +41,12 @@ func (mw *mockWriter) Info(v any, fields ...LogField) {
 	mw.write(levelInfo, v, fields...)
 }
 
-func (mw *mockWriter) Severe(v any) {
-	mw.write(levelSevere, v)
-}
-
 func (mw *mockWriter) Slow(v any, fields ...LogField) {
 	mw.write(levelSlow, v, fields...)
 }
 
 func (mw *mockWriter) Stack(v any) {
 	mw.write(levelError, v)
-}
-
-func (mw *mockWriter) Stat(v any, fields ...LogField) {
-	mw.write(levelStat, v, fields...)
 }
 
 func (mw *mockWriter) write(level string, v any, fields ...LogField) {
@@ -202,22 +186,6 @@ func TestFileLineConsoleMode(t *testing.T) {
 	assert.True(t, w.Contains(fmt.Sprintf("%s:%d", file, line+1)))
 }
 
-func TestMust(t *testing.T) {
-	assert.Panics(t, func() {
-		Must(errors.New("foo"))
-	})
-}
-
-func TestStructedLogAlert(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelAlert, w, func(v ...any) {
-		Alert(fmt.Sprint(v...))
-	})
-}
-
 func TestStructedLogDebug(t *testing.T) {
 	w := new(mockWriter)
 	old := writer.Swap(w)
@@ -225,36 +193,6 @@ func TestStructedLogDebug(t *testing.T) {
 
 	doTestStructedLog(t, levelDebug, w, func(v ...any) {
 		Debug(v...)
-	})
-}
-
-func TestStructedLogDebugf(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelDebug, w, func(v ...any) {
-		Debugf("%s", fmt.Sprint(v...))
-	})
-}
-
-func TestStructedLogDebugv(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelDebug, w, func(v ...any) {
-		Debugv(fmt.Sprint(v...))
-	})
-}
-
-func TestStructedLogDebugw(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelDebug, w, func(v ...any) {
-		Debugw(fmt.Sprint(v...), Field("foo", time.Second))
 	})
 }
 
@@ -275,16 +213,6 @@ func TestStructedLogErrorf(t *testing.T) {
 
 	doTestStructedLog(t, levelError, w, func(v ...any) {
 		Errorf("%s", fmt.Sprint(v...))
-	})
-}
-
-func TestStructedLogErrorv(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelError, w, func(v ...any) {
-		Errorv(fmt.Sprint(v...))
 	})
 }
 
@@ -315,16 +243,6 @@ func TestStructedLogInfof(t *testing.T) {
 
 	doTestStructedLog(t, levelInfo, w, func(v ...any) {
 		Infof("%s", fmt.Sprint(v...))
-	})
-}
-
-func TestStructedLogInfov(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelInfo, w, func(v ...any) {
-		Infov(fmt.Sprint(v...))
 	})
 }
 
@@ -371,7 +289,7 @@ func TestStructedLogInfoConsoleAny(t *testing.T) {
 			atomic.StoreUint32(&encoding, old)
 		}()
 
-		Infov(v)
+		new(richLogger).info(v)
 	})
 }
 
@@ -387,7 +305,7 @@ func TestStructedLogInfoConsoleAnyString(t *testing.T) {
 			atomic.StoreUint32(&encoding, old)
 		}()
 
-		Infov(fmt.Sprint(v...))
+		new(richLogger).info(fmt.Sprint(v...))
 	})
 }
 
@@ -403,7 +321,7 @@ func TestStructedLogInfoConsoleAnyError(t *testing.T) {
 			atomic.StoreUint32(&encoding, old)
 		}()
 
-		Infov(errors.New(fmt.Sprint(v...)))
+		new(richLogger).info(errors.New(fmt.Sprint(v...)))
 	})
 }
 
@@ -419,7 +337,7 @@ func TestStructedLogInfoConsoleAnyStringer(t *testing.T) {
 			atomic.StoreUint32(&encoding, old)
 		}()
 
-		Infov(ValStringer{
+		new(richLogger).info(ValStringer{
 			val: fmt.Sprint(v...),
 		})
 	})
@@ -441,93 +359,13 @@ func TestStructedLogInfoConsoleText(t *testing.T) {
 	})
 }
 
-func TestStructedLogSlow(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelSlow, w, func(v ...any) {
-		Slow(v...)
-	})
-}
-
-func TestStructedLogSlowf(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelSlow, w, func(v ...any) {
-		Slowf("%s", fmt.Sprint(v...))
-	})
-}
-
-func TestStructedLogSlowv(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelSlow, w, func(v ...any) {
-		Slowv(fmt.Sprint(v...))
-	})
-}
-
-func TestStructedLogSloww(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelSlow, w, func(v ...any) {
-		Sloww(fmt.Sprint(v...), Field("foo", time.Second))
-	})
-}
-
-func TestStructedLogStat(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelStat, w, func(v ...any) {
-		Stat(v...)
-	})
-}
-
-func TestStructedLogStatf(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelStat, w, func(v ...any) {
-		Statf("%s", fmt.Sprint(v...))
-	})
-}
-
-func TestStructedLogSevere(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelSevere, w, func(v ...any) {
-		Severe(v...)
-	})
-}
-
-func TestStructedLogSeveref(t *testing.T) {
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-
-	doTestStructedLog(t, levelSevere, w, func(v ...any) {
-		Severef("%s", fmt.Sprint(v...))
-	})
-}
-
 func TestStructedLogWithDuration(t *testing.T) {
 	const message = "hello there"
 	w := new(mockWriter)
 	old := writer.Swap(w)
 	defer writer.Store(old)
 
-	WithDuration(time.Second).Info(message)
+	new(richLogger).WithDuration(time.Second).Info(message)
 	var entry map[string]any
 	if err := json.Unmarshal([]byte(w.String()), &entry); err != nil {
 		t.Error(err)
@@ -555,13 +393,11 @@ func TestSetLevelTwiceWithMode(t *testing.T) {
 	oldWriter := writer.Swap(nil)
 	oldLevel := atomic.LoadUint32(&logLevel)
 	oldEncoding := atomic.LoadUint32(&encoding)
-	oldDisableStat := atomic.LoadUint32(&disableStat)
 	setupOnce = sync.Once{}
 	t.Cleanup(func() {
 		writer.Store(oldWriter)
 		atomic.StoreUint32(&logLevel, oldLevel)
 		atomic.StoreUint32(&encoding, oldEncoding)
-		atomic.StoreUint32(&disableStat, oldDisableStat)
 		setupOnce = sync.Once{}
 	})
 
@@ -588,7 +424,7 @@ func TestSetLevelWithDuration(t *testing.T) {
 	old := writer.Swap(w)
 	defer writer.Store(old)
 
-	WithDuration(time.Second).Info(message)
+	new(richLogger).WithDuration(time.Second).Info(message)
 	assert.Equal(t, 0, w.builder.Len())
 }
 
@@ -606,15 +442,10 @@ func TestErrorfWithWrappedError(t *testing.T) {
 	assert.True(t, strings.Contains(w.String(), "hello there"))
 }
 
-func TestMustNil(t *testing.T) {
-	Must(nil)
-}
-
 func TestSetup(t *testing.T) {
 	oldWriter := writer.Load()
 	oldLevel := atomic.LoadUint32(&logLevel)
 	oldEncoding := atomic.LoadUint32(&encoding)
-	oldDisableStat := atomic.LoadUint32(&disableStat)
 	oldMaxContentLength := atomic.LoadUint32(&maxContentLength)
 	oldTimeFormat := timeFormat
 	oldFileTimeFormat := fileTimeFormat
@@ -622,7 +453,6 @@ func TestSetup(t *testing.T) {
 		writer.Store(oldWriter)
 		atomic.StoreUint32(&logLevel, oldLevel)
 		atomic.StoreUint32(&encoding, oldEncoding)
-		atomic.StoreUint32(&disableStat, oldDisableStat)
 		atomic.StoreUint32(&maxContentLength, oldMaxContentLength)
 		timeFormat = oldTimeFormat
 		fileTimeFormat = oldFileTimeFormat
@@ -630,50 +460,52 @@ func TestSetup(t *testing.T) {
 	})
 
 	setupOnce = sync.Once{}
-	MustSetup(LogConf{
+	assert.NoError(t, SetUp(LogConf{
 		ServiceName: "any",
 		Mode:        "console",
 		Encoding:    "json",
 		TimeFormat:  timeFormat,
-	})
+	}))
 	setupOnce = sync.Once{}
-	MustSetup(LogConf{
+	assert.NoError(t, SetUp(LogConf{
 		ServiceName: "any",
 		Mode:        "console",
 		TimeFormat:  timeFormat,
-	})
+	}))
 	setupOnce = sync.Once{}
-	MustSetup(LogConf{
+	assert.NoError(t, SetUp(LogConf{
 		ServiceName: "any",
 		Mode:        "file",
 		Path:        os.TempDir(),
-	})
+	}))
 	setupOnce = sync.Once{}
-	MustSetup(LogConf{
+	assert.NoError(t, SetUp(LogConf{
 		ServiceName: "any",
 		Mode:        "volume",
 		Path:        os.TempDir(),
-	})
+	}))
 	setupOnce = sync.Once{}
-	MustSetup(LogConf{
+	assert.NoError(t, SetUp(LogConf{
 		ServiceName: "any",
 		Mode:        "console",
 		TimeFormat:  timeFormat,
-	})
+	}))
 	setupOnce = sync.Once{}
-	MustSetup(LogConf{
+	assert.NoError(t, SetUp(LogConf{
 		ServiceName: "any",
 		Mode:        "console",
 		Encoding:    plainEncoding,
-	})
+	}))
 
-	defer os.RemoveAll("CD01CB7D-2705-4F3F-889E-86219BF56F10")
+	volume := t.TempDir()
 	assert.NotNil(t, setupWithVolume(LogConf{}))
 	assert.Nil(t, setupWithVolume(LogConf{
 		ServiceName: "CD01CB7D-2705-4F3F-889E-86219BF56F10",
+		Path:        volume,
 	}))
 	assert.Nil(t, setupWithVolume(LogConf{
 		ServiceName: "CD01CB7D-2705-4F3F-889E-86219BF56F10",
+		Path:        volume,
 		Rotation:    sizeRotationRule,
 	}))
 	assert.NotNil(t, setupWithFiles(LogConf{}))
@@ -697,7 +529,7 @@ func TestSetup(t *testing.T) {
 	_, err := createOutput("")
 	assert.NotNil(t, err)
 	Disable()
-	SetLevel(InfoLevel)
+	setLevel(InfoLevel)
 	atomic.StoreUint32(&encoding, jsonEncodingType)
 }
 
@@ -713,43 +545,13 @@ func TestDisable(t *testing.T) {
 	})
 
 	var opt logOptions
-	WithKeepDays(1)(&opt)
-	WithGzip()(&opt)
-	WithMaxBackups(1)(&opt)
-	WithMaxSize(1024)(&opt)
+	withKeepDays(1)(&opt)
+	withGzip()(&opt)
+	withMaxBackups(1)(&opt)
+	withMaxSize(1024)(&opt)
 	assert.Nil(t, Close())
 	assert.Nil(t, Close())
 	assert.Equal(t, uint32(disableLevel), atomic.LoadUint32(&logLevel))
-}
-
-func TestDisableStat(t *testing.T) {
-	oldDisableStat := atomic.SwapUint32(&disableStat, 1)
-	t.Cleanup(func() {
-		atomic.StoreUint32(&disableStat, oldDisableStat)
-	})
-
-	const message = "hello there"
-	w := new(mockWriter)
-	old := writer.Swap(w)
-	defer writer.Store(old)
-	Stat(message)
-	assert.Equal(t, 0, w.builder.Len())
-}
-
-func TestAddWriter(t *testing.T) {
-	oldWriter := writer.Load()
-	t.Cleanup(func() {
-		writer.Store(oldWriter)
-	})
-
-	const message = "hello there"
-	w := new(mockWriter)
-	AddWriter(w)
-	w1 := new(mockWriter)
-	AddWriter(w1)
-	Error(message)
-	assert.Contains(t, w.String(), message)
-	assert.Contains(t, w1.String(), message)
 }
 
 func TestSetWriter(t *testing.T) {
@@ -768,14 +570,14 @@ func TestSetWriter(t *testing.T) {
 }
 
 func TestWithGzip(t *testing.T) {
-	fn := WithGzip()
+	fn := withGzip()
 	var opt logOptions
 	fn(&opt)
 	assert.True(t, opt.gzipEnabled)
 }
 
 func TestWithKeepDays(t *testing.T) {
-	fn := WithKeepDays(1)
+	fn := withKeepDays(1)
 	var opt logOptions
 	fn(&opt)
 	assert.Equal(t, 1, opt.keepDays)
@@ -807,7 +609,7 @@ func BenchmarkCopyByteSlice(b *testing.B) {
 		buf = make([]byte, len(s))
 		copy(buf, s)
 	}
-	fmt.Fprint(io.Discard, buf)
+	_, _ = io.Discard.Write(buf)
 }
 
 func BenchmarkCopyOnWriteByteSlice(b *testing.B) {
@@ -816,7 +618,7 @@ func BenchmarkCopyOnWriteByteSlice(b *testing.B) {
 		size := len(s)
 		buf = s[:size:size]
 	}
-	fmt.Fprint(io.Discard, buf)
+	_, _ = io.Discard.Write(buf)
 }
 
 func BenchmarkCacheByteSlice(b *testing.B) {
@@ -894,11 +696,9 @@ func doTestStructedLogConsole(t *testing.T, w *mockWriter, write func(...any)) {
 func setTestLogState(t *testing.T, outputEncoding uint32) {
 	oldLevel := atomic.SwapUint32(&logLevel, DebugLevel)
 	oldEncoding := atomic.SwapUint32(&encoding, outputEncoding)
-	oldDisableStat := atomic.SwapUint32(&disableStat, 0)
 	t.Cleanup(func() {
 		atomic.StoreUint32(&logLevel, oldLevel)
 		atomic.StoreUint32(&encoding, oldEncoding)
-		atomic.StoreUint32(&disableStat, oldDisableStat)
 	})
 }
 
@@ -923,9 +723,7 @@ func testSetLevelTwiceWithMode(t *testing.T, mode string, w *mockWriter) {
 	assert.Equal(t, 0, w.builder.Len())
 	Infof(message)
 	assert.Equal(t, 0, w.builder.Len())
-	ErrorStack(message)
-	assert.Equal(t, 0, w.builder.Len())
-	ErrorStackf(message)
+	errorStack(message)
 	assert.Equal(t, 0, w.builder.Len())
 }
 

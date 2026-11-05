@@ -1,7 +1,8 @@
 #!/bin/sh
-# Prints release build metadata injected into internal/app/buildinfo.
-# Release CI calls this helper for every archive and reuses those binaries in
-# the container. Existing local Makefile/Dockerfile build paths are unchanged.
+# Prints the -ldflags value for go build. It is the only definition of the
+# build metadata injected into internal/app/buildinfo: the Makefile, the
+# Dockerfile and the release workflow all call it, so every artifact reports
+# its version, channel and build time the same way.
 #
 #   VERSION     version shown to operators, without the tag's leading "v"
 #               (default: "unknown version")

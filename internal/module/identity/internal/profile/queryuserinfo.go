@@ -4,44 +4,28 @@ import (
 	"context"
 	"sort"
 
-	"github.com/perfect-panel/server/internal/auth/identifier"
 	"github.com/perfect-panel/server/internal/infra/mapping"
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/identity/contract"
-	"github.com/perfect-panel/server/internal/module/identity/entity/user"
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-type QueryUserInfoLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Query User Info
-func newQueryUserInfoLogic(ctx context.Context, deps Deps) *QueryUserInfoLogic {
-	return &QueryUserInfoLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
+// QueryUserInfo returns the calling account with its wallet. Identifiers
+// other than the email address are masked, the device identifiers included:
+// they sign the devices in.
+func (s *Service) QueryUserInfo(ctx context.Context) (*dto.User, error) {
+	u, err := currentUser(ctx)
+	if err != nil {
+		return nil, err
 	}
-}
-
-func (l *QueryUserInfoLogic) QueryUserInfo() (resp *dto.User, err error) {
-	resp = &dto.User{}
-	u, ok := l.ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok {
-		logger.Error("current user is not found in context")
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
+	resp := &dto.User{}
+	if err := mapping.Copy(resp, u); err != nil {
+		return nil, xerr.Wrapf(err, xerr.ERROR, "map user %d", u.Id)
 	}
-	mapping.DeepCopy(resp, u)
 	// Wallet values come from the billing-owned table; a read failure fails
 	// the request rather than rendering zero balances (ADR-001 step 5).
-	w, werr := l.deps.Wallet.FindWallet(l.ctx, u.Id)
-	if werr != nil {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "load user wallet error: %v", werr.Error())
+	w, err := s.deps.Wallet.FindWallet(ctx, u.Id)
+	if err != nil {
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "load user wallet error: %v", err.Error())
 	}
 	if w != nil {
 		resp.Balance = w.Balance
@@ -51,32 +35,22 @@ func (l *QueryUserInfoLogic) QueryUserInfo() (resp *dto.User, err error) {
 
 	var userMethods []dto.UserAuthMethod
 	for _, method := range resp.AuthMethods {
-		var item dto.UserAuthMethod
-		mapping.DeepCopy(&item, method)
-
-		switch method.AuthType {
-		case "mobile":
-			item.AuthIdentifier = identifier.MaskPhoneNumber(method.AuthIdentifier)
-		case "email":
-		default:
-			item.AuthIdentifier = maskOpenID(method.AuthIdentifier)
-		}
-		userMethods = append(userMethods, item)
+		userMethods = append(userMethods, maskAuthMethod(method))
 	}
 
-	// 按照指定顺序排序：email第一位，mobile第二位，其他按原顺序
-	sort.Slice(userMethods, func(i, j int) bool {
+	// The email binding comes first and the mobile one second; the others
+	// keep their order.
+	sort.SliceStable(userMethods, func(i, j int) bool {
 		return getAuthTypePriority(userMethods[i].AuthType) < getAuthTypePriority(userMethods[j].AuthType)
 	})
 
 	resp.AuthMethods = userMethods
+	resp.UserDevices = maskDevices(resp.UserDevices)
 	return resp, nil
 }
 
-// getAuthTypePriority 获取认证类型的排序优先级
-// email: 1 (第一位)
-// mobile: 2 (第二位)
-// 其他类型: 100+ (后续位置)
+// getAuthTypePriority is the sort rank of a binding in the account view:
+// email 1, mobile 2, every other type 100.
 func getAuthTypePriority(authType string) int {
 	switch authType {
 	case "email":
@@ -86,22 +60,4 @@ func getAuthTypePriority(authType string) int {
 	default:
 		return 100
 	}
-}
-
-// maskOpenID 脱敏 OpenID，只保留前 3 和后 3 位
-func maskOpenID(openID string) string {
-	length := len(openID)
-	if length <= 6 {
-		return "***" // 如果 ID 太短，直接返回 "***"
-	}
-
-	// 计算中间需要被替换的 `*` 数量
-	maskLength := length - 6
-	mask := make([]byte, maskLength)
-	for i := range mask {
-		mask[i] = '*'
-	}
-
-	// 组合脱敏后的 OpenID
-	return openID[:3] + string(mask) + openID[length-3:]
 }

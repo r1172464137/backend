@@ -2,7 +2,6 @@ package repo
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -31,74 +30,14 @@ func NewTrafficRepo(db *gorm.DB) repository.TrafficRepo {
 	}
 }
 
-func (m *trafficRepo) Insert(ctx context.Context, data *traffic.TrafficLog) error {
-	return m.Conn.WithContext(ctx).Create(&data).Error
-}
-
-func (m *trafficRepo) InsertBatch(ctx context.Context, data []*traffic.TrafficLog, batchSize int, tx ...*gorm.DB) error {
+func (m *trafficRepo) InsertBatch(ctx context.Context, data []*traffic.TrafficLog, batchSize int) error {
 	if len(data) == 0 {
 		return nil
 	}
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
-	db := m.Conn
-	if len(tx) > 0 {
-		db = tx[0]
-	}
-	return db.WithContext(ctx).CreateInBatches(data, batchSize).Error
-}
-
-func (m *trafficRepo) FindOne(ctx context.Context, id int64) (*traffic.TrafficLog, error) {
-	var data traffic.TrafficLog
-	err := m.Conn.WithContext(ctx).Model(&traffic.TrafficLog{}).Where("id = ?", id).First(&data).Error
-	return &data, err
-}
-
-func (m *trafficRepo) Update(ctx context.Context, data *traffic.TrafficLog) error {
-	return m.Conn.WithContext(ctx).Save(data).Error
-}
-
-func (m *trafficRepo) Delete(ctx context.Context, id int64) error {
-	_, err := m.FindOne(ctx, id)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-
-	return m.Conn.WithContext(ctx).Delete(&traffic.TrafficLog{}, id).Error
-}
-
-func (m *trafficRepo) QueryServerTrafficByDay(ctx context.Context, serverId int64, date time.Time) (*traffic.TotalTraffic, error) {
-	var data traffic.TotalTraffic
-	start, end := trafficDayRange(date)
-	err := m.Conn.WithContext(ctx).Model(&traffic.TrafficLog{}).
-		Select(totalTrafficSelect(m.Conn)).
-		Where(fmt.Sprintf("%s = ? AND %s >= ? AND %s < ?", trafficColumn(m.Conn, "server_id"), trafficColumn(m.Conn, "timestamp"), trafficColumn(m.Conn, "timestamp")), serverId, start, end).
-		Scan(&data).Error
-	return &data, err
-}
-
-func (m *trafficRepo) QueryTrafficByDay(ctx context.Context, date time.Time) (*traffic.TotalTraffic, error) {
-	var data traffic.TotalTraffic
-	start, end := trafficDayRange(date)
-	err := m.Conn.WithContext(ctx).Model(&traffic.TrafficLog{}).
-		Select(totalTrafficSelect(m.Conn)).
-		Where(trafficTimeRangeCondition(m.Conn), start, end).
-		Scan(&data).Error
-	return &data, err
-}
-
-func (m *trafficRepo) QueryTrafficByMonthly(ctx context.Context, date time.Time) (*traffic.TotalTraffic, error) {
-	var data traffic.TotalTraffic
-	start, end := trafficMonthRange(date)
-	err := m.Conn.WithContext(ctx).Model(&traffic.TrafficLog{}).
-		Select(totalTrafficSelect(m.Conn)).
-		Where(trafficTimeRangeCondition(m.Conn), start, end).
-		Scan(&data).Error
-	return &data, err
+	return m.Conn.WithContext(ctx).CreateInBatches(data, batchSize).Error
 }
 
 func (m *trafficRepo) QueryTrafficSummary(ctx context.Context, start, end time.Time) (*traffic.TotalTraffic, error) {
@@ -123,35 +62,9 @@ func (m *trafficRepo) TopServersTrafficByDay(ctx context.Context, date time.Time
 	return summaries, err
 }
 
-func (m *trafficRepo) TopServersTrafficByMonthly(ctx context.Context, date time.Time, limit int) ([]traffic.ServerTrafficRanking, error) {
-	var summaries []traffic.ServerTrafficRanking
-	start, end := trafficMonthRange(date)
-	err := m.Conn.WithContext(ctx).Model(&traffic.TrafficLog{}).
-		Select(serverTrafficRankingSelect(m.Conn)).
-		Where(trafficTimeRangeCondition(m.Conn), start, end).
-		Group(trafficColumn(m.Conn, "server_id")).
-		Order("total DESC").
-		Limit(limit).
-		Scan(&summaries).Error
-	return summaries, err
-}
-
 func (m *trafficRepo) TopUsersTrafficByDay(ctx context.Context, date time.Time, limit int) ([]traffic.UserTrafficRanking, error) {
 	var summaries []traffic.UserTrafficRanking
 	start, end := trafficDayRange(date)
-	err := m.Conn.WithContext(ctx).Model(&traffic.TrafficLog{}).
-		Select(userTrafficRankingSelect(m.Conn)).
-		Where(trafficTimeRangeCondition(m.Conn), start, end).
-		Group(trafficColumn(m.Conn, "user_id") + ", " + trafficColumn(m.Conn, "subscribe_id")).
-		Order("total DESC").
-		Limit(limit).
-		Scan(&summaries).Error
-	return summaries, err
-}
-
-func (m *trafficRepo) TopUsersTrafficByMonthly(ctx context.Context, date time.Time, limit int) ([]traffic.UserTrafficRanking, error) {
-	var summaries []traffic.UserTrafficRanking
-	start, end := trafficMonthRange(date)
 	err := m.Conn.WithContext(ctx).Model(&traffic.TrafficLog{}).
 		Select(userTrafficRankingSelect(m.Conn)).
 		Where(trafficTimeRangeCondition(m.Conn), start, end).
@@ -234,10 +147,6 @@ func (m *trafficRepo) QueryTrafficLogDetails(ctx context.Context, filter *traffi
 	return list, total, err
 }
 
-func (m *trafficRepo) DeleteBefore(ctx context.Context, end time.Time) error {
-	return m.Conn.WithContext(ctx).Model(&traffic.TrafficLog{}).Where(trafficColumn(m.Conn, "timestamp")+" <= ?", end).Delete(&traffic.TrafficLog{}).Error
-}
-
 func (m *trafficRepo) DeleteBeforeBatch(ctx context.Context, end time.Time, limit int) (int64, error) {
 	if limit <= 0 {
 		return 0, nil
@@ -258,11 +167,6 @@ func (m *trafficRepo) DeleteBeforeBatch(ctx context.Context, end time.Time, limi
 func trafficDayRange(date time.Time) (time.Time, time.Time) {
 	start := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
 	return start, start.Add(24 * time.Hour)
-}
-
-func trafficMonthRange(date time.Time) (time.Time, time.Time) {
-	start := time.Date(date.Year(), date.Month(), 1, 0, 0, 0, 0, date.Location())
-	return start, start.AddDate(0, 1, 0)
 }
 
 func trafficTimeRangeCondition(db *gorm.DB) string {

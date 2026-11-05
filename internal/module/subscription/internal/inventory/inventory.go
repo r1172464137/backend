@@ -1,3 +1,5 @@
+// Package inventory reserves and restores plan stock for orders, each at most
+// once per order through inbox markers. Only the module facade may reach it.
 package inventory
 
 import (

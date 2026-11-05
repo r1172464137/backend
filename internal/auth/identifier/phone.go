@@ -1,18 +1,22 @@
 package identifier
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/nyaruka/phonenumbers"
 )
+
+// ErrInvalidMobile reports a phone number that does not parse.
+var ErrInvalidMobile = errors.New("invalid phone number")
 
 func Check(areaCode, telephone string) bool {
 	parsedNumber, err := phonenumbers.Parse(fmt.Sprintf("+%s%s", areaCode, telephone), areaCode)
 	if err != nil {
 		return false
 	}
-	// 检查手机号是否有效
 	return phonenumbers.IsValidNumber(parsedNumber)
 }
 
@@ -21,7 +25,6 @@ func CheckPhone(telephone string) bool {
 	if err != nil {
 		return false
 	}
-	// 检查手机号是否有效
 	return phonenumbers.IsValidNumber(parsedNumber)
 }
 
@@ -41,73 +44,76 @@ func FormatToInternational(telephone string) string {
 	return phonenumbers.Format(parsedNumber, phonenumbers.INTERNATIONAL)
 }
 
+// FormatToE164 returns the E.164 form of a phone number given as its country
+// calling code and national number, the form every sign-in, verification
+// code and binding stores and looks the number up in.
 func FormatToE164(area, phone string) (string, error) {
-	parsedNumber, err := phonenumbers.Parse(fmt.Sprintf("+%s%s", area, phone), "")
-	if err != nil {
-		return "", err
-	}
-	return phonenumbers.Format(parsedNumber, phonenumbers.E164), nil
+	return toE164(fmt.Sprintf("+%s%s", area, phone))
 }
 
-// MaskPhoneNumber 解析并脱敏电话号码
+// CanonicalMobile returns the E.164 form of a phone number written with its
+// country calling code, with or without the leading "+" and with the
+// separators people type: "86-13800138000" (the form the admin panel used to
+// store), "+86 138 0013 8000" and "8613800138000" all give "+8613800138000".
+// The number is parsed, not validated: an unassigned number still has one
+// E.164 form, the one sign-in looks it up in.
+func CanonicalMobile(number string) (string, error) {
+	number = strings.TrimSpace(number)
+	if number == "" {
+		return "", ErrInvalidMobile
+	}
+	if !strings.HasPrefix(number, "+") {
+		number = "+" + number
+	}
+	return toE164(number)
+}
+
+func toE164(number string) (string, error) {
+	parsed, err := phonenumbers.Parse(number, "")
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidMobile, err)
+	}
+	return phonenumbers.Format(parsed, phonenumbers.E164), nil
+}
+
+// MaskPhoneNumber parses a phone number and masks the middle of its national
+// part, keeping the country code, the first three and the last four digits.
 func MaskPhoneNumber(phone string) string {
-	// 解析电话号码
 	num, err := phonenumbers.Parse(phone, "")
 	if err != nil {
 		return ""
 	}
-	// 获取国际格式，如 "+1 512-345-6789"
+	// The international format, such as "+1 512-345-6789".
 	formatted := phonenumbers.Format(num, phonenumbers.INTERNATIONAL)
 
-	// 使用正则匹配国家代码和号码部分
 	re := regexp.MustCompile(`(\+\d{1,3})\s*(.*)`)
 	matches := re.FindStringSubmatch(formatted)
 	if len(matches) < 3 {
-		return formatted // 如果格式不匹配，返回原格式
+		return formatted
 	}
-
-	countryCode := matches[1] // 国家代码（如 "+1"）
-	numberPart := matches[2]  // 本地号码部分（如 "512-345-6789"）
-
-	// 根据不同国家的号码格式进行脱敏
-	maskedNumber := maskDigits(numberPart, countryCode)
-
-	// 组合脱敏后的号码
-	return fmt.Sprintf("%s %s", countryCode, maskedNumber)
+	countryCode := matches[1] // such as "+1"
+	numberPart := matches[2]  // such as "512-345-6789"
+	return fmt.Sprintf("%s %s", countryCode, maskDigits(numberPart))
 }
 
-// maskDigits 替换部分数字，保持位数和分隔符
-func maskDigits(number string, countryCode string) string {
-	// 统计数字个数
+// maskDigits replaces the digits between the first three and the last four
+// with "*", keeping the separators.
+func maskDigits(number string) string {
 	digitCount := 0
 	for _, r := range number {
 		if r >= '0' && r <= '9' {
 			digitCount++
 		}
 	}
-
-	// 处理不同国家的号码格式
 	runes := []rune(number)
 	digitIndex := 0
-
 	for i, r := range runes {
 		if r >= '0' && r <= '9' {
 			digitIndex++
-			if countryCode == "+1" { // 美国号码格式：+1 (512) ***-1278
-				if digitIndex > 3 && digitIndex <= digitCount-4 { // 只替换中间部分
-					runes[i] = '*'
-				}
-			} else if countryCode == "+86" { // 中国号码格式：+86 138 **** 5678
-				if digitIndex > 3 && digitIndex <= digitCount-4 {
-					runes[i] = '*'
-				}
-			} else { // 其他国家号码，采用类似规则
-				if digitIndex > 3 && digitIndex <= digitCount-4 {
-					runes[i] = '*'
-				}
+			if digitIndex > 3 && digitIndex <= digitCount-4 {
+				runes[i] = '*'
 			}
 		}
 	}
-
 	return string(runes)
 }

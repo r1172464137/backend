@@ -2,8 +2,10 @@ package smsbao
 
 import "fmt"
 
+// Error is a status code of the SMSBao API.
 type Error int
 
+// The status codes the API answers with.
 const (
 	Success Error = iota
 	PasswordError
@@ -34,6 +36,7 @@ var errorCodes = map[string]Error{
 	"51": MobileNumberIsIncorrect,
 }
 
+// String describes the status code.
 func (e Error) String() string {
 	for k, v := range errorDescriptions {
 		if k == e {
@@ -50,6 +53,7 @@ func parseError(b []byte) error {
 	return fmt.Errorf("unknown error")
 }
 
+// Error returns the status as an error, nil for Success.
 func (e Error) Error() error {
 	if e == Success {
 		return nil

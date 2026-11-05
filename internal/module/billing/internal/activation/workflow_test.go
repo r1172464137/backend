@@ -9,7 +9,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
 	"github.com/perfect-panel/server/internal/module/identity"
-	"github.com/perfect-panel/server/internal/repository"
+	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
@@ -17,12 +17,17 @@ import (
 var errGuestOrderBind = errors.New("order binding failed")
 
 type workflowOrders struct {
-	repository.OrderRepo
 	bindFails bool
 	boundUser int64
 }
 
-func (r *workflowOrders) Update(_ context.Context, o *order.Order, _ ...*gorm.DB) error {
+var _ WorkflowOrders = (*workflowOrders)(nil)
+
+func (r *workflowOrders) FindOneByOrderNo(context.Context, string) (*order.Order, error) {
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (r *workflowOrders) Update(_ context.Context, o *order.Order) error {
 	if r.bindFails {
 		return errGuestOrderBind
 	}
@@ -93,5 +98,41 @@ func TestDurableGuestSnapshotDoesNotRequireRedis(t *testing.T) {
 	}
 	if orders.boundUser != 11 || guests.command.PasswordHash != "durable-hash" || guests.command.LegacyPassword != "" {
 		t.Fatal("durable checkout data was not used")
+	}
+}
+
+// aliasIdentities is the identity port of the mailbox-alias check, answering
+// with one alias binding or none.
+type aliasIdentities struct{ alias *user.AuthMethods }
+
+func (aliasIdentities) FindUserAuthMethodByOpenID(context.Context, string, string) (*user.AuthMethods, error) {
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (a aliasIdentities) FindEmailAlias(context.Context, string) (*user.AuthMethods, error) {
+	if a.alias == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return a.alias, nil
+}
+
+// A mailbox that gained an account under another spelling since the purchase
+// must not get a second account; the stage reports the account the identity
+// belongs to, so the order is refunded to it.
+func TestGuestAccountStageRefusesAMailboxAlias(t *testing.T) {
+	ctx := context.Background()
+	guestOrder := &order.Order{OrderNo: "aliased", GuestAuthType: "email", GuestIdentifier: "gu.est@gmail.com", GuestPasswordHash: "durable-hash"}
+	guests := &workflowGuests{}
+	taken := aliasIdentities{alias: &user.AuthMethods{UserId: 5, AuthType: "email", AuthIdentifier: "guest@gmail.com"}}
+	workflow := NewWorkflow(WorkflowDeps{Orders: &workflowOrders{}, GuestAccounts: guests, GuestIdentities: taken}, nil)
+	var owned *guestAccountTaken
+	if err := workflow.ensureGuestAccount(ctx, guestOrder); !errors.As(err, &owned) || owned.userID != 5 || guests.creates != 0 {
+		t.Fatalf("ensureGuestAccount = %v with %d accounts created, want the identity reported as user 5's and none created", err, guests.creates)
+	}
+
+	orders := &workflowOrders{}
+	workflow = NewWorkflow(WorkflowDeps{Orders: orders, GuestAccounts: guests, GuestIdentities: aliasIdentities{}}, nil)
+	if err := workflow.ensureGuestAccount(ctx, guestOrder); err != nil || guests.creates != 1 || orders.boundUser != 11 {
+		t.Fatalf("ensureGuestAccount without an alias = %v, %d accounts, bound %d; want the account created and bound", err, guests.creates, orders.boundUser)
 	}
 }

@@ -2,315 +2,147 @@ package checkout
 
 import (
 	"context"
-	"encoding/json"
-	"slices"
-	"time"
+	"errors"
 
-	"github.com/perfect-panel/server/internal/infra/requestctx"
 	dto "github.com/perfect-panel/server/internal/module/billing/contract"
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
+	"github.com/perfect-panel/server/internal/module/billing/internal/ledger"
 	"github.com/perfect-panel/server/internal/module/billing/internal/orderaudit"
 	"github.com/perfect-panel/server/internal/module/billing/internal/ordercontext"
-	"github.com/perfect-panel/server/internal/module/identity/entity/user"
-	logEntity "github.com/perfect-panel/server/internal/module/platform/entity/log"
+	"github.com/perfect-panel/server/internal/module/billing/internal/pricing"
 	"github.com/perfect-panel/server/internal/module/subscription"
+	subscribeEntity "github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
-	"github.com/perfect-panel/server/pkg/slicesx"
-	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
-	"gorm.io/gorm"
 )
 
-// enqueueDeferredClose schedules the pending order's expiry close. Failures
-// are logged, not fatal: the pending-order reconciler re-drives expiry.
-func (s *Service) enqueueDeferredClose(ctx context.Context, tag, orderNo string) {
-	if err := s.deps.Queue.EnqueueDeferredClose(ctx, orderNo); err != nil {
-		logger.WithContext(ctx).Errorw(tag+" Enqueue task error", logger.Field("error", err.Error()), logger.Field("orderNo", orderNo))
-	} else {
-		logger.WithContext(ctx).Infow(tag+" Enqueue task success", logger.Field("orderNo", orderNo))
-	}
-}
-
-// Purchase processes new subscription purchase orders including validation, discount calculation,
-// coupon processing, gift amount deduction, fee calculation, and order creation with database transaction.
-// It handles the complete purchase workflow from user validation to order creation and task scheduling.
+// Purchase creates a pending order for a new subscription. The billing
+// transaction locks the buyer's wallet, prices the order with the gift
+// credit it holds, reserves the coupon use and the gift credit and inserts
+// the order; plan inventory is reserved afterwards in its own
+// subscription-domain transaction (ADR-001 step 2).
 func (s *Service) Purchase(ctx context.Context, req *dto.PurchaseOrderRequest) (*dto.PurchaseOrderResponse, error) {
-	log := logger.WithContext(ctx)
-	u, ok := ctx.Value(requestctx.CtxKeyUser).(*user.User)
-	if !ok {
-		logger.Error("current user is not found in context")
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidAccess), "Invalid Access")
-	}
-
-	if req.Quantity <= 0 {
-		log.Debugf("[Purchase] Quantity is less than or equal to 0, setting to 1")
-		req.Quantity = 1
-	}
-
-	// Validate quantity limit
-	if req.Quantity > MaxQuantity {
-		log.Errorw("[Purchase] Quantity exceeds maximum limit", logger.Field("quantity", req.Quantity), logger.Field("max", MaxQuantity))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "quantity exceeds maximum limit of %d", MaxQuantity)
-	}
-
-	if s.deps.SingleModel() {
-		hasBlockingSubscription, err := s.deps.UserSubs.HasBlockingSubscription(ctx, u.Id)
-		if err != nil {
-			log.Errorw("[Purchase] Database query error", logger.Field("error", err.Error()), logger.Field("user_id", u.Id))
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "check user subscription error: %v", err.Error())
-		}
-		if hasBlockingSubscription {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.UserSubscribeExist), "user has subscription")
-		}
-	}
-
-	// find subscribe plan
-	sub, err := s.deps.Plans.FindOne(ctx, req.SubscribeId)
+	u, err := currentUser(ctx)
 	if err != nil {
-		log.Errorw("[Purchase] Database query error", logger.Field("error", err.Error()), logger.Field("subscribe_id", req.SubscribeId))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find subscribe error: %v", err.Error())
-	}
-	// check subscribe plan status
-	if !*sub.Sell {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "subscribe not sell")
-	}
-
-	// check subscribe plan inventory
-	if sub.Inventory == 0 {
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.SubscribeOutOfStock), "subscribe out of stock")
-	}
-
-	// check subscribe plan limit
-	if sub.Quota > 0 {
-		count, err := s.deps.UserSubs.CountQuotaConsumingSubscriptions(ctx, u.Id, req.SubscribeId)
-		if err != nil {
-			log.Errorw("[Purchase] Database query error", logger.Field("error", err.Error()), logger.Field("user_id", u.Id), logger.Field("subscribe_id", req.SubscribeId))
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "count user subscriptions error: %v", err.Error())
-		}
-		if count >= sub.Quota {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.SubscribeQuotaLimit), "quota limit")
-		}
-	}
-
-	var discount float64 = 1
-	if sub.Discount != "" {
-		var dis []dto.BillingSubscribeDiscount
-		_ = json.Unmarshal([]byte(sub.Discount), &dis)
-		discount = getDiscount(dis, req.Quantity)
-	}
-	price := sub.UnitPrice * req.Quantity
-	// discount amount
-	amount := int64(float64(price) * discount)
-	discountAmount := price - amount
-
-	// Validate amount to prevent overflow
-	if amount > MaxOrderAmount {
-		log.Errorw("[Purchase] Order amount exceeds maximum limit",
-			logger.Field("amount", amount),
-			logger.Field("max", MaxOrderAmount),
-			logger.Field("user_id", u.Id),
-			logger.Field("subscribe_id", req.SubscribeId))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "order amount exceeds maximum limit")
-	}
-
-	var coupon int64 = 0
-	// Calculate the coupon deduction
-	if req.Coupon != "" {
-		couponInfo, err := s.deps.Coupons.FindOneByCode(ctx, req.Coupon)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errors.Wrapf(xerr.NewErrCode(xerr.CouponNotExist), "coupon not found")
-			}
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find coupon error: %v", err.Error())
-		}
-		if err := ensureCouponEnabled(couponInfo); err != nil {
-			return nil, err
-		}
-		if couponInfo.Count != 0 && couponInfo.Count <= couponInfo.UsedCount {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.CouponInsufficientUsage), "coupon used")
-		}
-		couponSub := slicesx.StringToInt64Slice(couponInfo.Subscribe)
-		if len(couponSub) > 0 && !slices.Contains(couponSub, req.SubscribeId) {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.CouponNotApplicable), "coupon not match")
-		}
-		count, err := s.deps.Orders.CountUserCouponUsage(ctx, u.Id, req.Coupon)
-		if err != nil {
-			log.Errorw("[Purchase] Database query error", logger.Field("error", err.Error()), logger.Field("user_id", u.Id), logger.Field("coupon", req.Coupon))
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find coupon error: %v", err.Error())
-		}
-		if couponInfo.UserLimit > 0 && count >= couponInfo.UserLimit {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.CouponInsufficientUsage), "coupon limit exceeded")
-		}
-		coupon = calculateCoupon(amount, couponInfo)
-	}
-	// Calculate the handling fee
-	amount -= coupon
-	// find payment method
-	payment, err := s.deps.Payments.FindOne(ctx, req.Payment)
-	if err != nil {
-		log.Errorw("[Purchase] Database query error", logger.Field("error", err.Error()), logger.Field("payment", req.Payment))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find payment method error: %v", err.Error())
-	}
-	if err := ensurePaymentAvailable(payment); err != nil {
 		return nil, err
 	}
-	var feeAmount int64
-	// Calculate the handling fee
-	if amount > 0 {
-		feeAmount = calculateFee(amount, payment)
-		amount += feeAmount
-
-		// Final validation after adding fee
-		if amount > MaxOrderAmount {
-			log.Errorw("[Purchase] Final order amount exceeds maximum limit after fee",
-				logger.Field("amount", amount),
-				logger.Field("max", MaxOrderAmount),
-				logger.Field("user_id", u.Id))
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.InvalidParams), "order amount exceeds maximum limit")
+	quantity, err := orderQuantity(req.Quantity)
+	if err != nil {
+		return nil, err
+	}
+	if s.deps.SingleModel() {
+		blocking, err := s.deps.UserSubs.HasBlockingSubscription(ctx, u.Id)
+		if err != nil {
+			return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "check subscriptions of user %d", u.Id)
+		}
+		if blocking {
+			return nil, xerr.Errorf(xerr.UserSubscribeExist, "user has subscription")
 		}
 	}
-
-	// query user is new purchase or renewal
+	plan, err := s.deps.Plans.FindOne(ctx, req.SubscribeId)
+	if err != nil {
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find subscribe %d", req.SubscribeId)
+	}
+	if err := planOnSale(plan); err != nil {
+		return nil, err
+	}
+	if plan.Inventory == 0 {
+		return nil, xerr.Errorf(xerr.SubscribeOutOfStock, "subscribe out of stock")
+	}
+	if err := s.ensureQuota(ctx, u.Id, plan); err != nil {
+		return nil, err
+	}
+	terms, err := ResolvePlanTerms(ctx, s.deps.Coupons, s.deps.Payments, plan, quantity, req.Coupon, req.Payment)
+	if err != nil {
+		return nil, err
+	}
+	if terms.Method == nil {
+		// A purchase is always paid with a method; zero names none.
+		return nil, xerr.Errorf(xerr.PaymentMethodNotFound, "payment method is required")
+	}
+	if err := ensureCouponUserLimit(ctx, s.deps.Orders, u.Id, terms.Coupon); err != nil {
+		return nil, err
+	}
+	if err := orderAmountWithinLimit(pricing.Compute(terms.Input(0)).Subtotal()); err != nil {
+		return nil, err
+	}
 	isNew, err := s.deps.Orders.IsUserEligibleForNewOrder(ctx, u.Id)
 	if err != nil {
-		log.Errorw("[Purchase] Database query error", logger.Field("error", err.Error()), logger.Field("user_id", u.Id))
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find user order error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseQueryError, "find orders of user %d", u.Id)
 	}
-	// create order
 	orderInfo := &order.Order{
-		UserId:         u.Id,
-		OrderNo:        order.GenerateTradeNo(),
-		Type:           1,
-		Quantity:       req.Quantity,
-		Price:          price,
-		Amount:         amount,
-		Discount:       discountAmount,
-		GiftAmount:     0,
-		Coupon:         req.Coupon,
-		CouponDiscount: coupon,
-		PaymentId:      payment.Id,
-		Method:         payment.Platform,
-		FeeAmount:      feeAmount,
-		Status:         1,
-		IsNew:          isNew,
-		SubscribeId:    req.SubscribeId,
+		UserId:      u.Id,
+		OrderNo:     order.GenerateTradeNo(),
+		Type:        order.TypeSubscribe,
+		Quantity:    quantity,
+		Coupon:      req.Coupon,
+		PaymentId:   terms.Method.Id,
+		Method:      terms.Method.Platform,
+		Status:      order.StatusPending,
+		IsNew:       isNew,
+		SubscribeId: req.SubscribeId,
 	}
 	ordercontext.ApplyIdempotency(ctx, orderInfo)
-	err = s.deps.Store.InBillingTx(ctx, func(txStore repository.BillingStore) error {
-		// The request-context user is only an authentication snapshot. Lock and
-		// re-read the account before reserving gift credit so two concurrent
-		// orders cannot spend the same balance.
-		lockedUser, e := txStore.Wallet().FindOneForUpdate(ctx, u.Id)
-		if e != nil {
-			return e
+	err = s.deps.Tx.InBillingTx(ctx, func(tx repository.BillingStore) error {
+		wallet, err := lockWallet(ctx, tx, u.Id)
+		if err != nil {
+			return err
 		}
-
-		if sub.Quota > 0 {
-			// The quota re-check reads the subscription domain through the
-			// module port. The wallet row lock above serialises concurrent
-			// purchases by the same user; it does NOT serialise against the
-			// activation worker fulfilling an earlier paid order (that lock
-			// moved off the user row with the wallet split), so a
-			// concurrently fulfilled subscription can be missed here. The
-			// authoritative gate is fulfillment's own re-check under its
-			// user-row lock, which rejects over-quota activation.
-			count, e := s.deps.UserSubs.CountQuotaConsumingSubscriptions(ctx, u.Id, req.SubscribeId)
-			if e != nil {
-				log.Errorw("[Purchase] Database query error", logger.Field("error", e.Error()), logger.Field("user_id", u.Id), logger.Field("subscribe_id", req.SubscribeId))
-				return e
-			}
-			if count >= sub.Quota {
-				return errors.Wrapf(xerr.NewErrCode(xerr.SubscribeQuotaLimit), "quota limit")
-			}
+		if err := ensureCouponUserLimit(ctx, tx.Order(), u.Id, terms.Coupon); err != nil {
+			return err
 		}
-		if orderInfo.Coupon != "" {
-			reserved, e := txStore.Coupon().ReserveUsage(ctx, orderInfo.Coupon, timeutil.Now().UnixMilli())
-			if e != nil {
-				return e
-			}
-			if !reserved {
-				return errors.Wrapf(xerr.NewErrCode(xerr.CouponInsufficientUsage), "coupon used or expired")
-			}
-			orderInfo.CouponReserved = true
+		// The wallet row lock serializes concurrent purchases by the same
+		// user; it does NOT serialize against the activation worker
+		// fulfilling an earlier paid order, so a concurrently fulfilled
+		// subscription can be missed here. The authoritative gate is
+		// fulfillment's own re-check under its user-row lock, which rejects
+		// over-quota activation.
+		if err := s.ensureQuota(ctx, u.Id, plan); err != nil {
+			return err
 		}
-
-		// Gift credit is reserved only after the row lock.  The fee has already
-		// been calculated on the full external payable amount by design.
-		if lockedUser.GiftAmount > 0 && orderInfo.Amount > 0 {
-			orderInfo.GiftAmount = min(lockedUser.GiftAmount, orderInfo.Amount)
-			orderInfo.Amount -= orderInfo.GiftAmount
+		ApplyQuote(orderInfo, pricing.Compute(terms.Input(wallet.GiftAmount)))
+		if err := orderAmountWithinLimit(orderInfo.Amount); err != nil {
+			return err
 		}
-		if orderInfo.GiftAmount > 0 {
-			lockedUser.GiftAmount -= orderInfo.GiftAmount
-			if e := txStore.Wallet().UpdateBalanceFields(ctx, lockedUser); e != nil {
-				log.Errorw("[Purchase] Database update error", logger.Field("error", e.Error()), logger.Field("user", lockedUser))
-				return e
-			}
-			// create deduction record
-			giftLog := logEntity.Gift{
-				Type:        logEntity.GiftTypeReduce,
-				OrderNo:     orderInfo.OrderNo,
-				SubscribeId: 0,
-				Amount:      orderInfo.GiftAmount,
-				Balance:     lockedUser.GiftAmount,
-				Remark:      "Purchase order deduction",
-				Timestamp:   timeutil.Now().UnixMilli(),
-			}
-			content, _ := giftLog.Marshal()
-
-			if e := txStore.Log().Insert(ctx, &logEntity.SystemLog{
-				Type:     logEntity.TypeGift.Uint8(),
-				Date:     timeutil.Now().Format(time.DateOnly),
-				ObjectID: lockedUser.UserId,
-				Content:  string(content),
-			}); e != nil {
-				log.Errorw("[Purchase] Database insert error",
-					logger.Field("error", e.Error()),
-					logger.Field("deductionLog", giftLog),
-				)
-				return e
-			}
+		if err := ReserveCoupon(ctx, tx, orderInfo); err != nil {
+			return err
 		}
-
-		// The order and its audit trail are one atomic billing operation.
-		if e := txStore.Order().Insert(ctx, orderInfo); e != nil {
-			return e
+		if err := spendGift(ctx, tx, wallet, orderInfo, ledger.RemarkPurchaseDeduction); err != nil {
+			return err
 		}
-		return orderaudit.InsertCreated(ctx, txStore.Log(), orderInfo, orderaudit.SourceUser)
+		return InsertOrder(ctx, tx, orderInfo, orderaudit.SourceUser)
 	})
 	if err != nil {
-		log.Errorw("[Purchase] Database insert error", logger.Field("error", err.Error()), logger.Field("orderInfo", orderInfo))
-		var codeErr *xerr.CodeError
-		if errors.As(err, &codeErr) {
-			return nil, err
-		}
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "insert order error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.DatabaseInsertError, "create purchase order")
 	}
-	// Reserve plan inventory in its own subscription-domain transaction
-	// (ADR-001 step 2). On failure the just-created order is closed, which
-	// releases the coupon reservation and refunds the gift deduction; the
+	// On an inventory failure the just-created order is closed, which
+	// releases the coupon reservation and refunds the gift credit; the
 	// restore step no-ops because nothing was reserved.
-	if err := s.reserveInventory(ctx, orderInfo.OrderNo, sub.Id); err != nil {
+	if err := s.deps.Inventory.Reserve(ctx, orderInfo.OrderNo, plan.Id); err != nil {
 		if closeErr := s.Close(ctx, &dto.CloseOrderRequest{OrderNo: orderInfo.OrderNo}); closeErr != nil {
-			log.Errorw("[Purchase] Close order after reservation failure failed", logger.Field("error", closeErr.Error()), logger.Field("orderNo", orderInfo.OrderNo))
+			logger.WithContext(ctx).Errorw("[Purchase] Close order after reservation failure failed", logger.Field("error", closeErr.Error()), logger.Field("orderNo", orderInfo.OrderNo))
 		}
 		if errors.Is(err, subscription.ErrOutOfStock) {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.SubscribeOutOfStock), "subscribe out of stock")
+			return nil, xerr.Errorf(xerr.SubscribeOutOfStock, "subscribe out of stock")
 		}
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "reserve inventory error: %v", err.Error())
+		return nil, xerr.Wrapf(err, xerr.ERROR, "reserve inventory")
 	}
-	// Deferred task
 	s.enqueueDeferredClose(ctx, "[Purchase]", orderInfo.OrderNo)
-
-	return &dto.PurchaseOrderResponse{
-		OrderNo: orderInfo.OrderNo,
-	}, nil
+	return &dto.PurchaseOrderResponse{OrderNo: orderInfo.OrderNo}, nil
 }
 
-// reserveInventory reserves one plan inventory unit for the order in its own
-// subscription-domain transaction (idempotent via the domain event inbox).
-func (s *Service) reserveInventory(ctx context.Context, orderNo string, subscribeID int64) error {
-	return s.deps.Inventory.Reserve(ctx, orderNo, subscribeID)
+// ensureQuota rejects a purchase beyond the plan's per-user quota.
+func (s *Service) ensureQuota(ctx context.Context, userID int64, plan *subscribeEntity.Subscribe) error {
+	if plan.Quota <= 0 {
+		return nil
+	}
+	count, err := s.deps.UserSubs.CountQuotaConsumingSubscriptions(ctx, userID, plan.Id)
+	if err != nil {
+		return xerr.Wrapf(err, xerr.DatabaseQueryError, "count subscriptions of user %d", userID)
+	}
+	if count >= plan.Quota {
+		return xerr.Errorf(xerr.SubscribeQuotaLimit, "quota limit")
+	}
+	return nil
 }

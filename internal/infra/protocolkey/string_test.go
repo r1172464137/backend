@@ -10,11 +10,16 @@ func TestFixedUniqueString(t *testing.T) {
 	c := "example"
 
 	strA1, err := FixedUniqueString(a, 8, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	strB1, err := FixedUniqueString(b, 8, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	strC1, err := FixedUniqueString(c, 8, "")
 	if err != nil {
-		t.Logf("Error: %v", err.Error())
-		return
+		t.Fatal(err)
 	}
 	if strA1 != strC1 {
 		t.Errorf("Expected strA1 and strC1 to be equal, got %s and %s", strA1, strC1)

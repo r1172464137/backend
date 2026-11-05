@@ -3,34 +3,29 @@ package order
 import (
 	cryptorand "crypto/rand"
 	"fmt"
-	"io"
 	"math/big"
-	"time"
+
+	"github.com/perfect-panel/server/pkg/timeutil"
 )
 
-const (
-	tradeNoTimestampLayout = "20060102150405"
-	tradeNoSuffixSpace     = 100_000_000
-)
+// tradeNoRandomDigits is the width of the random part of a trade number. With
+// the second-resolution timestamp in front, two numbers collide only when
+// they are made in the same second and draw the same 14 digits: for 10,000
+// numbers in one second that is a 5·10⁻⁷ chance (8 digits made it 39%). The
+// database's unique trade-no index would turn a collision into a failed
+// purchase.
+const tradeNoRandomDigits = 14
+
+var tradeNoRandomBound = new(big.Int).Exp(big.NewInt(10), big.NewInt(tradeNoRandomDigits), nil)
 
 // GenerateTradeNo returns a fixed-width numeric trade number: a 14-digit
-// timestamp plus an 8-digit value sampled uniformly with crypto/rand. The
-// random suffix reduces collisions but does not promise uniqueness; the
-// database's unique order_no constraint remains the final arbiter.
+// timestamp in the application's time zone followed by 14 uniformly random
+// digits from crypto/rand. crypto/rand cannot fail in practice; the panic
+// matches how the password salt handles the same error.
 func GenerateTradeNo() string {
-	tradeNo, err := generateTradeNo(time.Now(), cryptorand.Reader)
+	n, err := cryptorand.Int(cryptorand.Reader, tradeNoRandomBound)
 	if err != nil {
 		panic(fmt.Errorf("generate trade number entropy: %w", err))
 	}
-	return tradeNo
-}
-
-// generateTradeNo accepts its clock and entropy as values so the format and
-// entropy contract can be tested without probabilistic uniqueness assertions.
-func generateTradeNo(now time.Time, entropy io.Reader) (string, error) {
-	suffix, err := cryptorand.Int(entropy, big.NewInt(tradeNoSuffixSpace))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s%08d", now.Format(tradeNoTimestampLayout), suffix.Int64()), nil
+	return timeutil.Now().Format("20060102150405") + fmt.Sprintf("%0*d", tradeNoRandomDigits, n)
 }

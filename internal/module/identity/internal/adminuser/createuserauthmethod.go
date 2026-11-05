@@ -4,44 +4,31 @@ import (
 	"context"
 	"strings"
 
+	dto "github.com/perfect-panel/server/internal/module/identity/contract"
 	"github.com/perfect-panel/server/internal/module/identity/entity/user"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
-
-	dto "github.com/perfect-panel/server/internal/module/identity/contract"
-	"github.com/perfect-panel/server/pkg/logger"
 )
 
-type CreateUserAuthMethodLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Create user auth method
-func newCreateUserAuthMethodLogic(ctx context.Context, deps Deps) *CreateUserAuthMethodLogic {
-	return &CreateUserAuthMethodLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *CreateUserAuthMethodLogic) CreateUserAuthMethod(req *dto.CreateUserAuthMethodRequest) error {
+// CreateUserAuthMethod binds an identity to an account, or replaces the
+// account's identity of that type. Emails and phone numbers are stored
+// normalized, and one that cannot be is refused.
+func (s *Service) CreateUserAuthMethod(ctx context.Context, req *dto.CreateUserAuthMethodRequest) error {
 	if strings.EqualFold(strings.TrimSpace(req.AuthType), "device") {
-		return errors.Wrap(xerr.NewErrCode(xerr.InvalidParams), "use device management for device identities")
+		return xerr.Errorf(xerr.InvalidParams, "use device management for device identities")
 	}
-	err := l.deps.Store.InIdentityTx(l.ctx, func(store repository.IdentityStore) error {
-		return store.UserAuth().UpsertUserAuthMethod(l.ctx, &user.AuthMethods{
+	err := s.deps.Store.InIdentityTx(ctx, func(store repository.IdentityStore) error {
+		// An administrator's binding vouches for the identity, so it signs
+		// in like one the user bound through the provider.
+		return store.UserAuth().UpsertUserAuthMethod(ctx, &user.AuthMethods{
 			UserId:         req.UserId,
 			AuthType:       req.AuthType,
 			AuthIdentifier: req.AuthIdentifier,
+			Verified:       true,
 		})
 	})
 	if err != nil {
-		l.Errorw("[CreateUserAuthMethodLogic] Create User Auth Method Error:", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseInsertError), "Create User Auth Method Error")
+		return xerr.Wrapf(err, xerr.DatabaseInsertError, "bind %s identity to user %d", req.AuthType, req.UserId)
 	}
 	return nil
 }

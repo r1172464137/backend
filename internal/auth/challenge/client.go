@@ -1,3 +1,5 @@
+// Package challenge verifies Cloudflare Turnstile tokens, the human check
+// guarding sign-in, registration, password resets and guest purchases.
 package challenge
 
 import (
@@ -5,43 +7,27 @@ import (
 	"time"
 )
 
-// Config is the configuration for the service.
+// SiteVerifyURL is Cloudflare's Turnstile verification endpoint.
+const SiteVerifyURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+// Config configures a Turnstile client.
 type Config struct {
-	// Secret is the secret key used to verify the token.
-	// This is required.
+	// Secret is the site's Turnstile secret key; required.
 	Secret string
-
-	// Timeout is the timeout for the service.
-	// This is optional.
-	// Default: 10 seconds
+	// Timeout bounds one verification; 10 seconds when zero.
 	Timeout time.Duration
+	// URL is the verification endpoint; SiteVerifyURL when empty.
+	URL string
 }
 
-// Service is the interface for the service.
-// It is used to verify the token.
-// It is also used to generate a random UUID.
+// Service verifies Turnstile tokens.
 type Service interface {
-	// Verify is used to verify the token.
-	// It returns true if the token is valid.
-	// It returns false if the token is invalid.
-	// It returns an error if there was an error verifying the token.
+	// Verify reports whether token is a valid Turnstile response issued to
+	// the client at ip. An error means the verification could not be done.
 	Verify(ctx context.Context, token string, ip string) (bool, error)
-
-	// VerifyIdempotent is used to verify the token.
-	// The key parameter is used to ensure idempotency.
-	// You may use the RandomUUID method to generate a random UUID.
-	// It returns true if the token is valid.
-	// It returns false if the token is invalid.
-	// It returns an error if there was an error verifying the token.
-	VerifyIdempotent(ctx context.Context, token string, ip string, key string) (bool, error)
-
-	// RandomUUID is used to generate a random UUID.
-	// It returns a random UUID.
-	RandomUUID() string
 }
 
-// New is used to create a new service.
-// It returns a new service.
+// New returns a Turnstile client.
 func New(config Config) Service {
 	return newService(config)
 }

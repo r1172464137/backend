@@ -2,11 +2,15 @@ package dto
 
 // V2GuestOrderRequest contains the account information held until a guest
 // purchase is activated. It is only accepted for anonymous purchase orders.
+// AuthType is email or mobile; a mobile identifier includes its country
+// calling code. TurnstileToken is required when registration verification is
+// enabled and is not part of the idempotent request identity.
 type V2GuestOrderRequest struct {
-	AuthType   string `json:"auth_type"`
-	Identifier string `json:"identifier"`
-	Password   string `json:"password"`
-	InviteCode string `json:"invite_code,omitempty"`
+	AuthType       string `json:"auth_type" enums:"email,mobile"`
+	Identifier     string `json:"identifier"`
+	Password       string `json:"password"`
+	InviteCode     string `json:"invite_code,omitempty"`
+	TurnstileToken string `json:"turnstile_token,omitempty"`
 }
 
 type V2CreateOrderRequest struct {

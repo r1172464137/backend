@@ -6,20 +6,19 @@ package settle
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/perfect-panel/server/internal/module/billing/entity/order"
-	"github.com/perfect-panel/server/internal/repository"
-	"github.com/pkg/errors"
 )
 
-// Order status values of the billing state machine.
-const (
-	StatusPending  = uint8(1)
-	StatusPaid     = uint8(2)
-	StatusFinished = uint8(5)
-)
+// Orders is the order persistence settlement needs.
+type Orders interface {
+	FindOneByOrderNo(ctx context.Context, orderNo string) (*order.Order, error)
+	MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, error)
+}
 
 // Queue schedules order activation; the module's order queue port satisfies it.
 type Queue interface {
@@ -44,7 +43,7 @@ func ValidateTradeNo(tradeNo string) error {
 // previously failed queue insertion, while the deterministic activation task
 // ID prevents concurrent settlements from activating the order twice. Callers
 // must authenticate the gateway response and verify the order amount first.
-func VerifiedPayment(ctx context.Context, orders repository.OrderRepo, queue Queue, orderInfo *order.Order, tradeNo string) error {
+func VerifiedPayment(ctx context.Context, orders Orders, queue Queue, orderInfo *order.Order, tradeNo string) error {
 	if err := ValidateTradeNo(tradeNo); err != nil {
 		return err
 	}
@@ -53,13 +52,13 @@ func VerifiedPayment(ctx context.Context, orders repository.OrderRepo, queue Que
 	}
 
 	switch orderInfo.Status {
-	case StatusFinished:
+	case order.StatusFinished:
 		return nil
-	case StatusPaid:
+	case order.StatusPaid:
 		// A prior settlement may have committed the database update but failed
 		// to contact Redis. Re-enqueue below so retries heal that partial
 		// failure.
-	case StatusPending:
+	case order.StatusPending:
 		updated, err := orders.MarkOrderPaid(ctx, orderInfo.OrderNo, tradeNo)
 		if err != nil {
 			return err
@@ -72,15 +71,15 @@ func VerifiedPayment(ctx context.Context, orders repository.OrderRepo, queue Que
 			if latest.TradeNo != "" && latest.TradeNo != tradeNo {
 				return errors.New("order trade number mismatch")
 			}
-			if latest.Status == StatusFinished {
+			if latest.Status == order.StatusFinished {
 				return nil
 			}
-			if latest.Status != StatusPaid {
-				return errors.Errorf("invalid order status transition: %d", latest.Status)
+			if latest.Status != order.StatusPaid {
+				return fmt.Errorf("invalid order status transition: %d", latest.Status)
 			}
 		}
 	default:
-		return errors.Errorf("invalid order status transition: %d", orderInfo.Status)
+		return fmt.Errorf("invalid order status transition: %d", orderInfo.Status)
 	}
 
 	return queue.EnqueueActivation(ctx, orderInfo.OrderNo)

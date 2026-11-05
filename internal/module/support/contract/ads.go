@@ -1,3 +1,6 @@
+// Package dto holds the support module's contract: the requests and responses
+// of the ticket, announcement, document, ads and marketing endpoints. The Go
+// package keeps the name dto so the Swagger schema names (dto.*) stay stable.
 package dto
 
 type Ads struct {

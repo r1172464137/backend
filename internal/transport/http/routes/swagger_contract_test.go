@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	httpserver "github.com/perfect-panel/server/internal/transport/http/server"
+
 	"github.com/cloudwego/hertz/pkg/app/server"
 	billingHTTP "github.com/perfect-panel/server/internal/module/billing/transport/http"
 	notificationHTTP "github.com/perfect-panel/server/internal/module/notification/transport/http"
@@ -49,7 +51,10 @@ func TestSwaggerCoversHertzRoutes(t *testing.T) {
 	engine := server.New()
 	routes.RegisterHandlers(engine, deps)
 	notificationHTTP.RegisterTelegramHandlers(engine, nil, func() string { return "" })
-	billingHTTP.RegisterNotifyHandlers(engine, deps.Store, deps.Billing)
+	billingHTTP.RegisterNotifyHandlers(engine, deps.Billing)
+	// The health endpoints are registered by the composition root, next to
+	// the routes; they are part of the documented surface.
+	httpserver.RegisterHealthHandlers(engine, httpserver.HealthDependencies{})
 
 	document := readSwaggerDocument(t)
 	want := make(map[string]bool)

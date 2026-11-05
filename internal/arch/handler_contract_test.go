@@ -7,8 +7,7 @@ import (
 	"github.com/perfect-panel/server/internal/module/billing"
 	"github.com/perfect-panel/server/internal/module/billing/transport/http/admin/coupon"
 	"github.com/perfect-panel/server/internal/module/identity"
-	"github.com/perfect-panel/server/internal/module/identity/transport/http/admin/authMethod"
-	"github.com/perfect-panel/server/internal/module/platform"
+	"github.com/perfect-panel/server/internal/module/identity/transport/http/admin/authmethod"
 	"github.com/perfect-panel/server/internal/module/platform/transport/http/admin/console"
 	adminlog "github.com/perfect-panel/server/internal/module/platform/transport/http/admin/log"
 	"github.com/perfect-panel/server/internal/module/subscription"
@@ -19,62 +18,67 @@ import (
 	"github.com/perfect-panel/server/internal/module/support/transport/http/admin/document"
 )
 
+// handlerFactory compiles only when its argument takes exactly the facade S
+// and returns Hertz's native handler type. The explicit type argument makes
+// the call the check, so it has no effect at run time.
+func handlerFactory[S any](func(S) app.HandlerFunc) {}
+
 func TestHandlerFactories_returnNativeHertzHandlers(t *testing.T) {
 	// Given all owned admin handler factories
 	// When their factory signatures are checked at compile time
 	// Then each factory returns Hertz's native handler type.
 	_ = t
-	var _ func(support.Service) app.HandlerFunc = ads.CreateAdsHandler
-	var _ func(support.Service) app.HandlerFunc = ads.DeleteAdsHandler
-	var _ func(support.Service) app.HandlerFunc = ads.GetAdsDetailHandler
-	var _ func(support.Service) app.HandlerFunc = ads.GetAdsListHandler
-	var _ func(support.Service) app.HandlerFunc = ads.UpdateAdsHandler
-	var _ func(support.Service) app.HandlerFunc = announcement.CreateAnnouncementHandler
-	var _ func(support.Service) app.HandlerFunc = announcement.DeleteAnnouncementHandler
-	var _ func(support.Service) app.HandlerFunc = announcement.GetAnnouncementHandler
-	var _ func(support.Service) app.HandlerFunc = announcement.GetAnnouncementListHandler
-	var _ func(support.Service) app.HandlerFunc = announcement.UpdateAnnouncementHandler
-	var _ func(subscription.Service) app.HandlerFunc = application.CreateSubscribeApplicationHandler
-	var _ func(subscription.Service) app.HandlerFunc = application.DeleteSubscribeApplicationHandler
-	var _ func(subscription.Service) app.HandlerFunc = application.GetSubscribeApplicationListHandler
-	var _ func(subscription.Service) app.HandlerFunc = application.PreviewSubscribeTemplateHandler
-	var _ func(subscription.Service) app.HandlerFunc = application.UpdateSubscribeApplicationHandler
-	var _ func(identity.Service) app.HandlerFunc = authMethod.GetAuthMethodConfigHandler
-	var _ func(identity.Service) app.HandlerFunc = authMethod.GetAuthMethodListHandler
-	var _ func(identity.Service) app.HandlerFunc = authMethod.GetEmailPlatformHandler
-	var _ func(identity.Service) app.HandlerFunc = authMethod.GetSmsPlatformHandler
-	var _ func(identity.Service) app.HandlerFunc = authMethod.TestEmailSendHandler
-	var _ func(identity.Service) app.HandlerFunc = authMethod.TestSmsSendHandler
-	var _ func(identity.Service) app.HandlerFunc = authMethod.UpdateAuthMethodConfigHandler
-	var _ func(platform.Service) app.HandlerFunc = console.QueryRevenueStatisticsHandler
-	var _ func(platform.Service) app.HandlerFunc = console.QueryServerTotalDataHandler
-	var _ func(platform.Service) app.HandlerFunc = console.QueryTicketWaitReplyHandler
-	var _ func(platform.Service) app.HandlerFunc = console.QueryUserStatisticsHandler
-	var _ func(billing.Service) app.HandlerFunc = coupon.BatchDeleteCouponHandler
-	var _ func(billing.Service) app.HandlerFunc = coupon.CreateCouponHandler
-	var _ func(billing.Service) app.HandlerFunc = coupon.DeleteCouponHandler
-	var _ func(billing.Service) app.HandlerFunc = coupon.GetCouponListHandler
-	var _ func(billing.Service) app.HandlerFunc = coupon.UpdateCouponHandler
-	var _ func(support.Service) app.HandlerFunc = document.BatchDeleteDocumentHandler
-	var _ func(support.Service) app.HandlerFunc = document.CreateDocumentHandler
-	var _ func(support.Service) app.HandlerFunc = document.DeleteDocumentHandler
-	var _ func(support.Service) app.HandlerFunc = document.GetDocumentDetailHandler
-	var _ func(support.Service) app.HandlerFunc = document.GetDocumentListHandler
-	var _ func(support.Service) app.HandlerFunc = document.UpdateDocumentHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterBalanceLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterCommissionLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterEmailLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterGiftLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterLoginLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterMobileLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterOrderLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterRegisterLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterResetSubscribeLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterServerTrafficLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterSubscribeLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterTrafficLogDetailsHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.FilterUserSubscribeTrafficLogHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.GetLogSettingHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.GetMessageLogListHandler
-	var _ func(platform.Service) app.HandlerFunc = adminlog.UpdateLogSettingHandler
+	handlerFactory[support.Service](ads.CreateAdsHandler)
+	handlerFactory[support.Service](ads.DeleteAdsHandler)
+	handlerFactory[support.Service](ads.GetAdsDetailHandler)
+	handlerFactory[support.Service](ads.GetAdsListHandler)
+	handlerFactory[support.Service](ads.UpdateAdsHandler)
+	handlerFactory[support.Service](announcement.CreateAnnouncementHandler)
+	handlerFactory[support.Service](announcement.DeleteAnnouncementHandler)
+	handlerFactory[support.Service](announcement.GetAnnouncementHandler)
+	handlerFactory[support.Service](announcement.GetAnnouncementListHandler)
+	handlerFactory[support.Service](announcement.UpdateAnnouncementHandler)
+	handlerFactory[subscription.Service](application.CreateSubscribeApplicationHandler)
+	handlerFactory[subscription.Service](application.DeleteSubscribeApplicationHandler)
+	handlerFactory[subscription.Service](application.GetSubscribeApplicationListHandler)
+	handlerFactory[subscription.Service](application.PreviewSubscribeTemplateHandler)
+	handlerFactory[subscription.Service](application.UpdateSubscribeApplicationHandler)
+	handlerFactory[identity.Service](authmethod.GetAuthMethodConfigHandler)
+	handlerFactory[identity.Service](authmethod.GetAuthMethodListHandler)
+	handlerFactory[identity.Service](authmethod.GetEmailPlatformHandler)
+	handlerFactory[identity.Service](authmethod.GetSmsPlatformHandler)
+	handlerFactory[identity.Service](authmethod.TestEmailSendHandler)
+	handlerFactory[identity.Service](authmethod.TestSmsSendHandler)
+	handlerFactory[identity.Service](authmethod.UpdateAuthMethodConfigHandler)
+	handlerFactory[console.Dashboard](console.QueryRevenueStatisticsHandler)
+	handlerFactory[console.Dashboard](console.QueryServerTotalDataHandler)
+	handlerFactory[console.Dashboard](console.QueryTicketWaitReplyHandler)
+	handlerFactory[console.Dashboard](console.QueryUserStatisticsHandler)
+	handlerFactory[billing.Service](coupon.BatchDeleteCouponHandler)
+	handlerFactory[billing.Service](coupon.CreateCouponHandler)
+	handlerFactory[billing.Service](coupon.DeleteCouponHandler)
+	handlerFactory[billing.Service](coupon.GetCouponListHandler)
+	handlerFactory[billing.Service](coupon.UpdateCouponHandler)
+	handlerFactory[support.Service](document.BatchDeleteDocumentHandler)
+	handlerFactory[support.Service](document.CreateDocumentHandler)
+	handlerFactory[support.Service](document.DeleteDocumentHandler)
+	handlerFactory[support.Service](document.GetDocumentDetailHandler)
+	handlerFactory[support.Service](document.GetDocumentListHandler)
+	handlerFactory[support.Service](document.UpdateDocumentHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterBalanceLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterCommissionLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterEmailLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterGiftLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterLoginLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterMobileLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterOrderLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterRegisterLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterResetSubscribeLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterServerTrafficLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterSubscribeLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterTrafficLogDetailsHandler)
+	handlerFactory[adminlog.Logs](adminlog.FilterUserSubscribeTrafficLogHandler)
+	handlerFactory[adminlog.Logs](adminlog.GetLogSettingHandler)
+	handlerFactory[adminlog.Logs](adminlog.GetMessageLogListHandler)
+	handlerFactory[adminlog.Logs](adminlog.UpdateLogSettingHandler)
 }

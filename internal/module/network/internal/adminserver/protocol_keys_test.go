@@ -190,6 +190,26 @@ func TestMergeMissingProtocolFieldsAllowsExplicitClear(t *testing.T) {
 	}
 }
 
+// The update binds the body case-insensitively, so a key in another case
+// still sets its field; the merge must not put the stored value back.
+func TestMergeMissingProtocolFieldsMatchesKeysCaseInsensitively(t *testing.T) {
+	existing := node.Protocol{Type: "vless", Enable: true, Security: "reality"}
+	next := node.Protocol{Type: "vless", Enable: false}
+	merged, err := mergeMissingProtocolFields(next, existing, map[string]struct{}{
+		"Type":   {},
+		"Enable": {},
+	})
+	if err != nil {
+		t.Fatalf("mergeMissingProtocolFields() error = %v", err)
+	}
+	if merged.Enable {
+		t.Fatalf("Enable = true, want the submitted false")
+	}
+	if merged.Security != "reality" {
+		t.Fatalf("Security = %q, want the unsubmitted stored value", merged.Security)
+	}
+}
+
 func TestNormalizeAfterMergeClearsRealityWhenSecurityChanges(t *testing.T) {
 	existing := node.Protocol{
 		Type:              "vless",

@@ -1,3 +1,7 @@
+// Package node holds the network module's server and node entities: the
+// servers with the protocols they offer, stored as JSON and normalized for
+// storage and distribution, the nodes that expose them, the per-server node
+// configuration overrides, and the Redis keys of the node-facing caches.
 package node
 
 import (
@@ -7,6 +11,8 @@ import (
 	"gorm.io/gorm"
 )
 
+// Node is an entry point to a server's protocol: the address and port
+// clients connect to, with the tags plans select nodes by.
 type Node struct {
 	Id        int64     `gorm:"primary_key"`
 	Name      string    `gorm:"type:varchar(100);not null;default:'';comment:Node Name"`
@@ -51,12 +57,11 @@ func (n *Node) BeforeUpdate(tx *gorm.DB) error {
 		return err
 	}
 	if count > 1 {
-		// reorder sort
+		// The positions collide: renumber them all and move this node last.
 		if err := reorderSortWithNode(tx); err != nil {
 			logger.Errorf("[Node] BeforeUpdate reorderSort error: %v", err.Error())
 			return err
 		}
-		// get max sort
 		var maxSort int
 		if err := tx.Model(&Node{}).Select("MAX(sort)").Scan(&maxSort).Error; err != nil {
 			return err

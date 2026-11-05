@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/perfect-panel/server/internal/module/network/entity/traffic"
 	"github.com/perfect-panel/server/internal/module/platform/entity/log"
+	"github.com/perfect-panel/server/internal/module/platform/internal/readmodel"
 )
 
 // Distinct values so swapping the two identifiers cannot pass.
@@ -15,7 +15,7 @@ const (
 )
 
 func TestUserTrafficDataFromRankingKeepsBothIdentifiers(t *testing.T) {
-	got := userTrafficDataFromRanking(traffic.UserTrafficRanking{
+	got := userTrafficDataFromRanking(readmodel.UserTrafficRanking{
 		UserId:      testUserID,
 		SubscribeId: testSubscribeID,
 		Upload:      11,
@@ -51,7 +51,7 @@ func TestUserTrafficDataFromRankLogKeepsBothIdentifiers(t *testing.T) {
 
 // The console reads both keys, so neither may disappear from the payload.
 func TestUserTrafficDataSerializesBothIdentifiers(t *testing.T) {
-	body, err := json.Marshal(userTrafficDataFromRanking(traffic.UserTrafficRanking{
+	body, err := json.Marshal(userTrafficDataFromRanking(readmodel.UserTrafficRanking{
 		UserId:      testUserID,
 		SubscribeId: testSubscribeID,
 	}))

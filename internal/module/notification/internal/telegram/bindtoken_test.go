@@ -3,150 +3,155 @@ package telegram
 import (
 	"context"
 	"fmt"
-	"strconv"
+	"strings"
 	"testing"
 
-	"github.com/go-telegram/bot/models"
 	"github.com/perfect-panel/server/internal/config"
-	"github.com/perfect-panel/server/internal/module/identity/entity/user"
-	"github.com/perfect-panel/server/internal/repository"
-	"github.com/redis/go-redis/v9"
-	"gorm.io/gorm"
 )
 
-type fakeBindStore struct {
-	values  map[string]string
-	deleted []string
-}
-
-func (s *fakeBindStore) Get(_ context.Context, key string) (string, error) {
-	value, ok := s.values[key]
-	if !ok {
-		return "", redis.Nil
-	}
-	return value, nil
-}
-
-func (s *fakeBindStore) Delete(_ context.Context, key string) error {
-	s.deleted = append(s.deleted, key)
-	delete(s.values, key)
-	return nil
-}
-
-func (s *fakeBindStore) Set(_ context.Context, _, _ string, _ interface{}) error { return nil }
-
-type fakeBindAuthRepo struct {
-	repository.UserAuthRepo
-	inserted []*user.AuthMethods
-}
-
-func (r *fakeBindAuthRepo) FindUserAuthMethodByOpenID(_ context.Context, _, _ string) (*user.AuthMethods, error) {
-	return &user.AuthMethods{}, gorm.ErrRecordNotFound
-}
-
-func (r *fakeBindAuthRepo) FindUserAuthMethodByPlatform(_ context.Context, _ int64, _ string) (*user.AuthMethods, error) {
-	return &user.AuthMethods{}, gorm.ErrRecordNotFound
-}
-
-func (r *fakeBindAuthRepo) InsertUserAuthMethods(_ context.Context, data *user.AuthMethods, _ ...*gorm.DB) error {
-	r.inserted = append(r.inserted, data)
-	return nil
-}
-
-type fakeBindUserCache struct {
-	repository.UserCacheRepo
-}
-
-func (fakeBindUserCache) UpdateUserCache(_ context.Context, _ *user.User) error { return nil }
-
-func newBindHarness(tokens map[string]string) (*TelegramLogic, *fakeBindStore, *fakeBindAuthRepo, *recordingTelegramMessenger) {
-	store := &fakeBindStore{values: tokens}
-	auths := &fakeBindAuthRepo{}
-	messenger := &recordingTelegramMessenger{}
-	logic := NewTelegramLogic(context.Background(), TelegramLogicDependencies{
+func newBindHarness(tokens map[string]string) (*Bot, *fakeRedisStore, *fakeAccounts, *recordingMessenger) {
+	store := &fakeRedisStore{values: tokens}
+	accounts := newFakeAccounts()
+	messenger := &recordingMessenger{}
+	bot := NewBot(BotDependencies{
 		Messenger: messenger,
 		Sessions:  store,
-		UserAuth:  auths,
-		UserCache: fakeBindUserCache{},
+		Accounts:  accounts,
 	})
-	return logic, store, auths, messenger
+	return bot, store, accounts, messenger
+}
+
+func bindKey(token string) string {
+	return fmt.Sprintf("%v:%v", config.TelegramBindKey, token)
 }
 
 // A session id must no longer work as a bind token: the deep link travels
 // through Telegram chats, and accepting session ids let whoever saw one bind
 // their own Telegram account — and therefore log in — as that user.
 func TestBindRejectsSessionIdAsToken(t *testing.T) {
-	token := "leaked-session-id"
-	logic, _, auths, messenger := newBindHarness(map[string]string{
-		fmt.Sprintf("%v:%v", config.SessionIdKey, token): "7",
-	})
+	for _, command := range []string{"/bind", "/start"} {
+		token := "leaked-session-id"
+		bot, _, accounts, messenger := newBindHarness(map[string]string{
+			fmt.Sprintf("%v:%v", config.SessionIdKey, token): "7",
+		})
 
-	if err := logic.bind(1001, token); err != nil {
-		t.Fatalf("bind error = %v", err)
-	}
-	if len(auths.inserted) != 0 {
-		t.Fatalf("session id was accepted as a bind token: %+v", auths.inserted[0])
-	}
-	if messenger.message != "Bind token is invalid or expired. Please request a new one." {
-		t.Fatalf("message = %q", messenger.message)
-	}
-}
+		bot.HandleUpdate(context.Background(), privateUpdate(1001, command+" "+token))
 
-func TestStartRejectsSessionIdAsToken(t *testing.T) {
-	token := "leaked-session-id"
-	logic, _, auths, messenger := newBindHarness(map[string]string{
-		fmt.Sprintf("%v:%v", config.SessionIdKey, token): "7",
-	})
-
-	msg := &models.Message{
-		Text:     "/start " + token,
-		Chat:     models.Chat{ID: 1001, Type: models.ChatTypePrivate},
-		From:     &models.User{ID: 1001},
-		Entities: []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: 6}},
-	}
-	if err := logic.start(msg); err != nil {
-		t.Fatalf("start error = %v", err)
-	}
-	if len(auths.inserted) != 0 {
-		t.Fatalf("session id was accepted as a bind token: %+v", auths.inserted[0])
-	}
-	if messenger.message != "Session expired. Please request a new bind link." {
-		t.Fatalf("message = %q", messenger.message)
+		if len(accounts.bound) != 0 {
+			t.Fatalf("%s: session id was accepted as a bind token: %+v", command, accounts.bound[0])
+		}
+		if got := messenger.last().message; got != "Bind token is invalid or expired. Please request a new one." {
+			t.Fatalf("%s: message = %q", command, got)
+		}
 	}
 }
 
 // A dedicated bind token binds the account once and is invalidated, so a link
-// that leaks after use cannot rebind the account.
+// that leaks after use cannot rebind the account. /start (the deep link) and
+// /bind share the one implementation.
 func TestBindConsumesDedicatedTokenExactlyOnce(t *testing.T) {
-	token := "bind-token"
-	key := fmt.Sprintf("%v:%v", config.TelegramBindKey, token)
-	logic, store, auths, messenger := newBindHarness(map[string]string{key: "7"})
+	for _, command := range []string{"/bind", "/start"} {
+		t.Run(command, func(t *testing.T) {
+			token := "bind-token"
+			bot, store, accounts, messenger := newBindHarness(map[string]string{bindKey(token): "7"})
 
-	if err := logic.bind(1001, token); err != nil {
-		t.Fatalf("bind error = %v", err)
-	}
-	if len(auths.inserted) != 1 {
-		t.Fatalf("bindings = %d, want 1", len(auths.inserted))
-	}
-	if got := auths.inserted[0]; got.UserId != 7 || got.AuthIdentifier != strconv.FormatInt(1001, 10) {
-		t.Fatalf("binding = %+v, want user 7 bound to chat 1001", got)
-	}
-	if len(store.deleted) != 1 || store.deleted[0] != key {
-		t.Fatalf("deleted keys = %v, want [%s]", store.deleted, key)
-	}
-	if !messenger.markdown {
-		t.Fatal("bind confirmation must be sent as MarkdownV2, not plain text")
-	}
+			bot.HandleUpdate(context.Background(), privateUpdate(1001, command+" "+token))
 
-	// Replaying the same link finds nothing to redeem.
-	auths.inserted = nil
-	if err := logic.bind(2002, token); err != nil {
-		t.Fatalf("second bind error = %v", err)
+			if len(accounts.bound) != 1 {
+				t.Fatalf("bindings = %d, want 1", len(accounts.bound))
+			}
+			if got := accounts.bound[0]; got.UserId != 7 || got.AuthIdentifier != "1001" {
+				t.Fatalf("binding = %+v, want user 7 bound to chat 1001", got)
+			}
+			if _, present := store.values[bindKey(token)]; present {
+				t.Fatal("the redeemed token is still stored")
+			}
+			// The binding lock is released; nothing else is left behind.
+			if len(store.values) != 0 || len(store.deleted) != 1 || store.deleted[0] != bindLockKey(7) {
+				t.Fatalf("store = %v, deleted = %v; want the lock released and the token consumed", store.values, store.deleted)
+			}
+			if !messenger.last().markdown {
+				t.Fatal("bind confirmation must be sent as MarkdownV2, not plain text")
+			}
+
+			// Replaying the same link finds nothing to redeem.
+			bot.HandleUpdate(context.Background(), privateUpdate(2002, command+" "+token))
+			if len(accounts.bound) != 1 {
+				t.Fatal("a consumed bind token was accepted again")
+			}
+			if got := messenger.last().message; got != "Bind token is invalid or expired. Please request a new one." {
+				t.Fatalf("message = %q", got)
+			}
+		})
 	}
-	if len(auths.inserted) != 0 {
-		t.Fatal("a consumed bind token was accepted again")
+}
+
+func TestBindWithoutTokenPromptsPerEntryPoint(t *testing.T) {
+	for command, want := range map[string]string{
+		"/bind":  "Please provide a bind token. Usage: /bind <token>",
+		"/start": "Please bind account!",
+	} {
+		bot, _, _, messenger := newBindHarness(nil)
+		bot.HandleUpdate(context.Background(), privateUpdate(42, command))
+		if got := messenger.last(); got.chatID != 42 || got.message != want {
+			t.Fatalf("%s: message = (%d, %q), want %q", command, got.chatID, got.message, want)
+		}
 	}
-	if messenger.message != "Bind token is invalid or expired. Please request a new one." {
-		t.Fatalf("message = %q", messenger.message)
+}
+
+// One Telegram account binds one panel account and the other way round; an
+// existing binding is never overwritten. A token refused for a reason the
+// user can fix is put back with the life it had left, so the user retries
+// without a new link and the link's life is not extended; a token that finds
+// its account already bound here has done its work and stays consumed.
+func TestBindKeepsExistingBindings(t *testing.T) {
+	for name, tt := range map[string]struct {
+		seed     func(*fakeAccounts)
+		want     string
+		restored bool
+	}{
+		"chat bound elsewhere": {
+			seed:     func(a *fakeAccounts) { a.addBinding(8, "telegram", "1001") },
+			want:     "This Telegram account is already bound to another user.",
+			restored: true,
+		},
+		"account bound to another chat": {
+			seed:     func(a *fakeAccounts) { a.addBinding(7, "telegram", "5005") },
+			want:     "Your account is already bound to a different Telegram account. Please unbind it first.",
+			restored: true,
+		},
+		"already bound here": {
+			seed: func(a *fakeAccounts) { a.addBinding(7, "telegram", "1001") },
+			want: "This account is already bound to your Telegram.",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bot, store, accounts, messenger := newBindHarness(map[string]string{bindKey("tok"): "7"})
+			tt.seed(accounts)
+
+			bot.HandleUpdate(context.Background(), privateUpdate(1001, "/bind tok"))
+
+			if len(accounts.bound) != 0 {
+				t.Fatalf("binding written: %+v", accounts.bound)
+			}
+			if got := messenger.last().message; got != tt.want {
+				t.Fatalf("message = %q, want %q", got, tt.want)
+			}
+			value, present := store.values[bindKey("tok")]
+			if present != tt.restored || (present && (value != "7" || store.ttls[bindKey("tok")] != fakeTokenTTL)) {
+				t.Fatalf("token stored = %v (%q, ttl %v), want restored %v with its remaining life", present, value, store.ttls[bindKey("tok")], tt.restored)
+			}
+			if _, locked := store.values[bindLockKey(7)]; locked {
+				t.Fatal("the binding lock was not released")
+			}
+		})
+	}
+}
+
+func TestBindRejectsMalformedTokenValue(t *testing.T) {
+	bot, _, accounts, messenger := newBindHarness(map[string]string{bindKey("tok"): "not-a-user"})
+	bot.HandleUpdate(context.Background(), privateUpdate(1001, "/start tok"))
+	if len(accounts.bound) != 0 || !strings.Contains(messenger.last().message, "Invalid session data") {
+		t.Fatalf("bound = %+v, message = %q", accounts.bound, messenger.last().message)
 	}
 }

@@ -3,34 +3,29 @@ package systemsetting
 import (
 	"context"
 
-	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
-
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/pkg/xerr"
 )
 
-type UpdateCurrencyConfigLogic struct {
-	logger.Logger
-	ctx  context.Context
-	deps Deps
-}
-
-// Update Currency Config
-func newUpdateCurrencyConfigLogic(ctx context.Context, deps Deps) *UpdateCurrencyConfigLogic {
-	return &UpdateCurrencyConfigLogic{
-		Logger: logger.WithContext(ctx),
-		ctx:    ctx,
-		deps:   deps,
-	}
-}
-
-func (l *UpdateCurrencyConfigLogic) UpdateCurrencyConfig(req *dto.CurrencyConfig) error {
-	err := updateConfigFields(l.ctx, l.deps, "currency", convertedConfigFields(*req))
-	l.deps.reinit("currency")
+// UpdateCurrencyConfig stores the currency settings and, once they are
+// stored, reloads the currency subsystem: a failed write must not reload a
+// configuration that did not change. A masked access key keeps the stored
+// one.
+func (s *Service) UpdateCurrencyConfig(ctx context.Context, req *dto.CurrencyConfig) error {
+	stored, err := s.storedCurrencyConfig(ctx)
 	if err != nil {
-		l.Errorw("[UpdateCurrencyConfig] update currency config error", logger.Field("error", err.Error()))
-		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "update invite config error: %v", err)
+		logger.WithContext(ctx).Errorw("[UpdateCurrencyConfig] stored currency config could not be read", logger.Field("error", err.Error()))
 	}
-	return nil
+	if err := keepCurrencySecrets(req, stored); err != nil {
+		return err
+	}
+	change := settingsChange{category: "currency", next: convertedConfigFields(*req)}
+	if stored != nil {
+		change.previous = convertedConfigFields(*stored)
+	}
+	if err := updateConfigFields(ctx, s.deps, change); err != nil {
+		return xerr.Wrapf(err, xerr.DatabaseUpdateError, "update currency config: %v", err)
+	}
+	return s.deps.reinit("currency")
 }

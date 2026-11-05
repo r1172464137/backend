@@ -1,3 +1,6 @@
+// Package buildinfo holds the version, build time and release channel the
+// build scripts inject, for the CLI and the admin version endpoint. It is
+// kept apart from the composition root so both can import it.
 package buildinfo
 
 import (
@@ -14,7 +17,7 @@ const (
 	ChannelDev     = "dev"
 )
 
-// Version PPanel version
+// The build metadata, injected with -ldflags -X at build time.
 var (
 	Version   = "unknown version"
 	BuildTime = "unknown time"

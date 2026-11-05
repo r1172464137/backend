@@ -1,20 +1,18 @@
+// Package stripe implements the Stripe payment protocol: payment intents and
+// their payment sheets, customers, webhook endpoints and signed webhook
+// events.
 package stripe
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"github.com/stripe/stripe-go/v81/webhookendpoint"
-
-	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/stripe/stripe-go/v81"
-	"github.com/stripe/stripe-go/v81/customer"
-	"github.com/stripe/stripe-go/v81/ephemeralkey"
-	"github.com/stripe/stripe-go/v81/paymentintent"
-	"github.com/stripe/stripe-go/v81/paymentmethod"
+	"github.com/stripe/stripe-go/v81/client"
 	"github.com/stripe/stripe-go/v81/webhook"
 )
 
@@ -24,6 +22,9 @@ type Config struct {
 	PublicKey     string
 	SecretKey     string
 	WebhookSecret string
+	// Backends overrides the Stripe API endpoints; tests point them at a
+	// local fake. Nil selects the SDK's shared production backends.
+	Backends *stripe.Backends
 }
 
 type User struct {
@@ -39,6 +40,9 @@ type NotifyResult struct {
 	Amount    int64
 	Currency  string
 }
+
+// Order is a payment to collect. Amount is in hundredths of Currency (see
+// units.go for how it maps onto Stripe's unit).
 type Order struct {
 	OrderNo   string
 	Subscribe string
@@ -47,8 +51,13 @@ type Order struct {
 	Payment   string
 }
 
+// Client talks to Stripe with its own secret key. Every request carries the
+// key of the payment method it belongs to; nothing is written to the SDK's
+// process-wide default key, so several Stripe methods can serve concurrent
+// requests without borrowing each other's account.
 type Client struct {
 	Config
+	api *client.API
 }
 
 type PaymentSheet struct {
@@ -62,14 +71,14 @@ type PaymentSheet struct {
 func NewClient(config Config) *Client {
 	return &Client{
 		Config: config,
+		api:    client.New(config.SecretKey, config.Backends),
 	}
 }
 
-func (c *Client) CreatePaymentSheet(order *Order, user *User) (*PaymentSheet, error) {
+func (c *Client) CreatePaymentSheet(ctx context.Context, order *Order, user *User) (*PaymentSheet, error) {
 	if order == nil || order.OrderNo == "" || order.Amount < 0 || order.Currency == "" || order.Payment == "" {
 		return nil, errors.New("invalid Stripe order")
 	}
-	stripe.Key = c.SecretKey
 	var customerDataRes *stripe.Customer
 	var err error
 	var userID int64
@@ -79,12 +88,12 @@ func (c *Client) CreatePaymentSheet(order *Order, user *User) (*PaymentSheet, er
 	// A guest checkout has no stable Stripe customer identity.  Do not reuse
 	// the synthetic user_id=0 customer across unrelated buyers.
 	if user != nil && (user.Email != "" || user.UserId != 0) {
-		customerDataRes, err = c.SearchStripeCustomer(user)
+		customerDataRes, err = c.SearchStripeCustomer(ctx, user)
 		if err != nil {
 			return nil, err
 		}
 		if customerDataRes == nil {
-			customerDataRes, err = c.CreateCustomer(user)
+			customerDataRes, err = c.CreateCustomer(ctx, user)
 			if err != nil {
 				return nil, err
 			}
@@ -92,8 +101,8 @@ func (c *Client) CreatePaymentSheet(order *Order, user *User) (*PaymentSheet, er
 	}
 	// Create Payment Intent
 	params := &stripe.PaymentIntentParams{
-		Amount:   stripe.Int64(order.Amount),
-		Currency: stripe.String(order.Currency),
+		Amount:   stripe.Int64(ToStripeAmount(order.Amount, order.Currency)),
+		Currency: stripe.String(strings.ToLower(order.Currency)),
 		PaymentMethodTypes: []*string{
 			stripe.String(order.Payment),
 		},
@@ -103,13 +112,14 @@ func (c *Client) CreatePaymentSheet(order *Order, user *User) (*PaymentSheet, er
 			"subscribe": order.Subscribe,
 		},
 	}
+	params.Context = ctx
 	if customerDataRes != nil {
 		params.Customer = stripe.String(customerDataRes.ID)
 	}
 	// Retrying the checkout after a network timeout must return the same
 	// PaymentIntent rather than creating another chargeable transaction.
 	params.SetIdempotencyKey("ppanel:payment-intent:" + order.OrderNo)
-	result, err := paymentintent.New(params)
+	result, err := c.api.PaymentIntents.New(params)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +135,8 @@ func (c *Client) CreatePaymentSheet(order *Order, user *User) (*PaymentSheet, er
 			Customer:      stripe.String(customerDataRes.ID),
 			StripeVersion: stripe.String(APIVersion),
 		}
-		ek, err := ephemeralkey.New(ekParams)
+		ekParams.Context = ctx
+		ek, err := c.api.EphemeralKeys.New(ekParams)
 		if err != nil {
 			return nil, err
 		}
@@ -138,19 +149,10 @@ func (c *Client) CreatePaymentSheet(order *Order, user *User) (*PaymentSheet, er
 // GetPaymentSheet returns the already-created PaymentIntent for a repeat
 // checkout.  It validates the immutable fields recorded in Stripe before
 // exposing its client secret again.
-func (c *Client) GetPaymentSheet(order *Order, tradeNo string) (*PaymentSheet, error) {
-	if order == nil || tradeNo == "" {
-		return nil, errors.New("invalid Stripe payment intent lookup")
-	}
-	stripe.Key = c.SecretKey
-	intent, err := paymentintent.Get(tradeNo, nil)
+func (c *Client) GetPaymentSheet(ctx context.Context, order *Order, tradeNo string) (*PaymentSheet, error) {
+	intent, err := c.matchingIntent(ctx, order, tradeNo)
 	if err != nil {
 		return nil, err
-	}
-	if intent.Metadata["order_no"] != order.OrderNo || intent.Amount != order.Amount ||
-		!strings.EqualFold(string(intent.Currency), order.Currency) ||
-		len(intent.PaymentMethodTypes) != 1 || intent.PaymentMethodTypes[0] != order.Payment {
-		return nil, errors.New("stored Stripe payment intent does not match order")
 	}
 	if intent.Status == stripe.PaymentIntentStatusCanceled {
 		return nil, errors.New("stored Stripe payment intent is canceled")
@@ -162,21 +164,43 @@ func (c *Client) GetPaymentSheet(order *Order, tradeNo string) (*PaymentSheet, e
 	}, nil
 }
 
-// SearchStripeCustomer  Search for a Stripe customer by email or user ID
-func (c *Client) SearchStripeCustomer(user *User) (*stripe.Customer, error) {
-	stripe.Key = c.SecretKey
-	params := &stripe.CustomerSearchParams{}
-	if user.Email != "" {
-		params.SearchParams.Query = fmt.Sprintf("email:'%s'", user.Email)
-	} else {
-		params.SearchParams.Query = fmt.Sprintf("metadata['user_id']:'%d'", user.UserId)
+// matchingIntent loads the PaymentIntent and checks that it was created for
+// order: same order number, amount, currency and single payment method.
+func (c *Client) matchingIntent(ctx context.Context, order *Order, tradeNo string) (*stripe.PaymentIntent, error) {
+	if order == nil || tradeNo == "" {
+		return nil, errors.New("invalid Stripe payment intent lookup")
 	}
-	result := customer.Search(params)
+	intent, err := c.getIntent(ctx, tradeNo)
+	if err != nil {
+		return nil, err
+	}
+	if intent.Metadata["order_no"] != order.OrderNo || intent.Amount != ToStripeAmount(order.Amount, order.Currency) ||
+		!strings.EqualFold(string(intent.Currency), order.Currency) ||
+		len(intent.PaymentMethodTypes) != 1 || intent.PaymentMethodTypes[0] != order.Payment {
+		return nil, errors.New("stored Stripe payment intent does not match order")
+	}
+	return intent, nil
+}
+
+func (c *Client) getIntent(ctx context.Context, tradeNo string) (*stripe.PaymentIntent, error) {
+	params := &stripe.PaymentIntentParams{}
+	params.Context = ctx
+	return c.api.PaymentIntents.Get(tradeNo, params)
+}
+
+// SearchStripeCustomer  Search for a Stripe customer by email or user ID
+func (c *Client) SearchStripeCustomer(ctx context.Context, user *User) (*stripe.Customer, error) {
+	params := &stripe.CustomerSearchParams{}
+	params.Context = ctx
+	if user.Email != "" {
+		params.Query = fmt.Sprintf("email:'%s'", user.Email)
+	} else {
+		params.Query = fmt.Sprintf("metadata['user_id']:'%d'", user.UserId)
+	}
+	result := c.api.Customers.Search(params)
 	if result.Err() != nil {
-		fmt.Printf("Error: %v\n", result.Err().Error())
 		return nil, result.Err()
 	}
-
 	if len(result.CustomerSearchResult().Data) != 0 {
 		return result.CustomerSearchResult().Data[0], nil
 	}
@@ -184,89 +208,91 @@ func (c *Client) SearchStripeCustomer(user *User) (*stripe.Customer, error) {
 }
 
 // CreateCustomer Create a new Stripe customer
-func (c *Client) CreateCustomer(user *User) (*stripe.Customer, error) {
-	stripe.Key = c.SecretKey
+func (c *Client) CreateCustomer(ctx context.Context, user *User) (*stripe.Customer, error) {
 	customerData := &stripe.CustomerParams{}
+	customerData.Context = ctx
 	if user.Email != "" {
 		customerData.Email = &user.Email
 	}
 	customerData.AddMetadata("user_id", strconv.FormatInt(user.UserId, 10))
-	return customer.New(customerData)
+	return c.api.Customers.New(customerData)
 }
 
-// QueryOrderStatus Query the status of the order
-func (c *Client) QueryOrderStatus(orderNo string) (bool, error) {
-	stripe.Key = c.SecretKey
-	intent, err := paymentintent.Get(orderNo, nil)
+// QueryOrderStatus reports whether the PaymentIntent has succeeded.
+func (c *Client) QueryOrderStatus(ctx context.Context, tradeNo string) (bool, error) {
+	intent, err := c.getIntent(ctx, tradeNo)
 	if err != nil {
 		return false, err
 	}
-	return intent.Status == "succeeded", err
+	return intent.Status == stripe.PaymentIntentStatusSucceeded, nil
 }
 
 // VerifyPaymentIntent checks that the stored intent still belongs to the
-// order before returning its payment state.  It is used by expiry handling so
+// order before returning its payment state. It is used by expiry handling so
 // a successful intent can be settled instead of being closed locally.
-func (c *Client) VerifyPaymentIntent(order *Order, tradeNo string) (bool, error) {
-	if _, err := c.GetPaymentSheet(order, tradeNo); err != nil {
+func (c *Client) VerifyPaymentIntent(ctx context.Context, order *Order, tradeNo string) (bool, error) {
+	intent, err := c.matchingIntent(ctx, order, tradeNo)
+	if err != nil {
 		return false, err
 	}
-	return c.QueryOrderStatus(tradeNo)
+	return intent.Status == stripe.PaymentIntentStatusSucceeded, nil
+}
+
+// PaymentIntentStatus returns the status of the order's intent after
+// checking, like VerifyPaymentIntent, that the intent still belongs to the
+// order.
+func (c *Client) PaymentIntentStatus(ctx context.Context, order *Order, tradeNo string) (stripe.PaymentIntentStatus, error) {
+	intent, err := c.matchingIntent(ctx, order, tradeNo)
+	if err != nil {
+		return "", err
+	}
+	return intent.Status, nil
 }
 
 // CancelPaymentIntent prevents a still-pending client secret from being paid
 // after the local order has expired.
-func (c *Client) CancelPaymentIntent(tradeNo string) error {
+func (c *Client) CancelPaymentIntent(ctx context.Context, tradeNo string) error {
 	if tradeNo == "" {
-		return errors.New("Stripe payment intent is missing")
+		return errors.New("stripe payment intent is missing")
 	}
-	stripe.Key = c.SecretKey
-	_, err := paymentintent.Cancel(tradeNo, nil)
+	params := &stripe.PaymentIntentCancelParams{}
+	params.Context = ctx
+	_, err := c.api.PaymentIntents.Cancel(tradeNo, params)
 	return err
 }
 
-// ParseNotify
+// ParseNotify authenticates a webhook payload with the endpoint secret and
+// extracts the PaymentIntent it reports.
 func (c *Client) ParseNotify(payload []byte, signature string) (*NotifyResult, error) {
-	event, err := webhook.ConstructEventWithOptions(payload, signature, c.Config.WebhookSecret, webhook.ConstructEventOptions{
+	event, err := webhook.ConstructEventWithOptions(payload, signature, c.WebhookSecret, webhook.ConstructEventOptions{
 		IgnoreAPIVersionMismatch: true,
 	})
 	if err != nil {
 		return nil, err
 	}
 	var paymentIntent stripe.PaymentIntent
-	err = json.Unmarshal(event.Data.Raw, &paymentIntent)
-	if err != nil {
-		logger.Error("Failed to unmarshal payment intent", logger.Field("error", err.Error()))
-		return nil, err
+	if err := json.Unmarshal(event.Data.Raw, &paymentIntent); err != nil {
+		return nil, fmt.Errorf("decode Stripe payment intent: %w", err)
 	}
-	orderNo := paymentIntent.Metadata["order_no"]
-	userId := paymentIntent.Metadata["user_id"]
 	var method string
 	if len(paymentIntent.PaymentMethodTypes) > 0 {
 		method = paymentIntent.PaymentMethodTypes[0]
 	}
-	// userId string 转 int64
-	uid, _ := strconv.ParseInt(userId, 10, 64)
+	uid, _ := strconv.ParseInt(paymentIntent.Metadata["user_id"], 10, 64)
 	return &NotifyResult{
 		EventType: string(event.Type),
-		OrderNo:   orderNo,
+		OrderNo:   paymentIntent.Metadata["order_no"],
 		TradeNo:   paymentIntent.ID,
 		UserId:    uid,
 		Method:    method,
-		Amount:    paymentIntent.AmountReceived,
+		Amount:    FromStripeAmount(paymentIntent.AmountReceived, string(paymentIntent.Currency)),
 		Currency:  string(paymentIntent.Currency),
 	}, nil
 }
 
-// RetrievePaymentMethod 查询支付方式
-func (c *Client) RetrievePaymentMethod(id string) (*stripe.PaymentMethod, error) {
-	stripe.Key = c.SecretKey
-	return paymentmethod.Get(id, nil)
-}
-
-// CreateWebhookEndpoint 创建 webhook endpoint
-func (c *Client) CreateWebhookEndpoint(url string) (*stripe.WebhookEndpoint, error) {
-	stripe.Key = c.SecretKey
+// CreateWebhookEndpoint registers url for the payment events the callback
+// handler settles and returns the endpoint with its signing secret.
+func (c *Client) CreateWebhookEndpoint(ctx context.Context, url string) (*stripe.WebhookEndpoint, error) {
 	params := &stripe.WebhookEndpointParams{
 		URL: stripe.String(url),
 		EnabledEvents: []*string{
@@ -274,5 +300,15 @@ func (c *Client) CreateWebhookEndpoint(url string) (*stripe.WebhookEndpoint, err
 			stripe.String("payment_intent.payment_failed"),
 		},
 	}
-	return webhookendpoint.New(params)
+	params.Context = ctx
+	return c.api.WebhookEndpoints.New(params)
+}
+
+// DeleteWebhookEndpoint removes a webhook endpoint; it undoes an endpoint
+// whose payment method could not be saved.
+func (c *Client) DeleteWebhookEndpoint(ctx context.Context, id string) error {
+	params := &stripe.WebhookEndpointParams{}
+	params.Context = ctx
+	_, err := c.api.WebhookEndpoints.Del(id, params)
+	return err
 }
