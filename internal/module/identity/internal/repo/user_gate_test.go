@@ -86,10 +86,12 @@ func TestFailedInvalidationsOfAccountWritesAreRetried(t *testing.T) {
 	if err := users.UpdateColumns(ctx, u.Id, map[string]any{"enable": false}); err != nil {
 		t.Fatalf("UpdateColumns() with Redis down: %v; the database write must stand", err)
 	}
-	env.Mini.SetError("")
+	// Inspect the server directly while network commands still fail. Once
+	// Redis recovers, the retry is allowed to delete the key immediately.
 	if !env.Mini.Exists(key) {
 		t.Fatal("the cached row went although the invalidation failed; the test needs the failure")
 	}
+	env.Mini.SetError("")
 
 	deadline := time.Now().Add(5 * time.Second)
 	for env.Mini.Exists(key) {
