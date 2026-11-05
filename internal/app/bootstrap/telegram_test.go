@@ -10,6 +10,7 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/perfect-panel/server/internal/app/migration/schema"
 	"github.com/perfect-panel/server/internal/config"
 	"github.com/perfect-panel/server/internal/module/identity/entity/auth"
 	"github.com/perfect-panel/server/pkg/logger/logtest"
@@ -109,20 +110,55 @@ func TestTelegramReadFailureStillFailsTheLoad(t *testing.T) {
 	}
 }
 
-// Start, end to end on the CI database: the migration runs and a malformed
-// telegram config does not stop the server.
+// The shared PostgreSQL fixture exercises Start with real embedded SQL
+// migrations and a malformed Telegram setting. It needs no database-creation
+// privilege or exclusive database: the fork's offline cutover has its own test.
 func TestStartToleratesAMalformedTelegramConfig(t *testing.T) {
 	postgresDSN := os.Getenv("PPANEL_TEST_POSTGRES_DSN")
 	if postgresDSN == "" {
 		t.Skip("set PPANEL_TEST_POSTGRES_DSN to run the startup test")
 	}
+	testStartWithMalformedTelegram(t, postgresDSN, func(_ context.Context, cfg orm.Config) error {
+		db := orm.Mysql{Config: cfg}
+		return schema.Up(db.Driver(), db.MigrationDsn())
+	})
+}
+
+// The production migrator must finish the cutover before starting the same
+// loaders. Its offline, empty-database check cannot share a DB with other tests.
+func TestOrderedStartToleratesAMalformedTelegramConfig(t *testing.T) {
+	dsn := os.Getenv("PPANEL_TEST_ORDERED_STARTUP_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("set PPANEL_TEST_ORDERED_STARTUP_POSTGRES_DSN to a dedicated loopback _test database")
+	}
+	verifyRecoveryDSN(t, "postgres", dsn)
+	cfg := orm.ParseDSN(dsn)
+	if cfg == nil {
+		t.Fatal("invalid PostgreSQL DSN")
+	}
+	_, store := openMigrationTestStore(t, *cfg)
+	testStartWithMalformedTelegram(t, dsn, func(ctx context.Context, cfg orm.Config) error {
+		return MigrateOrderedDatabase(ctx, cfg, store)
+	})
+	if marker, err := orderedMarker(t.Context(), store); err != nil || marker != "complete" {
+		t.Fatalf("ordered startup marker = %q: %v", marker, err)
+	}
+}
+
+func testStartWithMalformedTelegram(t *testing.T, postgresDSN string, migrate func(context.Context, orm.Config) error) {
+	t.Helper()
 	logtest.Discard(t)
 	store := healthyStore()
 	store.auth.methods["telegram"].Config = `{"bot_token":`
 	var initial config.Config
-	initial.SetDatabaseConfig(*orm.ParseDSN(postgresDSN))
+	cfg := orm.ParseDSN(postgresDSN)
+	if cfg == nil {
+		t.Fatal("invalid PostgreSQL DSN")
+	}
+	initial.SetDatabaseConfig(*cfg)
 	deps, h := newHarness(store, initial)
 	deps.Administrators = &administrators{hasAccounts: true}
+	deps.MigrateDatabase = migrate
 
 	if err := Start(context.Background(), deps); err != nil {
 		t.Fatalf("Start() = %v, want the malformed telegram config tolerated", err)

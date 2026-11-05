@@ -44,6 +44,31 @@ func mustMigrate(t *testing.T, ctx context.Context, deps *Dependencies) {
 	}
 }
 
+func openMigrationTestStore(t *testing.T, cfg orm.Config) (*gorm.DB, *repository.GormStore) {
+	t.Helper()
+	db, err := orm.ConnectDatabase(orm.Mysql{Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := pool.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	mini := miniredis.RunT(t)
+	rds := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() {
+		if err := rds.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return db, repository.NewGormStoreWithBuilders(db, rds, repository.Builders{Platform: platform.NewRepoBuilder(), Network: network.NewRepoBuilder(rds), Billing: billing.NewRepoBuilder(), Subscription: subscription.NewRepoBuilder(), Identity: identity.NewRepoBuilder(), Support: support.NewRepoBuilder(), Notification: notification.NewRepoBuilder()})
+}
+
 func TestOrderedCutoverMySQL(t *testing.T) {
 	runCutoverIntegration(t, "mysql", os.Getenv("PPANEL_TEST_ORDERED_ROUTING_MYSQL_DSN"))
 }
@@ -70,24 +95,7 @@ func runCutoverIntegration(t *testing.T, dialect, dsn string) {
 	if !exists || version != 2179 {
 		t.Fatalf("expected dedicated genuine 02179 fixture; never downgrade a 02180 DB, got %d", version)
 	}
-	db, err := orm.ConnectDatabase(orm.Mysql{Config: *cfg})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool, _ := db.DB()
-	defer func() {
-		if err := pool.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	mini := miniredis.RunT(t)
-	rds := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	defer func() {
-		if err := rds.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	store := repository.NewGormStoreWithBuilders(db, rds, repository.Builders{Platform: platform.NewRepoBuilder(), Network: network.NewRepoBuilder(rds), Billing: billing.NewRepoBuilder(), Subscription: subscription.NewRepoBuilder(), Identity: identity.NewRepoBuilder(), Support: support.NewRepoBuilder(), Notification: notification.NewRepoBuilder()})
+	db, store := openMigrationTestStore(t, *cfg)
 	set := func(key, value string) {
 		t.Helper()
 		if err := store.System().UpdateValueByCategoryKey(ctx, "server", key, value, "string"); err != nil {

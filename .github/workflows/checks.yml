@@ -90,10 +90,16 @@ jobs:
 
       # The DSNs switch on the database-backed tests, including the MySQL and
       # PostgreSQL (pgx) migration runs in internal/app/migration/schema.
+      - name: Create the isolated ordered-startup test database
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: docker exec "$PG_CONTAINER" createdb -U postgres ppanel_startup_test
+
       - name: Test with MySQL 8 and PostgreSQL
         env:
           PPANEL_TEST_MYSQL_DSN: "root:mysql@tcp(127.0.0.1:3306)/ppanel?charset=utf8mb4&parseTime=true&loc=UTC&interpolateParams=true"
           PPANEL_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/ppanel?sslmode=disable
+          PPANEL_TEST_ORDERED_STARTUP_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/ppanel_startup_test?sslmode=disable
           PPANEL_TEST_EPAY_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/ppanel?sslmode=disable
         run: go test ./...
 
