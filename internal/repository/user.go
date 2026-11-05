@@ -28,6 +28,7 @@ type UserRepo interface {
 	QueryPageList(ctx context.Context, page, size int, filter *user.UserFilterParams) ([]*user.User, int64, error)
 	FindUsersByIds(ctx context.Context, ids []int64) ([]*user.User, error)
 	FindEnabledUserIDs(ctx context.Context, ids []int64) ([]int64, error)
+	FindExistingUserIDs(ctx context.Context, ids []int64) ([]int64, error)
 	CountAffiliates(ctx context.Context, refererId int64) (int64, error)
 	QueryAffiliateList(ctx context.Context, refererId int64, page, size int) ([]*user.User, int64, error)
 	QueryAdminUsers(ctx context.Context) ([]*user.User, error)

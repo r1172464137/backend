@@ -16,15 +16,16 @@ import (
 // as the legacy logic did.
 func newPlatformModule(store repository.Store, srv *Application) platform.Service {
 	return platform.New(platform.Deps{
-		Logs:    store.Log(),
-		System:  store.System(),
-		Traffic: store.TrafficLog(),
-		Store:   store,
-		Orders:  store.Order(),
-		Users:   store.User(),
-		Tickets: store.Ticket(),
-		Nodes:   store.Node(),
-		Cache:   srv.Redis,
+		Logs:         store.Log(),
+		System:       store.System(),
+		Traffic:      store.TrafficLog(),
+		Store:        store,
+		Orders:       store.Order(),
+		Users:        store.User(),
+		RoutingUsers: store.User(),
+		Tickets:      store.Ticket(),
+		Nodes:        store.Node(),
+		Cache:        srv.Redis,
 		OnLogSettingChanged: func(autoClear bool, clearDays int64) {
 			srv.Runtime.UpdateConfig(func(current *config.Config) {
 				current.Log = config.Log{AutoClear: autoClear, ClearDays: clearDays}

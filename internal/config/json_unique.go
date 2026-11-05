@@ -101,7 +101,7 @@ func validateRoutingJSONFields(data []byte) error {
 	for _, part := range []struct {
 		name string
 		typ  reflect.Type
-	}{{"outbounds", reflect.TypeOf(NodeOutbound{})}, {"rules", reflect.TypeOf(NodeRoute{})}} {
+	}{{"outbounds", reflect.TypeOf(NodeOutbound{})}, {"rules", reflect.TypeOf(NodeRoute{})}, {"user_defaults", reflect.TypeOf(NodeUserDefault{})}} {
 		raw, ok := fields[part.name]
 		if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			continue
@@ -111,8 +111,53 @@ func validateRoutingJSONFields(data []byte) error {
 			return fmt.Errorf("%s must be an array", part.name)
 		}
 		for i, item := range items {
-			if _, err := exactJSONFields(item, part.typ); err != nil {
+			entry, err := exactJSONFields(item, part.typ)
+			if err != nil {
 				return fmt.Errorf("%s[%d]: %w", part.name, i, err)
+			}
+			if part.name == "rules" {
+				if users, ok := entry["user_ids"]; ok && bytes.Equal(bytes.TrimSpace(users), []byte("null")) {
+					return fmt.Errorf("rules[%d].user_ids must not be null", i)
+				}
+			}
+		}
+	}
+	if raw, ok := fields["dns_policy"]; ok {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("dns_policy must not be null")
+		}
+		policy, err := exactJSONFields(raw, reflect.TypeOf(NodeDNSPolicy{}))
+		if err != nil {
+			return fmt.Errorf("dns_policy: %w", err)
+		}
+		if resolvers, ok := policy["resolvers"]; ok {
+			var list []json.RawMessage
+			if err := json.Unmarshal(resolvers, &list); err != nil {
+				return fmt.Errorf("dns_policy.resolvers must be an array")
+			}
+			for i, item := range list {
+				if _, err := exactJSONFields(item, reflect.TypeOf(NodeDNSResolver{})); err != nil {
+					return fmt.Errorf("dns_policy.resolvers[%d]: %w", i, err)
+				}
+			}
+		}
+	}
+	var version int
+	_ = json.Unmarshal(fields["version"], &version)
+	if version == 1 {
+		if _, ok := fields["user_defaults"]; ok {
+			return fmt.Errorf("version 1 cannot contain user_defaults")
+		}
+		if _, ok := fields["dns_policy"]; ok {
+			return fmt.Errorf("version 1 cannot contain dns_policy")
+		}
+		for _, part := range []struct{ name, field string }{{"outbounds", "via_outbound_id"}, {"rules", "user_ids"}} {
+			var list []map[string]json.RawMessage
+			_ = json.Unmarshal(fields[part.name], &list)
+			for _, item := range list {
+				if _, ok := item[part.field]; ok {
+					return fmt.Errorf("version 1 cannot contain %s", part.field)
+				}
 			}
 		}
 	}

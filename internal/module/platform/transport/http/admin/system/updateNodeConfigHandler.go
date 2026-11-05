@@ -61,7 +61,7 @@ func UpdateNodeConfigHandler(service platform.Service) app.HandlerFunc {
 		result := httpx.BuildHTTPResult(nil, err)
 		if body, ok := result.Body.(*httpx.ResponseErrorBean); ok {
 			switch body.Code {
-			case xerr.PlatformRoutingRevisionConflict:
+			case xerr.PlatformRoutingRevisionConflict, xerr.PlatformRoutingDowngradeRequired:
 				result.StatusCode = consts.StatusConflict
 			case xerr.PlatformLegacyRoutingRemoved:
 				result.StatusCode = consts.StatusUnprocessableEntity

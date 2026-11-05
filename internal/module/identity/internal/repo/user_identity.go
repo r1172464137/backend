@@ -80,6 +80,18 @@ func (m *UserRepo) FindAccountState(ctx context.Context, id int64) (*user.Accoun
 	return &state, err
 }
 
+// FindExistingUserIDs accepts disabled accounts but excludes soft-deleted accounts.
+func (m *UserRepo) FindExistingUserIDs(ctx context.Context, ids []int64) ([]int64, error) {
+	result := make([]int64, 0)
+	if len(ids) == 0 {
+		return result, nil
+	}
+	err := m.QueryNoCacheCtx(ctx, &result, func(conn *gorm.DB, v interface{}) error {
+		return conn.Model(&user.User{}).Where("id IN ?", ids).Pluck("id", v).Error
+	})
+	return result, err
+}
+
 // FindEnabledUserIDs is the batch account-state gate used by node hot paths.
 // GORM's default scope excludes soft-deleted users; the explicit enable
 // predicate keeps disabled accounts from retaining service credentials.

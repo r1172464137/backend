@@ -2,6 +2,7 @@ package systemsetting
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 
 	"github.com/perfect-panel/server/internal/config"
@@ -63,7 +64,7 @@ func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, err
 		IPStrategy:             dbConfig.IPStrategy,
 		TrafficReportThreshold: dbConfig.TrafficReportThreshold,
 		DNS:                    []dto.PlatformNodeDNSSnapshot{},
-		RoutingCapabilities:    []int{1},
+		RoutingCapabilities:    []int{1, 2},
 	}
 
 	normal := []config.NodeDNS{}
@@ -115,5 +116,8 @@ func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, err
 		}
 	}
 	c.RoutingMode = "global-v1"
+	if c.Routing != nil {
+		c.RoutingMode = fmt.Sprintf("global-v%d", c.Routing.Version)
+	}
 	return c, nil
 }

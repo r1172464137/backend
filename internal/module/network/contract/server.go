@@ -220,9 +220,10 @@ type Protocol struct {
 }
 
 type QueryServerConfigRequest struct {
-	ServerID  int64    `path:"server_id"`
-	SecretKey string   `form:"secret_key"`
-	Protocols []string `form:"protocols,omitempty"`
+	ServerID       int64    `path:"server_id"`
+	SecretKey      string   `form:"secret_key"`
+	Protocols      []string `form:"protocols,omitempty"`
+	RoutingVersion int      `json:"-"`
 }
 
 type QueryServerConfigResponse struct {
@@ -234,20 +235,33 @@ type QueryServerConfigResponse struct {
 	Protocols              []Protocol         `json:"protocols"`
 	Total                  int64              `json:"total"`
 	Routing                *NodeRoutingPolicy `json:"routing"`
+	IdentitySnapshot       *IdentitySnapshot  `json:"identity_snapshot,omitempty"`
+}
+
+type IdentitySnapshot struct {
+	SnapshotID string                 `json:"snapshot_id"`
+	Protocols  []ProtocolUserSnapshot `json:"protocols"`
+}
+
+type ProtocolUserSnapshot struct {
+	Protocol string       `json:"protocol"`
+	Users    []ServerUser `json:"users"`
 }
 
 // NodeRoutingPolicy is the node-delivery projection. The identity fields are
 // not part of the persisted routing content and identify the exact candidate.
 type NodeRoutingPolicy struct {
-	Version                 int               `json:"version" binding:"required"`
-	Outbounds               []NodeOutbound    `json:"outbounds" binding:"required"`
-	Rules                   []NodeRoutingRule `json:"rules" binding:"required"`
-	DefaultOutboundID       string            `json:"default_outbound_id" binding:"required"`
-	Mode                    string            `json:"mode" binding:"required"`
-	Source                  string            `json:"source" binding:"required"`
-	SourceServerID          int64             `json:"source_server_id" binding:"required"`
-	SourceRevision          int64             `json:"source_revision" binding:"required"`
-	LocalTransitionRevision int64             `json:"local_transition_revision" binding:"required"`
+	Version                 int                      `json:"version" binding:"required"`
+	Outbounds               []NodeOutbound           `json:"outbounds" binding:"required"`
+	Rules                   []NodeRoutingRule        `json:"rules" binding:"required"`
+	DefaultOutboundID       string                   `json:"default_outbound_id" binding:"required"`
+	UserDefaults            []config.NodeUserDefault `json:"user_defaults,omitempty"`
+	DNSPolicy               *config.NodeDNSPolicy    `json:"dns_policy,omitempty"`
+	Mode                    string                   `json:"mode" binding:"required"`
+	Source                  string                   `json:"source" binding:"required"`
+	SourceServerID          int64                    `json:"source_server_id" binding:"required"`
+	SourceRevision          int64                    `json:"source_revision" binding:"required"`
+	LocalTransitionRevision int64                    `json:"local_transition_revision" binding:"required"`
 }
 
 type NodeRoutingRule struct {
@@ -257,6 +271,19 @@ type NodeRoutingRule struct {
 	Kind       string   `json:"kind" binding:"required"`
 	Values     []string `json:"values" binding:"required"`
 	OutboundID string   `json:"outbound_id" binding:"required"`
+	UserIDs    []int64  `json:"user_ids,omitempty"`
+}
+
+func (p NodeRoutingPolicy) MarshalJSON() ([]byte, error) {
+	type alias NodeRoutingPolicy
+	var defaults *[]config.NodeUserDefault
+	if p.Version == config.RoutingVersion2 {
+		defaults = &p.UserDefaults
+	}
+	return json.Marshal(struct {
+		*alias
+		UserDefaults *[]config.NodeUserDefault `json:"user_defaults,omitempty"`
+	}{alias: (*alias)(&p), UserDefaults: defaults})
 }
 
 // A node response is always ordered-v1; missing policy fails closed.
@@ -279,14 +306,16 @@ type GetServerNodeConfigRequest struct {
 }
 
 type GetServerNodeConfigResponse struct {
-	Global        ServerNodeConfigValues   `json:"global"`
-	Override      ServerNodeConfigOverride `json:"override"`
-	Effective     ServerNodeConfigValues   `json:"effective"`
-	RoutingStatus RoutingStatusView        `json:"routing_status"`
+	Global            ServerNodeConfigValues   `json:"global"`
+	Override          ServerNodeConfigOverride `json:"override"`
+	Effective         ServerNodeConfigValues   `json:"effective"`
+	RoutingStatus     RoutingStatusView        `json:"routing_status"`
+	DesiredSnapshotID *string                  `json:"desired_snapshot_id"`
 }
 
 type UpdateServerNodeConfigRequest struct {
-	ServerID int64 `json:"server_id" validate:"required"`
+	ServerID         int64 `json:"server_id" validate:"required"`
+	RoutingDowngrade bool  `json:"routing_downgrade,omitempty"`
 	ServerNodeConfigOverride
 	RequestFields map[string]struct{} `json:"-" swaggerignore:"true"`
 }
@@ -397,6 +426,7 @@ type RoutingCandidateIdentity struct {
 	SourceServerID          int64  `json:"source_server_id"`
 	SourceRevision          int64  `json:"source_revision"`
 	LocalTransitionRevision int64  `json:"local_transition_revision"`
+	SnapshotID              string `json:"snapshot_id,omitempty"`
 }
 type RoutingReportError struct {
 	Identity *RoutingCandidateIdentity `json:"identity,omitempty"`
@@ -438,6 +468,7 @@ type ServerUser struct {
 	UUID        string `json:"uuid"`
 	SpeedLimit  int64  `json:"speed_limit"`
 	DeviceLimit int64  `json:"device_limit"`
+	AccountID   int64  `json:"account_id,omitempty"`
 }
 
 type UpdateServerRequest struct {

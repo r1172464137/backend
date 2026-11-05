@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
@@ -123,7 +124,7 @@ func Record(ctx context.Context, client *redis.Client, id int64, request *dto.Se
 		return fmt.Errorf("invalid server report")
 	}
 	field := request.InstanceID
-	verified := request.RoutingVersion == 1 && instancePattern.MatchString(field)
+	verified := (request.RoutingVersion == 1 || request.RoutingVersion == 2) && instancePattern.MatchString(field)
 	if !verified {
 		return storeUnknown(ctx, client, id)
 	}
@@ -132,7 +133,7 @@ func Record(ctx context.Context, client *redis.Client, id int64, request *dto.Se
 		return fmt.Errorf("routing report sequence is required")
 	}
 	for _, candidate := range []*dto.RoutingCandidateIdentity{request.RoutingApplied, request.RoutingPending} {
-		if candidate != nil && !validCandidate(candidate, id) {
+		if candidate != nil && (!validCandidate(candidate, id) || (request.RoutingVersion == 1 && !strings.HasPrefix(candidate.Mode, "ordered-v1-"))) {
 			_ = storeUnknown(ctx, client, id)
 			return fmt.Errorf("invalid routing candidate identity")
 		}
@@ -140,7 +141,7 @@ func Record(ctx context.Context, client *redis.Client, id int64, request *dto.Se
 	var reportError *dto.RoutingReportError
 	if request.RoutingError != nil {
 		e := *request.RoutingError
-		if !knownStages[e.Stage] || (e.Identity != nil && !validCandidate(e.Identity, id)) {
+		if !knownStages[e.Stage] || (e.Identity != nil && (!validCandidate(e.Identity, id) || (request.RoutingVersion == 1 && !strings.HasPrefix(e.Identity.Mode, "ordered-v1-")))) {
 			_ = storeUnknown(ctx, client, id)
 			return fmt.Errorf("invalid routing failure")
 		}
@@ -208,7 +209,7 @@ func Read(ctx context.Context, client *redis.Client, id int64) (dto.RoutingStatu
 		return dto.RoutingStatusView{Known: false}, nil
 	}
 	sequence, err := strconv.ParseUint(stored.Sequence, 10, 64)
-	if err != nil || sequence == 0 || report.Version != 1 || !instancePattern.MatchString(report.InstanceID) || stored.ReceivedAt <= 0 || stored.ContentReceivedAt <= 0 {
+	if err != nil || sequence == 0 || (report.Version != 1 && report.Version != 2) || !instancePattern.MatchString(report.InstanceID) || stored.ReceivedAt <= 0 || stored.ContentReceivedAt <= 0 {
 		return dto.RoutingStatusView{Known: false}, nil
 	}
 	// received_at is the last accepted content, not an old packet heartbeat.
@@ -222,10 +223,20 @@ func validCandidate(c *dto.RoutingCandidateIdentity, id int64) bool {
 	if c.SourceRevision < 0 || c.LocalTransitionRevision < 0 {
 		return false
 	}
+	if strings.HasPrefix(c.Mode, "ordered-v2-") {
+		if len(c.SnapshotID) != 64 {
+			return false
+		}
+		if _, err := hex.DecodeString(c.SnapshotID); err != nil || c.SnapshotID != strings.ToLower(c.SnapshotID) {
+			return false
+		}
+	} else if c.SnapshotID != "" {
+		return false
+	}
 	switch c.Mode {
-	case "ordered-v1-local":
+	case "ordered-v1-local", "ordered-v2-local":
 		return c.Source == "server" && c.SourceServerID == id && c.SourceRevision > 0 && c.SourceRevision == c.LocalTransitionRevision
-	case "ordered-v1-inherited":
+	case "ordered-v1-inherited", "ordered-v2-inherited":
 		return c.Source == "global" && c.SourceServerID == 0 && c.SourceRevision > 0
 	default:
 		return false

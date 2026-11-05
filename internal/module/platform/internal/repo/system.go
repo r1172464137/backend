@@ -320,6 +320,15 @@ func (m *systemRepo) GetLogConfig(ctx context.Context) ([]*system.System, error)
 	return configs, err
 }
 
+// GetInterfaceConfig reads the shared admin menu configuration directly from the database.
+func (m *systemRepo) GetInterfaceConfig(ctx context.Context) ([]*system.System, error) {
+	var configs []*system.System
+	err := m.QueryNoCacheCtx(ctx, &configs, func(conn *gorm.DB, v interface{}) error {
+		return conn.Scopes(systemWhereCategoryKey("interface", "AdminHiddenMenuIds")).Find(v).Error
+	})
+	return configs, err
+}
+
 // systemWhereKey returns a GORM scope filtering by the "key" column.
 // Migrated from internal/model/entity/system/scope.go (renamed with the system prefix
 // to avoid colliding with other domain scopes inside the flat repository package).

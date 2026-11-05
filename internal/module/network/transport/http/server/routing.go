@@ -1,8 +1,11 @@
 package server
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"uuid"
 
 	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
@@ -38,23 +41,66 @@ func validateRoutingDelivery(response *dto.QueryServerConfigResponse, serverID i
 		return fmt.Errorf("invalid routing revision")
 	}
 	switch p.Mode {
-	case "ordered-v1-local":
+	case "ordered-v1-local", "ordered-v2-local":
 		if p.Source != "server" || p.SourceServerID <= 0 || (serverID > 0 && p.SourceServerID != serverID) || p.SourceRevision != p.LocalTransitionRevision {
 			return fmt.Errorf("invalid local routing identity")
 		}
-	case "ordered-v1-inherited":
+	case "ordered-v1-inherited", "ordered-v2-inherited":
 		if p.Source != "global" || p.SourceServerID != 0 {
 			return fmt.Errorf("invalid inherited routing identity")
 		}
 	default:
 		return fmt.Errorf("unknown routing mode %q", p.Mode)
 	}
+	if p.Mode != fmt.Sprintf("ordered-v%d-%s", p.Version, map[string]string{"global": "inherited", "server": "local"}[p.Source]) {
+		return fmt.Errorf("routing version and mode mismatch")
+	}
+	var defaults *[]config.NodeUserDefault
+	if p.Version == config.RoutingVersion1 && response.IdentitySnapshot != nil {
+		return fmt.Errorf("version 1 cannot contain identity snapshot")
+	}
+	if p.Version == config.RoutingVersion2 {
+		if response.IdentitySnapshot == nil || len(response.IdentitySnapshot.SnapshotID) != 64 {
+			return fmt.Errorf("v2 identity snapshot is required")
+		}
+		snapshot := response.IdentitySnapshot
+		if _, err := hex.DecodeString(snapshot.SnapshotID); err != nil || snapshot.SnapshotID != strings.ToLower(snapshot.SnapshotID) {
+			return fmt.Errorf("invalid snapshot ID")
+		}
+		expected := map[string]bool{}
+		for _, v := range response.Protocols {
+			expected[v.Type] = true
+		}
+		seen := map[string]bool{}
+		for _, v := range snapshot.Protocols {
+			if !expected[v.Protocol] || seen[v.Protocol] || v.Users == nil {
+				return fmt.Errorf("invalid snapshot protocol")
+			}
+			seen[v.Protocol] = true
+			ids := map[int64]bool{}
+			uuids := map[string]bool{}
+			for _, u := range v.Users {
+				parsed, err := uuid.Parse(u.UUID)
+				if err != nil || u.Id <= 0 || u.AccountID <= 0 || u.SpeedLimit < 0 || u.DeviceLimit < 0 || ids[u.Id] || uuids[parsed.String()] {
+					return fmt.Errorf("invalid snapshot user")
+				}
+				ids[u.Id] = true
+				uuids[parsed.String()] = true
+			}
+		}
+		if len(seen) != len(expected) {
+			return fmt.Errorf("snapshot missing protocol")
+		}
+		defaults = &p.UserDefaults
+	}
 	content := struct {
-		Version           int                   `json:"version"`
-		Outbounds         []dto.NodeOutbound    `json:"outbounds"`
-		Rules             []dto.NodeRoutingRule `json:"rules"`
-		DefaultOutboundID string                `json:"default_outbound_id"`
-	}{p.Version, p.Outbounds, p.Rules, p.DefaultOutboundID}
+		Version           int                       `json:"version"`
+		Outbounds         []dto.NodeOutbound        `json:"outbounds"`
+		Rules             []dto.NodeRoutingRule     `json:"rules"`
+		DefaultOutboundID string                    `json:"default_outbound_id"`
+		UserDefaults      *[]config.NodeUserDefault `json:"user_defaults,omitempty"`
+		DNSPolicy         *config.NodeDNSPolicy     `json:"dns_policy,omitempty"`
+	}{p.Version, p.Outbounds, p.Rules, p.DefaultOutboundID, defaults, p.DNSPolicy}
 	body, err := json.Marshal(content)
 	if err != nil {
 		return fmt.Errorf("encode routing: %w", err)

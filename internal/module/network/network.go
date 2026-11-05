@@ -108,23 +108,23 @@ func NewRepoBuilder(rds *redis.Client) repository.NetworkBuilder {
 }
 
 func New(deps Deps) Service {
+	api := serverapi.NewService(serverapi.Deps{
+		TrafficUsage:         deps.TrafficUsage,
+		Store:                deps.Store,
+		Redis:                deps.Redis,
+		ReadGlobalNodeConfig: deps.ReadGlobalNodeConfig,
+		Config: func() serverapi.Snapshot {
+			cfg := deps.Config()
+			return serverapi.Snapshot{Node: cfg.Node, Subscribe: cfg.Subscribe}
+		},
+		Multiplier: deps.Multiplier,
+	})
 	return &service{
 		admin: adminserver.NewService(adminserver.Deps{
-			Store:                deps.Store,
-			Redis:                deps.Redis,
-			ReadGlobalNodeConfig: deps.ReadGlobalNodeConfig,
+			Store: deps.Store, Redis: deps.Redis, ReadGlobalNodeConfig: deps.ReadGlobalNodeConfig,
+			DesiredSnapshotID: api.DesiredSnapshotID,
 		}),
-		api: serverapi.NewService(serverapi.Deps{
-			TrafficUsage:         deps.TrafficUsage,
-			Store:                deps.Store,
-			Redis:                deps.Redis,
-			ReadGlobalNodeConfig: deps.ReadGlobalNodeConfig,
-			Config: func() serverapi.Snapshot {
-				cfg := deps.Config()
-				return serverapi.Snapshot{Node: cfg.Node, Subscribe: cfg.Subscribe}
-			},
-			Multiplier: deps.Multiplier,
-		}),
+		api: api,
 		edge: edge.NewService(edge.Deps{
 			Store: deps.Store,
 			Config: func() edge.Snapshot {

@@ -105,6 +105,19 @@ type IdentityTransactor interface {
 	InIdentityTx(context.Context, func(IdentityStore) error) error
 }
 
+// DeliverySnapshot exposes only the read repositories needed for one node package.
+type DeliverySnapshot interface {
+	System() SystemRepo
+	Node() NodeRepo
+	Subscribe() SubscribeRepo
+	User() UserRepo
+	UserSubscription() UserSubscriptionRepo
+}
+
+type DeliverySnapshotTransactor interface {
+	InDeliverySnapshot(context.Context, func(DeliverySnapshot) error) error
+}
+
 type NetworkTransactor interface {
 	InNetworkTx(context.Context, func(NetworkStore) error) error
 }

@@ -72,9 +72,26 @@ func (l *UpdateNodeConfigLogic) UpdateNodeConfig(req *dto.NodeConfig) error {
 				businessErr = xerr.NewErrCode(xerr.PlatformRoutingRevisionConflict)
 				return businessErr
 			}
+			if req.Routing.Version == appconfig.RoutingVersion1 && appconfig.HasRoutingV2Capabilities(current.Routing) && !req.RoutingDowngrade {
+				businessErr = xerr.NewErrCode(xerr.PlatformRoutingDowngradeRequired)
+				return businessErr
+			}
 			policy, err := appconfig.NormalizeNodeRouting(req.Routing)
 			if err != nil {
 				validationErr = err
+				return err
+			}
+			users := l.deps.RoutingUsers
+			if view, ok := store.(interface{ User() repository.UserRepo }); ok {
+				users = view.User()
+			}
+			if err := repository.ValidateNewRoutingAccounts(l.ctx, users, current.Routing, policy); err != nil {
+				var missing *repository.RoutingAccountNotFoundError
+				if errors.As(err, &missing) {
+					validationErr = err
+				} else {
+					readErr = err
+				}
 				return err
 			}
 			if current.RoutingRevision == math.MaxInt64 {

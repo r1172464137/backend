@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/perfect-panel/server/internal/config"
 	"github.com/perfect-panel/server/internal/infra/mapping"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
@@ -99,7 +100,7 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 	if err != nil {
 		return nil, err
 	}
-	return &dto.QueryServerConfigResponse{
+	response := &dto.QueryServerConfigResponse{
 		TrafficReportThreshold: nodeSnapshot.TrafficReportThreshold,
 		PushInterval:           nodeSnapshot.NodePushInterval,
 		PullInterval:           nodeSnapshot.NodePullInterval,
@@ -108,5 +109,9 @@ func (l *QueryServerProtocolConfigLogic) QueryServerProtocolConfig(req *dto.Quer
 		Protocols:              protocols,
 		Total:                  int64(len(protocols)),
 		Routing:                routing,
-	}, nil
+	}
+	if routing.Version == config.RoutingVersion2 && req.RoutingVersion >= 2 {
+		return l.v2Delivery(req, response)
+	}
+	return response, nil
 }

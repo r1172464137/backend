@@ -148,7 +148,12 @@ func TestRoutingCapabilityCheckedBefore304(t *testing.T) {
 			if cached.Response.StatusCode() != 304 {
 				t.Fatalf("supported status %d", cached.Response.StatusCode())
 			}
-			for _, capability := range []string{"", "2", "0"} {
+			compatible := queryContext(accept, "2", etag)
+			handler(context.Background(), compatible)
+			if compatible.Response.StatusCode() != 304 {
+				t.Fatalf("v2 capability for v1 policy: %d", compatible.Response.StatusCode())
+			}
+			for _, capability := range []string{"", "0", "3"} {
 				old := queryContext(accept, capability, etag)
 				handler(context.Background(), old)
 				if old.Response.StatusCode() != 426 {

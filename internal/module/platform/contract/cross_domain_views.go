@@ -104,6 +104,7 @@ type NodeConfig struct {
 	DNS                    []PlatformNodeDNSSnapshot `json:"dns"`
 	Routing                *config.NodeRouting       `json:"routing"`
 	RoutingRevision        int64                     `json:"routing_revision"`
+	RoutingDowngrade       bool                      `json:"routing_downgrade,omitempty"`
 	RoutingMode            string                    `json:"routing_mode"`
 	RoutingCapabilities    []int                     `json:"routing_capabilities"`
 	RequestFields          map[string]struct{}       `json:"-" swaggerignore:"true"`

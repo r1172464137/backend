@@ -23,7 +23,7 @@ import (
 // @Security NodeSecret
 // @Param server_id path int true "Server ID"
 // @Param protocols query []string false "Protocols to include" collectionFormat(multi)
-// @Param X-PPanel-Routing-Version header string true "Must be 1"
+// @Param X-PPanel-Routing-Version header string true "Maximum supported routing version: 1 or 2"
 // @Success 200 {object} httpx.ResponseSuccessBean{data=dto.QueryServerConfigResponse}
 // @Failure 426 {object} httpx.ResponseErrorBean "Node routing upgrade required"
 // @Router /v2/server/{server_id} [get]
@@ -49,15 +49,24 @@ func QueryServerProtocolConfigHandler(service network.Service, nodeSecret func()
 			return
 		}
 
-		// Ordered-v1 is the only runtime mode. Reject old nodes before any
-		// conditional-response or configuration read can return a candidate.
-		if string(ctx.GetHeader(routingVersionHeader)) != "1" {
+		// Capability is checked before any conditional response.
+		switch string(ctx.GetHeader(routingVersionHeader)) {
+		case "1":
+			req.RoutingVersion = 1
+		case "2":
+			req.RoutingVersion = 2
+		default:
 			writeRoutingUpgrade(ctx)
 			return
 		}
 		resp, err := service.QueryServerProtocolConfig(c, &req)
 		if err != nil {
 			writeServerReportResult(ctx, err)
+			return
+		}
+		// Never project version 2 to a version 1 node.
+		if resp.Routing != nil && resp.Routing.Version > req.RoutingVersion {
+			writeRoutingUpgradeMessage(ctx, "Node must support routing version 2")
 			return
 		}
 		if err := validateRoutingDelivery(resp, serverID); err != nil {

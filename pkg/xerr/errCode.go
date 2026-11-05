@@ -64,6 +64,8 @@ const PlatformRoutingRevisionConflict uint32 = 160001
 const PlatformLegacyRoutingRemoved uint32 = 160003
 const NetworkLegacyRoutingRemoved uint32 = 140003
 const NetworkNodeProtocolInvalid uint32 = 140004
+const NetworkRoutingDowngradeRequired uint32 = 140005
+const PlatformRoutingDowngradeRequired uint32 = 160004
 
 // Request error
 const (

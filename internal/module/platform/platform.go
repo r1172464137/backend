@@ -44,6 +44,8 @@ type Service interface {
 
 	// System configuration management; updates persist the settings and
 	// re-initialize the owning subsystem through injected callbacks.
+	GetInterfaceConfig(ctx context.Context) (*dto.InterfaceConfig, error)
+	UpdateInterfaceConfig(ctx context.Context, req *dto.InterfaceConfig) error
 	GetCurrencyConfig(ctx context.Context) (*dto.CurrencyConfig, error)
 	GetInviteConfig(ctx context.Context) (*dto.InviteConfig, error)
 	GetNodeConfig(ctx context.Context) (*dto.NodeConfig, error)
@@ -115,6 +117,7 @@ type Deps struct {
 	SubscribePath     func() string
 	ApplyVerifyConfig func(req *dto.VerifyConfig)
 	Multiplier        systemsetting.MultiplierFunc
+	RoutingUsers      repository.UserRepo
 
 	// Dashboard read ports and cache.
 	Orders  dashboard.OrderStatsReader
@@ -160,6 +163,7 @@ func New(deps Deps) Service {
 			SubscribePath:     deps.SubscribePath,
 			ApplyVerifyConfig: deps.ApplyVerifyConfig,
 			Multiplier:        deps.Multiplier,
+			RoutingUsers:      deps.RoutingUsers,
 		}),
 		dashboard: dashboard.NewService(dashboard.Deps{
 			Orders:  deps.Orders,
@@ -263,6 +267,14 @@ func (s *service) GetMessageLogList(ctx context.Context, req *dto.GetMessageLogL
 	return s.logs.GetMessageLogList(ctx, req)
 }
 
+func (s *service) GetInterfaceConfig(ctx context.Context) (*dto.InterfaceConfig, error) {
+	return s.settings.GetInterfaceConfig(ctx)
+}
+
+func (s *service) UpdateInterfaceConfig(ctx context.Context, req *dto.InterfaceConfig) error {
+	return s.settings.UpdateInterfaceConfig(ctx, req)
+}
+
 func (s *service) GetCurrencyConfig(ctx context.Context) (*dto.CurrencyConfig, error) {
 	return s.settings.GetCurrencyConfig(ctx)
 }
@@ -277,6 +289,11 @@ func (s *service) GetNodeConfig(ctx context.Context) (*dto.NodeConfig, error) {
 
 func (s *service) ReadNodeConfigSnapshot(ctx context.Context) (config.NodeConfig, error) {
 	return s.settings.ReadNodeConfigSnapshot(ctx)
+}
+
+// ReadNodeConfigSnapshotFromRepo reads through the caller's transaction.
+func ReadNodeConfigSnapshotFromRepo(ctx context.Context, repo repository.SystemRepo) (config.NodeConfig, error) {
+	return systemsetting.ReadNodeConfigSnapshotFromRepo(ctx, repo)
 }
 
 func (s *service) GetNodeMultiplier(ctx context.Context) (*dto.GetNodeMultiplierResponse, error) {

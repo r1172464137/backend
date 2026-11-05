@@ -76,6 +76,8 @@ func registerAdminServerRoutes(router *server.Hertz, deps Dependencies) {
 func registerAdminSystemRoutes(router *server.Hertz, deps Dependencies) {
 	group := router.Group("/v1/admin/system")
 	group.Use(deps.authMiddleware())
+	group.GET("/interface_config", adminSystem.GetInterfaceConfigHandler(deps.Platform))
+	group.PUT("/interface_config", adminSystem.UpdateInterfaceConfigHandler(deps.Platform))
 	group.GET("/currency_config", adminSystem.GetCurrencyConfigHandler(deps.Platform))
 	group.PUT("/currency_config", adminSystem.UpdateCurrencyConfigHandler(deps.Platform))
 	group.GET("/get_node_multiplier", adminSystem.GetNodeMultiplierHandler(deps.Platform))

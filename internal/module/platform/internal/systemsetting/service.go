@@ -20,8 +20,9 @@ type PlatformTransactor interface {
 }
 
 type Deps struct {
-	System repository.SystemRepo
-	Store  PlatformTransactor
+	System       repository.SystemRepo
+	Store        PlatformTransactor
+	RoutingUsers repository.UserRepo
 	// Reinitialize re-runs a subsystem's initialization after its
 	// configuration changed.
 	Reinitialize func(subsystem string)

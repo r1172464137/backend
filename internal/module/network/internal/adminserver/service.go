@@ -17,6 +17,7 @@ type Deps struct {
 	Store                Store
 	Redis                *redis.Client
 	ReadGlobalNodeConfig func(context.Context) (config.NodeConfig, error)
+	DesiredSnapshotID    func(context.Context, int64, dto.RoutingStatusView) (*string, error)
 }
 
 // Service is the admin server-management entry point used by the network

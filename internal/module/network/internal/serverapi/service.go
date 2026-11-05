@@ -5,6 +5,7 @@ package serverapi
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/perfect-panel/server/internal/config"
@@ -53,6 +54,50 @@ func (s *Service) GetServerUserList(ctx context.Context, req *dto.GetServerUserL
 
 func (s *Service) QueryServerProtocolConfig(ctx context.Context, req *dto.QueryServerConfigRequest) (*dto.QueryServerConfigResponse, error) {
 	return newQueryServerProtocolConfigLogic(ctx, s.deps).QueryServerProtocolConfig(req)
+}
+
+// DesiredSnapshotID derives the current snapshot for the verified node's exact filter.
+func (s *Service) DesiredSnapshotID(ctx context.Context, serverID int64, status dto.RoutingStatusView) (*string, error) {
+	if !status.Known || !status.ReporterVerified || status.Report == nil || status.Report.Version != 2 {
+		return nil, nil
+	}
+	var identity *dto.RoutingCandidateIdentity
+	var failed *dto.RoutingCandidateIdentity
+	if status.Report.Error != nil {
+		failed = status.Report.Error.Identity
+	}
+	for _, id := range []*dto.RoutingCandidateIdentity{status.Report.Pending, status.Report.Applied, failed} {
+		if id != nil && id.SnapshotID != "" {
+			identity = id
+			break
+		}
+	}
+	if identity == nil {
+		return nil, nil
+	}
+	filter, err := routingstatus.ReadFilter(ctx, s.deps.Redis, serverID, identity.SnapshotID)
+	if err != nil {
+		return nil, nil
+	} // Missing filter is unknown, never an assumed all-protocol delivery.
+	filter, err = routingstatus.CanonicalFilter(filter)
+	if err != nil {
+		return nil, nil
+	}
+	// Administrative observation must not activate subscriptions or publish a
+	// delivery filter for a candidate that no node has fetched.
+	logic := newQueryServerProtocolConfigLogic(ctx, s.deps)
+	response, err := logic.v2Snapshot(&dto.QueryServerConfigRequest{ServerID: serverID, Protocols: filter}, filter)
+	if errors.Is(err, errPendingSnapshotSubscription) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if response.IdentitySnapshot == nil || response.Routing.Version != 2 {
+		return nil, nil
+	}
+	id := response.IdentitySnapshot.SnapshotID
+	return &id, nil
 }
 
 func (s *Service) PushOnlineUsers(ctx context.Context, req *dto.OnlineUsersRequest) error {

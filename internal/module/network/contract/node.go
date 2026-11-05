@@ -48,6 +48,7 @@ type NodeDNS struct {
 
 type NodeOutbound struct {
 	ID                   string   `json:"id,omitempty"`
+	ViaOutboundID        string   `json:"via_outbound_id,omitempty"`
 	Name                 string   `json:"name"`
 	Protocol             string   `json:"protocol"`
 	Address              string   `json:"address"`

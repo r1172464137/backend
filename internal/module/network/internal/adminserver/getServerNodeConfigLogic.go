@@ -2,6 +2,7 @@ package adminserver
 
 import (
 	"context"
+	"fmt"
 
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/internal/nodeconfig"
@@ -43,7 +44,7 @@ func (l *GetServerNodeConfigLogic) GetServerNodeConfig(req *dto.GetServerNodeCon
 	if err != nil {
 		return nil, err
 	}
-	global.Routing, global.RoutingMode = globalPolicy, "global-v1"
+	global.Routing, global.RoutingMode = globalPolicy, fmt.Sprintf("global-v%d", globalPolicy.Version)
 	effective := nodeconfig.CloneValues(global)
 	if err := nodeconfig.ApplyOverride(&effective, override); err != nil {
 		l.Errorf("[GetServerNodeConfig] ApplyOverride Error: %v", err.Error())
@@ -60,18 +61,27 @@ func (l *GetServerNodeConfigLogic) GetServerNodeConfig(req *dto.GetServerNodeCon
 		return nil, err
 	}
 	effective.Routing, effective.RoutingRevision = effectivePolicy, effectivePolicy.SourceRevision
-	effective.RoutingMode = "global-v1"
+	effective.RoutingMode = fmt.Sprintf("global-v%d", effectivePolicy.Version)
 	if !overrideResp.InheritRouting {
-		effective.RoutingMode = "local-v1"
+		effective.RoutingMode = fmt.Sprintf("local-v%d", effectivePolicy.Version)
 	}
 	status, err := routingstatus.Read(l.ctx, l.deps.Redis, req.ServerID)
 	if err != nil {
 		status = dto.RoutingStatusView{Known: false}
 	}
+	var desired *string
+	if effectivePolicy.Version == 2 && l.deps.DesiredSnapshotID != nil {
+		desired, err = l.deps.DesiredSnapshotID(l.ctx, req.ServerID, status)
+		if err != nil {
+			l.Errorw("cannot calculate desired snapshot", logger.Field("error", err.Error()))
+			desired = nil
+		}
+	}
 	return &dto.GetServerNodeConfigResponse{
-		Global:        global,
-		Override:      overrideResp,
-		Effective:     effective,
-		RoutingStatus: status,
+		Global:            global,
+		Override:          overrideResp,
+		Effective:         effective,
+		RoutingStatus:     status,
+		DesiredSnapshotID: desired,
 	}, nil
 }

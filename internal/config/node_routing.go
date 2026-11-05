@@ -17,6 +17,7 @@ import (
 // limits. Both the submitted and canonical forms are bounded before use.
 const (
 	RoutingVersion1         = 1
+	RoutingVersion2         = 2
 	MaxRoutingOutbounds     = 128
 	MaxRoutingRules         = 512
 	MaxRoutingValuesPerRule = 1024
@@ -36,10 +37,44 @@ var routingUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89a
 // Limits: 128 outbounds, 512 rules, 1024 values per rule, 8192 aggregate
 // values, 256 KiB canonical match text and 1 MiB final JSON.
 type NodeRouting struct {
-	Version           int            `json:"version" binding:"required"`
-	Outbounds         []NodeOutbound `json:"outbounds" binding:"required"`
-	Rules             []NodeRoute    `json:"rules" binding:"required"`
-	DefaultOutboundID string         `json:"default_outbound_id" binding:"required"`
+	Version           int               `json:"version" binding:"required"`
+	Outbounds         []NodeOutbound    `json:"outbounds" binding:"required"`
+	Rules             []NodeRoute       `json:"rules" binding:"required"`
+	DefaultOutboundID string            `json:"default_outbound_id" binding:"required"`
+	UserDefaults      []NodeUserDefault `json:"user_defaults,omitempty" yaml:",omitempty"`
+	DNSPolicy         *NodeDNSPolicy    `json:"dns_policy,omitempty" yaml:",omitempty"`
+}
+
+type NodeUserDefault struct {
+	UserID     int64  `json:"user_id"`
+	OutboundID string `json:"outbound_id"`
+}
+
+type NodeDNSPolicy struct {
+	QueryStrategy string            `json:"query_strategy"`
+	Resolvers     []NodeDNSResolver `json:"resolvers"`
+}
+
+type NodeDNSResolver struct {
+	ID          string   `json:"id"`
+	Protocol    string   `json:"protocol"`
+	Address     string   `json:"address"`
+	BootstrapIP string   `json:"bootstrap_ip,omitempty"`
+	Domains     []string `json:"domains"`
+	OutboundID  string   `json:"outbound_id"`
+}
+
+// Version 1 keeps its original wire shape; version 2 retains an empty array.
+func (p NodeRouting) MarshalJSON() ([]byte, error) {
+	type alias NodeRouting
+	var defaults *[]NodeUserDefault
+	if p.Version == RoutingVersion2 {
+		defaults = &p.UserDefaults
+	}
+	return json.Marshal(struct {
+		*alias
+		UserDefaults *[]NodeUserDefault `json:"user_defaults,omitempty"`
+	}{alias: (*alias)(&p), UserDefaults: defaults})
 }
 
 type NodeRoute struct {
@@ -49,6 +84,7 @@ type NodeRoute struct {
 	Kind       string   `json:"kind" binding:"required"`
 	Values     []string `json:"values" binding:"required"`
 	OutboundID string   `json:"outbound_id" binding:"required"`
+	UserIDs    []int64  `json:"user_ids,omitempty" yaml:",omitempty"`
 }
 
 // ParseNodeRouting rejects unknown fields and trailing data, including an
@@ -83,7 +119,7 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 	if input == nil {
 		return nil, errorsWithField("routing", "policy must not be null")
 	}
-	if input.Version != RoutingVersion1 {
+	if input.Version != RoutingVersion1 && input.Version != RoutingVersion2 {
 		return nil, errorsWithField("routing.version", "unsupported routing version")
 	}
 	if input.Outbounds == nil || input.Rules == nil {
@@ -104,9 +140,20 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		if len(rule.Values) > MaxRoutingValuesPerRule {
 			return nil, errorsWithField(fmt.Sprintf("routing.rules[%d].values", i+1), "too many input values")
 		}
-		inputValues += len(rule.Values)
+		inputValues += len(rule.Values) + len(rule.UserIDs)
 		if inputValues > MaxRoutingValues {
 			return nil, errorsWithField("routing.rules", "too many input values")
+		}
+	}
+	if input.Version == RoutingVersion2 {
+		inputValues += len(input.UserDefaults)
+		if input.DNSPolicy != nil {
+			for _, r := range input.DNSPolicy.Resolvers {
+				inputValues += len(r.Domains)
+			}
+		}
+		if inputValues > MaxRoutingValues {
+			return nil, errorsWithField("routing", "too many input values")
 		}
 	}
 	// Encoding here also bounds arbitrary connection fields/plugin options before
@@ -124,12 +171,21 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		return nil, errorsWithField("routing", err.Error())
 	}
 
+	if input.Version == RoutingVersion1 && (input.UserDefaults != nil || input.DNSPolicy != nil) {
+		return nil, errorsWithField("routing", "version 1 cannot contain version 2 fields")
+	}
+	if input.Version == RoutingVersion2 && input.UserDefaults == nil {
+		return nil, errorsWithField("routing.user_defaults", "must be an array")
+	}
 	result := &NodeRouting{Version: input.Version, DefaultOutboundID: input.DefaultOutboundID,
 		Outbounds: make([]NodeOutbound, len(input.Outbounds)), Rules: make([]NodeRoute, len(input.Rules))}
 	ids := map[string]struct{}{RoutingDirect: {}, RoutingBlock: {}}
 	names := make(map[string]struct{}, len(input.Outbounds))
 	for i, source := range input.Outbounds {
 		field := fmt.Sprintf("routing.outbounds[%d]", i+1)
+		if input.Version == RoutingVersion1 && source.ViaOutboundID != "" {
+			return nil, errorsWithField(field+".via_outbound_id", "requires version 2")
+		}
 		if !validRoutingID(source.ID, "ob_") {
 			return nil, errorsWithField(field+".id", "must be ob_ followed by a lowercase UUIDv4")
 		}
@@ -255,7 +311,7 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		if len(values) == 0 {
 			return nil, errorsWithField(field+".values", "must contain at least one match value")
 		}
-		matchValues += len(values)
+		matchValues += len(values) + len(source.UserIDs)
 		for _, value := range values {
 			matchBytes += len(value)
 		}
@@ -263,8 +319,15 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 			return nil, errorsWithField("routing.rules", "aggregate match budget exceeded")
 		}
 		enabled := *source.Enabled
+		if input.Version == RoutingVersion1 && len(source.UserIDs) != 0 {
+			return nil, errorsWithField(field+".user_ids", "requires version 2")
+		}
+		userIDs, err := normalizeRoutingUsers(source.UserIDs)
+		if err != nil {
+			return nil, errorsWithField(field+".user_ids", err.Error())
+		}
 		result.Rules[i] = NodeRoute{ID: source.ID, Enabled: &enabled, Remark: source.Remark,
-			Kind: source.Kind, Values: values, OutboundID: source.OutboundID}
+			Kind: source.Kind, Values: values, OutboundID: source.OutboundID, UserIDs: userIDs}
 	}
 	if len(missing) > 0 {
 		refs := make([]string, 0, len(missing))
@@ -273,6 +336,23 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		}
 		sort.Strings(refs)
 		return nil, errorsWithField("routing", "unknown outbound references: "+strings.Join(refs, "; "))
+	}
+	if input.Version == RoutingVersion2 {
+		if err := normalizeRoutingV2(input, result, ids); err != nil {
+			return nil, err
+		}
+		matchValues += len(result.UserDefaults)
+		if result.DNSPolicy != nil {
+			for _, r := range result.DNSPolicy.Resolvers {
+				matchValues += len(r.Domains)
+				for _, v := range r.Domains {
+					matchBytes += len(v)
+				}
+			}
+		}
+		if matchValues > MaxRoutingValues || matchBytes > MaxRoutingMatchBytes {
+			return nil, errorsWithField("routing", "aggregate match budget exceeded")
+		}
 	}
 	canonical, err := json.Marshal(result)
 	if err != nil {

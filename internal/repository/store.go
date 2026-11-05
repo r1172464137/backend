@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/perfect-panel/server/pkg/cache"
@@ -139,6 +140,13 @@ func (s *GormStore) UserDevice() UserDeviceRepo                   { return s.ide
 func (s *GormStore) UserWithdrawal() UserWithdrawalRepo           { return s.billing.Withdrawals }
 func (s *GormStore) SubscriptionTraffic() SubscriptionTrafficRepo { return s.subscription.Traffic }
 func (s *GormStore) UserCache() UserCacheRepo                     { return s.identity.UserCache }
+
+// InDeliverySnapshot reads cross-domain state from one repeatable-read transaction.
+func (s *GormStore) InDeliverySnapshot(ctx context.Context, fn func(DeliverySnapshot) error) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(newGormStore(tx, s.redis, s.invalidations, s.retrier, s.builders))
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+}
 
 // InTx runs fn within a database transaction. A new GormStore backed by the
 // transaction is passed to fn, so all repository operations inside fn share

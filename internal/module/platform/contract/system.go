@@ -1,5 +1,10 @@
 package dto
 
+// InterfaceConfig controls only admin navigation visibility, not authorization.
+type InterfaceConfig struct {
+	HiddenMenuIds []string `json:"hiddenMenuIds"`
+}
+
 type Currency struct {
 	CurrencyUnit   string `json:"currency_unit"`
 	CurrencySymbol string `json:"currency_symbol"`

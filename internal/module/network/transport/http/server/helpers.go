@@ -101,7 +101,10 @@ func writeParamError(ctx *app.RequestContext, err error) {
 }
 
 func writeRoutingUpgrade(ctx *app.RequestContext) {
-	message := xerr.MapErrMsg(xerr.NodeRoutingUpgradeRequired)
+	writeRoutingUpgradeMessage(ctx, xerr.MapErrMsg(xerr.NodeRoutingUpgradeRequired))
+}
+
+func writeRoutingUpgradeMessage(ctx *app.RequestContext, message string) {
 	if acceptsProtobuf(ctx) {
 		writeServerProtobuf(ctx, consts.StatusUpgradeRequired, &serverv1.Result{Code: xerr.NodeRoutingUpgradeRequired, Message: message})
 	} else {

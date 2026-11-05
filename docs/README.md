@@ -27,7 +27,8 @@
 | [design/package-layout.md](design/package-layout.md) | 包结构与职责归属 |
 | [design/device-authentication.md](design/device-authentication.md) | 设备登录的签名信封协议 |
 | [design/edge-subscribe.md](design/edge-subscribe.md) | 边缘节点订阅下发 |
-| [design/ordered-node-routing.md](design/ordered-node-routing.md) | 统一有序节点路由：独立出站、有序规则与停机切换 |
+| [design/ordered-node-routing.md](design/ordered-node-routing.md) | 02180 有序路由 v1 的历史切换契约 |
+| [design/user-routing-v2.md](design/user-routing-v2.md) | 用户范围与默认出口、链式出站、DNS、身份快照及升级顺序 |
 | [design/telegram-bot.md](design/telegram-bot.md) | Telegram Bot 集成 |
 | [design/v2-order-checkout-design.md](design/v2-order-checkout-design.md) | 订单 outbox 与对账设计 |
 

@@ -34,6 +34,7 @@ type SystemRepo interface {
 	GetCurrencyConfig(ctx context.Context) ([]*system.System, error)
 	GetVerifyCodeConfig(ctx context.Context) ([]*system.System, error)
 	GetLogConfig(ctx context.Context) ([]*system.System, error)
+	GetInterfaceConfig(ctx context.Context) ([]*system.System, error)
 	UpdateValueByCategoryKey(ctx context.Context, category, key, value string, valueType ...string) error
 	UpdateNodeMultiplierConfig(ctx context.Context, config string) error
 	FindNodeMultiplierConfig(ctx context.Context) (*system.System, error)

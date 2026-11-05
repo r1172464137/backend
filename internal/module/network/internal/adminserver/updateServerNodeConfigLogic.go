@@ -9,6 +9,7 @@ import (
 	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/internal/nodeconfig"
+	"github.com/perfect-panel/server/internal/module/platform"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
@@ -40,6 +41,15 @@ func (l *UpdateServerNodeConfigLogic) UpdateServerNodeConfig(req *dto.UpdateServ
 	var validationErr, queryErr, businessErr error
 	err := l.deps.Store.InNetworkTx(l.ctx, func(store repository.NetworkStore) error {
 		nodes := store.Node()
+		readGlobal := func() (config.NodeConfig, error) {
+			if view, ok := store.(interface{ System() repository.SystemRepo }); ok {
+				return platform.ReadNodeConfigSnapshotFromRepo(l.ctx, view.System())
+			}
+			if l.deps.ReadGlobalNodeConfig == nil {
+				return config.NodeConfig{}, fmt.Errorf("global routing reader unavailable")
+			}
+			return l.deps.ReadGlobalNodeConfig(l.ctx)
+		}
 		if _, err := nodes.FindOneServerForUpdate(l.ctx, req.ServerID); err != nil {
 			queryErr = err
 			return err
@@ -117,10 +127,62 @@ func (l *UpdateServerNodeConfigLogic) UpdateServerNodeConfig(req *dto.UpdateServ
 		}
 		data.Routing = oldRouting
 		data.RoutingRevision = currentRevision
+		if transition && oldRouting != nil && !req.RoutingDowngrade {
+			oldPolicy, err := config.ParseNodeRouting([]byte(*oldRouting))
+			if err != nil {
+				queryErr = err
+				return err
+			}
+			if config.HasRoutingV2Capabilities(oldPolicy) {
+				downgrade := hasRouting && req.Routing.Version == config.RoutingVersion1
+				if hasInherit && req.InheritRouting {
+					global, err := readGlobal()
+					if err != nil {
+						queryErr = err
+						return err
+					}
+					downgrade = global.Routing == nil || global.Routing.Version == config.RoutingVersion1
+				}
+				if downgrade {
+					businessErr = xerr.NewErrCode(xerr.NetworkRoutingDowngradeRequired)
+					return businessErr
+				}
+			}
+		}
 		if hasRouting {
 			policy, err := config.NormalizeNodeRouting(req.Routing)
 			if err != nil {
 				validationErr = err
+				return err
+			}
+			var previous *config.NodeRouting
+			if oldRouting != nil {
+				previous, err = config.ParseNodeRouting([]byte(*oldRouting))
+				if err != nil {
+					queryErr = err
+					return err
+				}
+			} else if repository.HasRoutingAccounts(policy) && l.deps.ReadGlobalNodeConfig != nil {
+				global, e := readGlobal()
+				if e != nil {
+					queryErr = e
+					return e
+				}
+				previous = global.Routing
+			}
+			var userRepo repository.UserRepo
+			if provider, ok := store.(interface{ User() repository.UserRepo }); ok {
+				userRepo = provider.User()
+			} else if provider, ok := l.deps.Store.(interface{ User() repository.UserRepo }); ok {
+				userRepo = provider.User()
+			}
+			if err := repository.ValidateNewRoutingAccounts(l.ctx, userRepo, previous, policy); err != nil {
+				var missing *repository.RoutingAccountNotFoundError
+				if errors.As(err, &missing) {
+					validationErr = err
+				} else {
+					queryErr = err
+				}
 				return err
 			}
 			body, err := json.Marshal(policy)

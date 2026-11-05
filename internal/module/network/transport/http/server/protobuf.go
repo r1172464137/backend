@@ -125,7 +125,7 @@ func validateStatusJSON(body []byte) error {
 	if err != nil {
 		return err
 	}
-	identityNames := map[string]bool{"mode": true, "source": true, "source_server_id": true, "source_revision": true, "local_transition_revision": true}
+	identityNames := map[string]bool{"mode": true, "source": true, "source_server_id": true, "source_revision": true, "local_transition_revision": true, "snapshot_id": true}
 	checkIdentity := func(raw json.RawMessage) error {
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return nil
@@ -158,7 +158,7 @@ func routingIdentityFromProtobuf(value *serverv1.RoutingIdentity) *dto.RoutingCa
 	if value == nil {
 		return nil
 	}
-	return &dto.RoutingCandidateIdentity{Mode: value.Mode, Source: value.Source, SourceServerID: value.SourceServerId, SourceRevision: value.SourceRevision, LocalTransitionRevision: value.LocalTransitionRevision}
+	return &dto.RoutingCandidateIdentity{Mode: value.Mode, Source: value.Source, SourceServerID: value.SourceServerId, SourceRevision: value.SourceRevision, LocalTransitionRevision: value.LocalTransitionRevision, SnapshotID: value.SnapshotId}
 }
 
 func serverUserListResponseToProtobuf(response *dto.GetServerUserListResponse) *serverv1.GetServerUserListResponse {
@@ -205,6 +205,17 @@ func queryServerProtocolConfigResponseToProtobuf(response *dto.QueryServerConfig
 	if err != nil {
 		return nil, err
 	}
+	var snapshot *serverv1.IdentitySnapshot
+	if response.IdentitySnapshot != nil {
+		snapshot = &serverv1.IdentitySnapshot{SnapshotId: response.IdentitySnapshot.SnapshotID}
+		for _, p := range response.IdentitySnapshot.Protocols {
+			entry := &serverv1.ProtocolUserSnapshot{Protocol: p.Protocol}
+			for _, u := range p.Users {
+				entry.Users = append(entry.Users, &serverv1.ServerUser{Id: u.Id, Uuid: u.UUID, SpeedLimit: u.SpeedLimit, DeviceLimit: u.DeviceLimit, AccountId: u.AccountID})
+			}
+			snapshot.Protocols = append(snapshot.Protocols, entry)
+		}
+	}
 	return &serverv1.QueryServerProtocolConfigResponse{
 		Code:    200,
 		Message: "success",
@@ -217,6 +228,7 @@ func queryServerProtocolConfigResponseToProtobuf(response *dto.QueryServerConfig
 			Protocols:              protocols,
 			Total:                  response.Total,
 			Routing:                routing,
+			IdentitySnapshot:       snapshot,
 		},
 	}, nil
 }
@@ -228,6 +240,7 @@ func outboundToProtobuf(outbound dto.NodeOutbound) (*serverv1.Outbound, error) {
 	}
 	return &serverv1.Outbound{
 		Id:                      outbound.ID,
+		ViaOutboundId:           outbound.ViaOutboundID,
 		Name:                    outbound.Name,
 		Protocol:                outbound.Protocol,
 		Address:                 outbound.Address,
@@ -303,15 +316,25 @@ func routingToProtobuf(policy *dto.NodeRoutingPolicy) (*serverv1.RoutingPolicy, 
 			return nil, fmt.Errorf("unknown route kind %q", rule.Kind)
 		}
 		enabled := *rule.Enabled
-		rules = append(rules, &serverv1.RouteRule{Id: rule.ID, Enabled: &enabled, Remark: rule.Remark, Kind: kind, Values: append([]string(nil), rule.Values...), OutboundId: rule.OutboundID})
+		rules = append(rules, &serverv1.RouteRule{Id: rule.ID, Enabled: &enabled, Remark: rule.Remark, Kind: kind, Values: append([]string(nil), rule.Values...), OutboundId: rule.OutboundID, UserIds: append([]int64(nil), rule.UserIDs...)})
 	}
-	if policy.Version != 1 {
+	if policy.Version != 1 && policy.Version != 2 {
 		return nil, fmt.Errorf("unknown routing version %d", policy.Version)
 	}
-	return &serverv1.RoutingPolicy{Version: uint32(policy.Version), Outbounds: outbounds, Rules: rules,
+	result := &serverv1.RoutingPolicy{Version: uint32(policy.Version), Outbounds: outbounds, Rules: rules,
 		DefaultOutboundId: policy.DefaultOutboundID, Mode: policy.Mode, Source: policy.Source,
 		SourceServerId: policy.SourceServerID, SourceRevision: policy.SourceRevision,
-		LocalTransitionRevision: policy.LocalTransitionRevision}, nil
+		LocalTransitionRevision: policy.LocalTransitionRevision}
+	for _, d := range policy.UserDefaults {
+		result.UserDefaults = append(result.UserDefaults, &serverv1.UserDefault{UserId: d.UserID, OutboundId: d.OutboundID})
+	}
+	if policy.DNSPolicy != nil {
+		result.DnsPolicy = &serverv1.DNSPolicy{QueryStrategy: policy.DNSPolicy.QueryStrategy}
+		for _, r := range policy.DNSPolicy.Resolvers {
+			result.DnsPolicy.Resolvers = append(result.DnsPolicy.Resolvers, &serverv1.PolicyDNSResolver{Id: r.ID, Protocol: r.Protocol, Address: r.Address, BootstrapIp: r.BootstrapIP, Domains: append([]string(nil), r.Domains...), OutboundId: r.OutboundID})
+		}
+	}
+	return result, nil
 }
 
 func serverProtocolToProtobuf(protocol dto.Protocol) (*serverv1.ServerProtocol, error) {
