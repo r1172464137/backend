@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,10 +15,10 @@ func LockInitialization(path string) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err = lockFile(f); err != nil {
 		return nil, errors.Join(err, f.Close())
 	}
-	return func() error { return errors.Join(syscall.Flock(int(f.Fd()), syscall.LOCK_UN), f.Close()) }, nil
+	return func() error { return errors.Join(unlockFile(f), f.Close()) }, nil
 }
 
 // ClearStagedAdminHash removes only the exact staged value, preserving YAML.
