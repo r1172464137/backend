@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -41,21 +42,31 @@ var startCmd = &cobra.Command{
 }
 
 // run starts the servers and stops them when the process receives SIGINT,
-// SIGTERM or SIGQUIT. ctx is the command's root context: start-up serves no
-// request, so nothing narrower exists.
+// SIGTERM or SIGQUIT. The signal context covers start-up too: a signal while
+// the database or Redis connections are being retried ends the process
+// quietly instead of waiting for the retry budget.
 func run(ctx context.Context) {
-	services := getServers(ctx)
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer stop()
+
+	services, err := getServers(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			log.Printf("startup canceled: %v", err)
+			return
+		}
+		log.Fatalf("startup failed: %v", err)
+	}
 	defer services.Stop()
 	go services.Start()
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	<-quit
+	<-ctx.Done()
 }
 
 // getServers loads the configuration, running the setup wizard first when it
 // is incomplete, prepares the process (clock zone, logger) and builds the
-// servers from it.
-func getServers(ctx context.Context) *lifecycle.Group {
+// servers from it. The error is an infrastructure connection that did not
+// come up within its retry budget, or a cancelled start.
+func getServers(ctx context.Context) (*lifecycle.Group, error) {
 	var c config.Config
 	createConfigFileIfMissing()
 	// The wizard writes the file and reports once it is complete, or with

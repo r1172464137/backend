@@ -27,14 +27,19 @@ import (
 
 // NewServices assembles the application from the configuration and returns
 // the services the process runs: the HTTP server with the runtime bootstrap,
-// the task worker and the scheduler.
-func NewServices(ctx context.Context, c config.Config, configPath string) *lifecycle.Group {
-	srv := NewApplication(c)
+// the task worker and the scheduler. Infrastructure connections are retried
+// within their startup budget; the error reports the dependency that did not
+// come up.
+func NewServices(ctx context.Context, c config.Config, configPath string) (*lifecycle.Group, error) {
+	srv, err := NewApplication(ctx, c)
+	if err != nil {
+		return nil, err
+	}
 	http := NewService(srv.serviceDependencies(lifecycle.NewReadiness(), configPath))
 	// Preflight and finish the offline routing conversion before any group
 	// member (including the scheduler) can write to the database or Redis.
 	http.initialize(ctx)
-	return srv.services(c, http)
+	return srv.services(c, http), nil
 }
 
 // services returns the process's service group. The group starts the

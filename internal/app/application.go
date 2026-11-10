@@ -69,29 +69,59 @@ type Application struct {
 
 // NewApplication connects the database, Redis and the task queue the
 // configuration names, opens the GeoIP database when one is available, and
-// assembles the application on them. It panics when a connection fails:
-// nothing can run without them. The GeoIP database is optional unless the
-// configuration requires it.
-func NewApplication(c config.Config) *Application {
-	db, err := orm.ConnectMysql(orm.Mysql{
-		Config: c.DatabaseConfig(),
+// assembles the application on them. Each connection is retried with a
+// bounded backoff, so a database or Redis container restarting for a few
+// seconds does not fail the start; when the retry budget is spent, or the
+// start is cancelled by a signal, the error names the dependency and its
+// last failure. The process cannot run without these connections, so the
+// start fails rather than continuing degraded. The GeoIP database is
+// optional unless the configuration requires it.
+func NewApplication(ctx context.Context, c config.Config) (*Application, error) {
+	return newApplication(ctx, c, defaultStartupRetry, connectDatabase, connectRedis)
+}
+
+// newApplication is NewApplication with the retry policy and the connection
+// functions injectable, so tests can use a short budget and a local
+// listener without waiting for the default budget or a database server.
+func newApplication(
+	ctx context.Context,
+	c config.Config,
+	retry startupRetry,
+	openDatabase func(context.Context, orm.Config) (*gorm.DB, error),
+	openRedis func(context.Context, config.RedisConfig) (*redis.Client, error),
+) (*Application, error) {
+	databaseConfig := c.DatabaseConfig()
+	db, err := connectAtStartup(ctx, "database", databaseConfig.Addr, retry, func(ctx context.Context) (*gorm.DB, error) {
+		return openDatabase(ctx, databaseConfig)
 	})
 	if err != nil {
-		panic(err.Error())
+		return nil, err
 	}
 	warnDatabaseTimeZone(c)
 
 	geoIP := openGeoIP(c.GeoIP)
 
-	rds := redis.NewClient(&redis.Options{
-		Addr:     c.Redis.Host,
-		Password: c.Redis.Pass,
-		DB:       c.Redis.DB,
+	rds, err := connectAtStartup(ctx, "redis", c.Redis.Host, retry, func(ctx context.Context) (*redis.Client, error) {
+		return openRedis(ctx, c.Redis)
 	})
-	if err := rds.Ping(context.Background()).Err(); err != nil {
-		panic(err.Error())
+	if err != nil {
+		closeDatabase(db)
+		return nil, err
 	}
-	return assemble(c, db, rds, geoIP, NewAsynqClient(c), NewAsynqInspector(c))
+	return assemble(c, db, rds, geoIP, NewAsynqClient(c), NewAsynqInspector(c)), nil
+}
+
+// closeDatabase closes the pool of a start that cannot continue, so a failed
+// Redis connection does not leave the database pool behind.
+func closeDatabase(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return
+	}
+	_ = sqlDB.Close()
 }
 
 // openGeoIP opens the GeoIP databases the configuration names. Geolocation
