@@ -16,7 +16,7 @@ type serializedTx struct {
 
 func (t serializedTx) Node() repository.NodeRepo { return t.owner.nodeRepo }
 
-func (s *serializedAdminNodeStore) InTx(_ context.Context, fn func(repository.Store) error) error {
+func (s *serializedAdminNodeStore) InCandidateTx(_ context.Context, fn func(repository.CandidateStore) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return fn(serializedTx{owner: s})

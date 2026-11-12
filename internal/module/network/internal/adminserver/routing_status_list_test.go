@@ -27,7 +27,7 @@ type lostRedisStore struct {
 func (s lostRedisStore) Node() repository.NodeRepo                       { return s.NodeRepo }
 func (lostRedisStore) UserSubscription() repository.UserSubscriptionRepo { return nil }
 func (lostRedisStore) User() repository.UserRepo                         { return nil }
-func (lostRedisStore) InTx(context.Context, func(repository.Store) error) error {
+func (lostRedisStore) InCandidateTx(context.Context, func(repository.CandidateStore) error) error {
 	return errors.New("not used by the server list")
 }
 func TestServerListShowsUnknownRoutingWhenRedisLost(t *testing.T) {

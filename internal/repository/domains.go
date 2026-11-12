@@ -105,6 +105,25 @@ type IdentityTransactor interface {
 	InIdentityTx(context.Context, func(IdentityStore) error) error
 }
 
+// CandidateStore is the read set of one node candidate. It spans the
+// network, subscription and identity domains, which must be read in one
+// transaction so the identity snapshot is consistent.
+type CandidateStore interface {
+	Node() NodeRepo
+	Subscribe() SubscribeRepo
+	UserSubscription() UserSubscriptionRepo
+	User() UserRepo
+}
+
+type CandidateTransactor interface {
+	InCandidateTx(context.Context, func(CandidateStore) error) error
+}
+
+// InCandidateTx runs fn inside one transaction over the candidate read set.
+func (s *GormStore) InCandidateTx(ctx context.Context, fn func(CandidateStore) error) error {
+	return s.InTx(ctx, func(store Store) error { return fn(store) })
+}
+
 type NetworkTransactor interface {
 	InNetworkTx(context.Context, func(NetworkStore) error) error
 }

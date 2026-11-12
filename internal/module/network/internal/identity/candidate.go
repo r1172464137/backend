@@ -13,11 +13,6 @@ import (
 	"github.com/perfect-panel/server/internal/repository"
 )
 
-// TxStore runs a function over all repositories inside one transaction.
-type TxStore interface {
-	InTx(ctx context.Context, fn func(store repository.Store) error) error
-}
-
 // GlobalReader reads the platform-owned global node settings and routing.
 type GlobalReader func(context.Context) (config.NodeConfig, error)
 
@@ -35,7 +30,7 @@ var ErrGlobalChanged = errors.New("global routing changed while reading the cand
 // override and the authorised identities in one database transaction, with
 // the platform-owned global routing read before and after; a revision change
 // in between retries. activate=true is used only by real node pulls.
-func BuildCandidate(ctx context.Context, store TxStore, readGlobal GlobalReader, serverID int64, now time.Time, activate bool) (*Candidate, error) {
+func BuildCandidate(ctx context.Context, store repository.CandidateTransactor, readGlobal GlobalReader, serverID int64, now time.Time, activate bool) (*Candidate, error) {
 	if store == nil || readGlobal == nil {
 		return nil, errors.New("candidate readers unavailable")
 	}
@@ -45,7 +40,7 @@ func BuildCandidate(ctx context.Context, store TxStore, readGlobal GlobalReader,
 			return nil, err
 		}
 		var out *Candidate
-		err = store.InTx(ctx, func(tx repository.Store) error {
+		err = store.InCandidateTx(ctx, func(tx repository.CandidateStore) error {
 			server, err := tx.Node().FindOneServer(ctx, serverID)
 			if err != nil {
 				return err

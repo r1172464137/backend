@@ -77,7 +77,7 @@ func (s *Service) ServerPushUserTraffic(ctx context.Context, req *dto.ServerPush
 type Store interface {
 	Inbox() repository.InboxRepo
 	repository.NetworkTransactor
-	InTx(ctx context.Context, fn func(store repository.Store) error) error
+	repository.CandidateTransactor
 	Node() repository.NodeRepo
 	Subscribe() repository.SubscribeRepo
 	User() repository.UserRepo

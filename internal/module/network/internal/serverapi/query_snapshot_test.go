@@ -37,7 +37,7 @@ type snapshotTx struct {
 }
 
 func (s snapshotTx) Node() repository.NodeRepo { return s.node }
-func (s snapshotStore) InTx(ctx context.Context, fn func(repository.Store) error) error {
+func (s snapshotStore) InCandidateTx(ctx context.Context, fn func(repository.CandidateStore) error) error {
 	return fn(snapshotTx{node: s.node})
 }
 func (snapshotStore) Inbox() repository.InboxRepo                       { return nil }

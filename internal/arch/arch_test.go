@@ -125,6 +125,11 @@ type goFile struct {
 func collectGoFiles(t *testing.T) []goFile {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err == nil {
+		// WalkDir does not follow a symlinked root; a checkout reached
+		// through a symlink would otherwise scan nothing and pass.
+		root, err = filepath.EvalSymlinks(root)
+	}
 	if err != nil {
 		t.Fatalf("resolve repo root: %v", err)
 	}

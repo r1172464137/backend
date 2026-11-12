@@ -54,6 +54,7 @@ type Store interface {
 	InSubscriptionTx(ctx context.Context, fn func(SubscriptionStore) error) error
 	InIdentityTx(ctx context.Context, fn func(IdentityStore) error) error
 	InNetworkTx(ctx context.Context, fn func(NetworkStore) error) error
+	InCandidateTx(ctx context.Context, fn func(CandidateStore) error) error
 	InPlatformTx(ctx context.Context, fn func(PlatformStore) error) error
 }
 
