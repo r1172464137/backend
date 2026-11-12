@@ -93,6 +93,8 @@ func (s *Service) QueryNodeTag(ctx context.Context) (*dto.QueryNodeTagResponse, 
 // unrelated repositories and application-wide transactions.
 type Store interface {
 	repository.NetworkTransactor
+	InTx(ctx context.Context, fn func(store repository.Store) error) error
 	Node() repository.NodeRepo
+	User() repository.UserRepo
 	UserSubscription() repository.UserSubscriptionRepo
 }

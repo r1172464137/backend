@@ -26,15 +26,21 @@ func Node(ctx *Dependencies) {
 		NodeSecret:             nodeConfig.NodeSecret,
 		NodePullInterval:       nodeConfig.NodePullInterval,
 		NodePushInterval:       nodeConfig.NodePushInterval,
-		IPStrategy:             nodeConfig.IPStrategy,
 		TrafficReportThreshold: nodeConfig.TrafficReportThreshold,
 	}
-	if nodeConfig.DNS != "" {
-		c.DNS, err = config.ParseNodeDNSJSON([]byte(nodeConfig.DNS))
-		if err != nil {
-			panic(fmt.Errorf("invalid global DNS: %w", err))
-		}
+	values := systemValues(configs)
+	if values["RoutingCutover"] != cutoverV3Complete {
+		panic("routing format 3 migration is not complete; restore the matching backup")
 	}
+	c.Routing, err = config.ParseNodeRouting([]byte(values["Routing"]))
+	if err != nil {
+		panic(fmt.Errorf("invalid global routing: %w", err))
+	}
+	c.RoutingRevision, err = strconv.ParseInt(values["RoutingRevision"], 10, 64)
+	if err != nil || c.RoutingRevision <= 0 {
+		panic("invalid global routing revision")
+	}
+	// Every local server routing must be valid format 3 before serving nodes.
 	servers, err := ctx.Store.Node().QueryServerSorts(context.Background())
 	if err != nil {
 		panic(err)
@@ -44,33 +50,17 @@ func Node(ctx *Dependencies) {
 		if err != nil {
 			panic(err)
 		}
-		if override != nil && override.DNS != nil {
-			if err := validateStoredDNS(*override.DNS); err != nil {
-				panic(fmt.Errorf("invalid server %d DNS: %w", server.Id, err))
+		if override == nil {
+			continue
+		}
+		if override.RoutingRevision < 0 {
+			panic(fmt.Errorf("invalid server %d routing revision", server.Id))
+		}
+		if override.Routing != nil {
+			if _, err := config.ParseNodeRouting([]byte(*override.Routing)); err != nil {
+				panic(fmt.Errorf("invalid server %d routing: %w", server.Id, err))
 			}
 		}
-	}
-	cutoverComplete := false
-	for _, entry := range configs {
-		switch entry.Key {
-		case "RoutingCutover":
-			cutoverComplete = entry.Value == "complete"
-		case "Routing":
-			if entry.Value != "" {
-				c.Routing, err = config.ParseNodeRouting([]byte(entry.Value))
-				if err != nil {
-					panic(fmt.Errorf("invalid global routing: %w", err))
-				}
-			}
-		case "RoutingRevision":
-			c.RoutingRevision, err = strconv.ParseInt(entry.Value, 10, 64)
-			if err != nil || c.RoutingRevision < 0 {
-				panic("invalid global routing revision")
-			}
-		}
-	}
-	if !cutoverComplete || c.Routing == nil || c.RoutingRevision <= 0 {
-		panic("ordered routing cutover is incomplete")
 	}
 	ctx.updateConfig(func(current *config.Config) { current.Node = c })
 

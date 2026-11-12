@@ -34,6 +34,8 @@ type Deps struct {
 	ApplyVerifyConfig func(req *dto.VerifyConfig)
 	// Multiplier evaluates the current node traffic multiplier.
 	Multiplier func(at time.Time) float32
+	// MissingAccounts returns the given account IDs that do not exist.
+	MissingAccounts func(ctx context.Context, ids []int64) ([]int64, error)
 }
 
 func (d Deps) reinit(subsystem string) {

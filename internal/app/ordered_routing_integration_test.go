@@ -92,9 +92,9 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	}
 	a, b := open(rds), open(rds)
 	ctx := context.Background()
-	policy := `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`
+	policy := `{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`
 	if err := a.InPlatformTx(ctx, func(tx repository.PlatformStore) error {
-		for key, value := range map[string]string{"Routing": policy, "RoutingRevision": "1", "RoutingCutover": "complete", "Block": `["geosite:dormant"]`, "NodeSecret": "known-test-secret", "NodePullInterval": "61", "NodePushInterval": "62", "TrafficReportThreshold": "63", "DNS": `[{"proto":"udp","address":"1.1.1.1","domains":[]}]`} {
+		for key, value := range map[string]string{"Routing": policy, "RoutingRevision": "1", "RoutingCutover": "complete-v3", "Block": `["geosite:dormant"]`, "NodeSecret": "known-test-secret", "NodePullInterval": "61", "NodePushInterval": "62", "TrafficReportThreshold": "63", "DNS": `[{"proto":"udp","address":"1.1.1.1","domains":[]}]`} {
 			typ := "string"
 			if key == "RoutingRevision" || key == "NodePullInterval" || key == "NodePushInterval" || key == "TrafficReportThreshold" {
 				typ = "int64"
@@ -241,7 +241,9 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 		_ = a.Node().DeleteServerConfigOverride(ctx, source.Id)
 		_ = a.Node().DeleteServer(ctx, source.Id)
 	}()
-	sourceBody := fmt.Sprintf(`{"server_id":%d,"inherit_ip_strategy":false,"ip_strategy":"prefer_ipv4","inherit_dns":false,"dns":[{"proto":"udp","address":"9.9.9.9","domains":[]}],"inherit_routing":false,"routing_revision":0,"routing":%s}`, source.Id, policy)
+	// DNS and the IP preference travel inside the routing package.
+	localPolicy := strings.Replace(policy, `"target_ip_preference":"none"`, `"target_ip_preference":"prefer_ipv4"`, 1)
+	sourceBody := fmt.Sprintf(`{"server_id":%d,"inherit_routing":false,"routing_revision":0,"routing":%s}`, source.Id, localPolicy)
 	sourceResponse := updateCopy(sourceBody)
 	if sourceResponse.Response.StatusCode() != 200 || !strings.Contains(string(sourceResponse.Response.Body()), `"code":200`) {
 		t.Fatalf("offline source save failed: %s", sourceResponse.Response.Body())
@@ -252,7 +254,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	}
 	// A copy takes the actual source content, but the new server starts with
 	// its own independent revision 0, not the source's revision.
-	copyJSON, err := json.Marshal(map[string]any{"server_id": createdID, "inherit_ip_strategy": sourceConfig.Override.InheritIPStrategy, "ip_strategy": sourceConfig.Override.IPStrategy, "inherit_dns": sourceConfig.Override.InheritDNS, "dns": sourceConfig.Override.DNS, "inherit_routing": sourceConfig.Override.InheritRouting, "routing_revision": 0, "routing": sourceConfig.Override.Routing})
+	copyJSON, err := json.Marshal(map[string]any{"server_id": createdID, "inherit_routing": sourceConfig.Override.InheritRouting, "routing_revision": 0, "routing": sourceConfig.Override.Routing})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +264,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 		t.Fatalf("offline copy failed: %d %s", copyResponse.Response.StatusCode(), copyResponse.Response.Body())
 	}
 	copied, err := n1.GetServerNodeConfig(ctx, &netdto.GetServerNodeConfigRequest{ServerID: createdID})
-	if err != nil || copied.Override.InheritRouting || copied.Override.RoutingRevision != 1 || copied.Effective.RoutingMode != "local-v1" || copied.Override.IPStrategy != "prefer_ipv4" || len(copied.Override.DNS) != 1 || copied.Override.DNS[0].Address != "9.9.9.9" || copied.RoutingStatus.Known || copied.RoutingStatus.Report != nil {
+	if err != nil || copied.Override.InheritRouting || copied.Override.RoutingRevision != 1 || copied.Effective.RoutingMode != "local" || copied.Override.Routing.TargetIPPreference != "prefer_ipv4" || copied.RoutingStatus.Known || copied.RoutingStatus.Report != nil {
 		t.Fatalf("offline copy readback: %#v %v", copied, err)
 	}
 	sourceRouting, _ := json.Marshal(sourceConfig.Override.Routing)
@@ -274,7 +276,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if staleCopy.Response.StatusCode() != 409 || !strings.Contains(string(staleCopy.Response.Body()), `"code":140002`) {
 		t.Fatalf("offline stale copy did not conflict: %d %s", staleCopy.Response.StatusCode(), staleCopy.Response.Body())
 	}
-	invalidReference := updateCopy(fmt.Sprintf(`{"server_id":%d,"routing_revision":1,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"missing"}}`, createdID))
+	invalidReference := updateCopy(fmt.Sprintf(`{"server_id":%d,"routing_revision":1,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"missing","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`, createdID))
 	if strings.Contains(string(invalidReference.Response.Body()), `"code":200`) {
 		t.Fatalf("invalid reference accepted: %s", invalidReference.Response.Body())
 	}
@@ -287,7 +289,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 		t.Fatalf("offline inheritance failed: %d %s", inheritResponse.Response.StatusCode(), inheritResponse.Response.Body())
 	}
 	inherited, err := n1.GetServerNodeConfig(ctx, &netdto.GetServerNodeConfigRequest{ServerID: createdID})
-	if err != nil || !inherited.Override.InheritRouting || inherited.Override.RoutingRevision != 2 || inherited.Effective.RoutingMode != "global-v1" || inherited.Effective.Routing.LocalTransitionRevision != 2 || inherited.Override.IPStrategy != "prefer_ipv4" || len(inherited.Override.DNS) != 1 || inherited.RoutingStatus.Known || inherited.RoutingStatus.Report != nil {
+	if err != nil || !inherited.Override.InheritRouting || inherited.Override.RoutingRevision != 2 || inherited.Effective.RoutingMode != "inherited" || inherited.Effective.Routing.LocalTransitionRevision != 2 || inherited.Effective.Routing.TargetIPPreference != "none" || inherited.RoutingStatus.Known || inherited.RoutingStatus.Report != nil {
 		t.Fatalf("offline inheritance readback: %#v %v", inherited, err)
 	}
 	before, err := a.Node().QueryServerSorts(ctx)
@@ -315,7 +317,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	}
 	// Exercise real handlers, service methods and DB without relying on the
 	// caller to perform a prior content-type or presence check.
-	for _, tc := range []struct{ contentType, body string }{{"", ""}, {"application/json", ""}, {"application/x-www-form-urlencoded", "node_secret=overwritten&node_push_interval=0"}, {"text/plain", `{"node_secret":"overwritten"}`}, {"application/json", `null`}, {"application/json", `{"routing_revision":null}`}, {"application/json", `{"node_pull_interval":-1}`}, {"application/json", `{"node_push_interval":86401}`}, {"application/json", `{"node_push_interval":9223372036854775807}`}, {"application/json", `{"dns":[{"proto":"tls","address":"1.1.1.1","domains":[]}]}`}, {"application/json", `{"dns":[{"address":"1.1.1.1","domains":["regexp:("]}]}`}, {"application/json", `{"routing_revision":1,"routing":{"version":1,"outbounds":[{"id":"ob_11111111-1111-4111-8111-111111111111","name":"unsafe","protocol":"direct","spider_x":"/?p=4097"}],"rules":[],"default_outbound_id":"direct"}}`}} {
+	for _, tc := range []struct{ contentType, body string }{{"", ""}, {"application/json", ""}, {"application/x-www-form-urlencoded", "node_secret=overwritten&node_push_interval=0"}, {"text/plain", `{"node_secret":"overwritten"}`}, {"application/json", `null`}, {"application/json", `{"routing_revision":null}`}, {"application/json", `{"node_pull_interval":-1}`}, {"application/json", `{"node_push_interval":86401}`}, {"application/json", `{"node_push_interval":9223372036854775807}`}, {"application/json", `{"dns":[{"proto":"tls","address":"1.1.1.1","domains":[]}]}`}, {"application/json", `{"dns":[{"address":"1.1.1.1","domains":["regexp:("]}]}`}, {"application/json", `{"routing_revision":1,"routing":{"version":3,"outbounds":[{"id":"ob_11111111-1111-4111-8111-111111111111","name":"unsafe","protocol":"direct","spider_x":"/?p=4097"}],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`}} {
 		request := app.NewContext(0)
 		request.Request.Header.SetContentTypeBytes([]byte(tc.contentType))
 		request.Request.SetRequestURI("/v1/admin/system/node_config?node_secret=overwritten&node_push_interval=0")
@@ -325,7 +327,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 			t.Fatalf("unsafe global request accepted: %s", request.Response.Body())
 		}
 	}
-	for _, tc := range []struct{ contentType, body string }{{"", ""}, {"application/json", ""}, {"application/x-www-form-urlencoded", fmt.Sprintf("server_id=%d&inherit_dns=true", server.Id)}, {"text/plain", fmt.Sprintf(`{"server_id":%d}`, server.Id)}, {"application/json", fmt.Sprintf(`{"server_id":%d,"routing_revision":null}`, server.Id)}, {"application/json", fmt.Sprintf(`{"server_id":%d,"inherit_dns":false,"dns":[{"address":"https://resolver.example/dns-query","domains":[]}]}`, server.Id)}, {"application/json", fmt.Sprintf(`{"server_id":%d,"routing_revision":0,"routing":{"version":1,"outbounds":[{"id":"ob_11111111-1111-4111-8111-111111111111","name":"unsafe","protocol":"direct","spider_x":"/?c=9"}],"rules":[],"default_outbound_id":"direct"}}`, server.Id)}} {
+	for _, tc := range []struct{ contentType, body string }{{"", ""}, {"application/json", ""}, {"application/x-www-form-urlencoded", fmt.Sprintf("server_id=%d&inherit_dns=true", server.Id)}, {"text/plain", fmt.Sprintf(`{"server_id":%d}`, server.Id)}, {"application/json", fmt.Sprintf(`{"server_id":%d,"routing_revision":null}`, server.Id)}, {"application/json", fmt.Sprintf(`{"server_id":%d,"inherit_dns":false,"dns":[{"address":"https://resolver.example/dns-query","domains":[]}]}`, server.Id)}, {"application/json", fmt.Sprintf(`{"server_id":%d,"routing_revision":0,"routing":{"version":3,"outbounds":[{"id":"ob_11111111-1111-4111-8111-111111111111","name":"unsafe","protocol":"direct","spider_x":"/?c=9"}],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`, server.Id)}} {
 		request := app.NewContext(0)
 		request.Request.Header.SetContentTypeBytes([]byte(tc.contentType))
 		request.Request.SetRequestURI(fmt.Sprintf("/v1/admin/server/node_config/update?server_id=%d&inherit_dns=true", server.Id))
@@ -339,7 +341,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if globalAfter.NodeSecret != "known-test-secret" || globalAfter.NodePullInterval != 61 || globalAfter.NodePushInterval != 62 || globalAfter.TrafficReportThreshold != 63 || globalAfter.RoutingRevision != 1 || len(globalAfter.DNS) != 1 || globalAfter.DNS[0].Address != "1.1.1.1" {
+	if globalAfter.NodeSecret != "known-test-secret" || globalAfter.NodePullInterval != 61 || globalAfter.NodePushInterval != 62 || globalAfter.TrafficReportThreshold != 63 || globalAfter.RoutingRevision != 1 {
 		t.Fatalf("invalid request changed global settings %#v", globalAfter)
 	}
 	localAfter, err := a.Node().FindServerRoutingOverride(ctx, server.Id)
@@ -348,7 +350,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	}
 	update := func(p platform.Service, def string) error {
 		var req platformdto.NodeConfig
-		if err := json.Unmarshal([]byte(fmt.Sprintf(`{"routing_revision":1,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"%s"}}`, def)), &req); err != nil {
+		if err := json.Unmarshal([]byte(fmt.Sprintf(`{"routing_revision":1,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"%s","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`, def)), &req); err != nil {
 			return err
 		}
 		return p.UpdateNodeConfig(ctx, &req)
@@ -389,7 +391,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Routing == nil || got.Routing.Mode != "ordered-v1-inherited" || got.Routing.SourceRevision != 2 || got.Protocols == nil {
+		if got.Routing == nil || got.Routing.Mode != "inherited" || got.Routing.SourceRevision != 2 || got.Protocols == nil {
 			t.Fatalf("snapshot %#v", got)
 		}
 	}
@@ -411,7 +413,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Routing == nil || got.Routing.Mode != "ordered-v1-local" || got.Routing.SourceRevision != 1 {
+		if got.Routing == nil || got.Routing.Mode != "local" || got.Routing.SourceRevision != 1 {
 			t.Fatalf("local %#v", got)
 		}
 	}
@@ -428,7 +430,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 				def = "block"
 			}
 			var r netdto.UpdateServerNodeConfigRequest
-			payload := fmt.Sprintf(`{"server_id":%d,"routing_revision":1,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"%s"}}`, server.Id, def)
+			payload := fmt.Sprintf(`{"server_id":%d,"routing_revision":1,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"%s","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`, server.Id, def)
 			if err := json.Unmarshal([]byte(payload), &r); err != nil {
 				localErrs <- err
 				return
@@ -459,7 +461,7 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Routing == nil || got.Routing.Mode != "ordered-v1-local" || got.Routing.SourceRevision != 2 {
+		if got.Routing == nil || got.Routing.Mode != "local" || got.Routing.SourceRevision != 2 {
 			t.Fatalf("local revision %#v", got)
 		}
 	}
@@ -477,13 +479,18 @@ func routingIntegration(t *testing.T, dialect, dsn string) {
 	transient.Close()
 	request := app.NewContext(0)
 	request.Request.Header.SetContentTypeBytes([]byte("application/json"))
-	request.Request.SetBodyString(fmt.Sprintf(`{"server_id":%d,"inherit_dns":false,"dns":[{"proto":"udp","address":"9.9.9.9","domains":[]}]}`, server.Id))
+	current, err := outageSvc.GetServerNodeConfig(ctx, &netdto.GetServerNodeConfigRequest{ServerID: server.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v6Policy := strings.Replace(policy, `"target_ip_preference":"none"`, `"target_ip_preference":"prefer_ipv6"`, 1)
+	request.Request.SetBodyString(fmt.Sprintf(`{"server_id":%d,"routing_revision":%d,"routing":%s}`, server.Id, current.Override.RoutingRevision, v6Policy))
 	adminserverhttp.UpdateServerNodeConfigHandler(outageSvc)(ctx, request)
 	if !strings.Contains(string(request.Response.Body()), `"code":200`) {
 		t.Fatalf("committed write misreported as failure: %s", request.Response.Body())
 	}
 	readback, err := outageSvc.GetServerNodeConfig(ctx, &netdto.GetServerNodeConfigRequest{ServerID: server.Id})
-	if err != nil || len(readback.Override.DNS) != 1 || readback.Override.DNS[0].Address != "9.9.9.9" {
+	if err != nil || readback.Override.Routing == nil || readback.Override.Routing.TargetIPPreference != "prefer_ipv6" {
 		t.Fatalf("authoritative readback failed: %#v %v", readback, err)
 	}
 	if err := transient.Restart(); err != nil {

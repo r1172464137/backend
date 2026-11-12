@@ -41,7 +41,7 @@ func init() {
 		NodeGroupNotExist:               "Node group does not exist",
 		NodeGroupNotEmpty:               "Node group is not empty",
 		NetworkNodeProtocolInvalid:      "Enabled node protocol is not supported or is invalid",
-		NodeRoutingUpgradeRequired:      "Node must support routing version 1",
+		NodeRoutingUpgradeRequired:      "Node must support routing version 3",
 		NetworkRoutingRevisionConflict:  "Server routing revision is stale",
 		PlatformRoutingRevisionConflict: "Global routing revision is stale",
 		PlatformLegacyRoutingRemoved:    "Legacy routing writes have been removed",

@@ -88,11 +88,13 @@ type NodeOutbound struct {
 	SpiderX              string   `json:"spider_x,omitempty"`
 	Settings             string   `json:"settings,omitempty"`
 	StreamSettings       string   `json:"stream_settings,omitempty"`
-	// Legacy match arrays are retained for protobuf compatibility and must be empty in v1.
+	// ViaOutboundID names the custom outbound this one dials through.
+	ViaOutboundID string `json:"via_outbound_id,omitempty"`
+	// Legacy match arrays are retained for protobuf compatibility and must be empty.
 	Rules []string `json:"rules"`
-	// Must be empty in v1.
+	// Must be empty.
 	IPRules []string `json:"ip_rules"`
-	// Must be empty in v1.
+	// Must be empty.
 	ProtocolRules []string `json:"protocol_rules"`
 }
 

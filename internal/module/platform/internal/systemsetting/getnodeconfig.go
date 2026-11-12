@@ -4,7 +4,7 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/perfect-panel/server/internal/config"
+	appconfig "github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/platform/contract"
 	"github.com/perfect-panel/server/internal/module/platform/entity/system"
 	"github.com/perfect-panel/server/pkg/logger"
@@ -39,7 +39,7 @@ func (l *GetNodeConfigLogic) GetNodeConfig() (*dto.NodeConfig, error) {
 		return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "parse node config error: %v", err)
 	}
 	if c.Routing == nil || c.RoutingRevision <= 0 || !cutoverComplete(configs) {
-		return nil, errors.New("ordered routing cutover is incomplete")
+		return nil, errors.New("routing format 3 migration is incomplete")
 	}
 	return c, nil
 }
@@ -47,36 +47,21 @@ func (l *GetNodeConfigLogic) GetNodeConfig() (*dto.NodeConfig, error) {
 func cutoverComplete(entries []*system.System) bool {
 	for _, entry := range entries {
 		if entry.Key == "RoutingCutover" {
-			return entry.Value == "complete"
+			return entry.Value == "complete-v3"
 		}
 	}
 	return false
 }
 
 func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, error) {
-	var dbConfig config.NodeDBConfig
-	config.SystemConfigSliceReflectToStruct(configs, &dbConfig)
+	var dbConfig appconfig.NodeDBConfig
+	appconfig.SystemConfigSliceReflectToStruct(configs, &dbConfig)
 	c := &dto.NodeConfig{
 		NodeSecret:             dbConfig.NodeSecret,
 		NodePullInterval:       dbConfig.NodePullInterval,
 		NodePushInterval:       dbConfig.NodePushInterval,
-		IPStrategy:             dbConfig.IPStrategy,
 		TrafficReportThreshold: dbConfig.TrafficReportThreshold,
-		DNS:                    []dto.PlatformNodeDNSSnapshot{},
-		RoutingCapabilities:    []int{1},
-	}
-
-	normal := []config.NodeDNS{}
-	if dbConfig.DNS != "" {
-		var err error
-		normal, err = config.ParseNodeDNSJSON([]byte(dbConfig.DNS))
-		if err != nil {
-			return nil, errors.Wrap(err, "invalid DNS config")
-		}
-	}
-	c.DNS = make([]dto.PlatformNodeDNSSnapshot, 0, len(normal))
-	for _, d := range normal {
-		c.DNS = append(c.DNS, dto.PlatformNodeDNSSnapshot{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
+		RoutingCapabilities:    []int{appconfig.RoutingVersion},
 	}
 	seen := map[string]bool{}
 	for _, item := range configs {
@@ -90,7 +75,7 @@ func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, err
 			if err != nil || (item.Type != "int" && item.Type != "int64") {
 				return nil, errors.Errorf("invalid %s setting", item.Key)
 			}
-			if err := config.ValidateNodeInterval(item.Key, seconds); err != nil {
+			if err := appconfig.ValidateNodeInterval(item.Key, seconds); err != nil {
 				return nil, err
 			}
 		case "Routing", "RoutingRevision":
@@ -99,7 +84,7 @@ func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, err
 			}
 			seen[item.Key] = true
 			if item.Key == "Routing" && item.Value != "" {
-				policy, err := config.ParseNodeRouting([]byte(item.Value))
+				policy, err := appconfig.ParseNodeRouting([]byte(item.Value))
 				if err != nil {
 					return nil, errors.Wrap(err, "invalid global routing")
 				}
@@ -114,6 +99,6 @@ func nodeConfigFromSystemEntries(configs []*system.System) (*dto.NodeConfig, err
 			}
 		}
 	}
-	c.RoutingMode = "global-v1"
+	c.RoutingMode = "global"
 	return c, nil
 }

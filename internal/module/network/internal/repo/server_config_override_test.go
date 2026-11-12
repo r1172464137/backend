@@ -22,7 +22,7 @@ func TestServerRoutingWritePreservesDormantLegacyColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewNodeRepo(db, nil)
-	routing := `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`
+	routing := `{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`
 	if err := store.SaveServerRoutingOverride(context.Background(), &node.ServerConfigOverride{ServerId: 17, Routing: &routing, RoutingRevision: 3}); err != nil {
 		t.Fatal(err)
 	}

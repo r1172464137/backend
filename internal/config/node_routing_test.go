@@ -16,9 +16,12 @@ func routingBool(v bool) *bool { return &v }
 
 func basicRouting() *NodeRouting {
 	return &NodeRouting{
-		Version: RoutingVersion1, DefaultOutboundID: RoutingDirect,
-		Outbounds: []NodeOutbound{{ID: routingID("ob_", 1), Name: "proxy", Protocol: "socks", Rules: []string{}, IPRules: []string{}, ProtocolRules: []string{}}},
-		Rules:     []NodeRoute{{ID: routingID("rr_", 1), Enabled: routingBool(false), Kind: "domain", Values: []string{"example.com.", "full:example.com", "geosite:cn"}, OutboundID: RoutingBlock}},
+		Version: RoutingVersion, DefaultOutboundID: RoutingDirect,
+		Outbounds:          []NodeOutbound{{ID: routingID("ob_", 1), Name: "proxy", Protocol: "socks", Rules: []string{}, IPRules: []string{}, ProtocolRules: []string{}}},
+		Rules:              []NodeRoute{{ID: routingID("rr_", 1), Enabled: routingBool(false), Kind: "domain", Values: []string{"example.com.", "full:example.com", "geosite:cn"}, OutboundID: RoutingBlock, UserIDs: []int64{}}},
+		UserDefaults:       []NodeUserDefault{},
+		DNS:                DefaultDNSPolicy("test"),
+		TargetIPPreference: "none",
 	}
 }
 
@@ -62,7 +65,7 @@ func TestNodeRoutingCanonicalAndPresence(t *testing.T) {
 			t.Errorf("unexpectedly accepted %#v", value)
 		}
 	}
-	for _, raw := range []string{`null`, `{}`, `{"version":1,"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`, `{"Version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`, `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct","future":1}`, `{} {}`, `{"version":1,"outbounds":[],"rules":[{"id":"rr_00000001-0000-4000-8000-000000000001","kind":"domain","values":["example.com"],"outbound_id":"direct"}],"default_outbound_id":"direct"}`} {
+	for _, raw := range []string{`null`, `{}`, `{"version":3,"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`, `{"Version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`, `{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none","future":1}`, `{} {}`, `{"version":3,"outbounds":[],"rules":[{"id":"rr_00000001-0000-4000-8000-000000000001","kind":"domain","values":["example.com"],"outbound_id":"direct","user_ids":[]}],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`} {
 		if _, err := ParseNodeRouting([]byte(raw)); err == nil {
 			t.Errorf("accepted %s", raw)
 		}
@@ -129,7 +132,6 @@ func TestNodeRoutingReferencesIDsAndBudgets(t *testing.T) {
 	}
 	p := basicRouting()
 	p.Outbounds[0].Settings = ` { "value" : "x" } `
-	p.Outbounds[0].PluginOptions = map[string]any{"mode": "ws", "large": json.Number("9007199254740992")}
 	got, err := NormalizeNodeRouting(p)
 	if err != nil {
 		t.Fatal(err)
@@ -137,17 +139,18 @@ func TestNodeRoutingReferencesIDsAndBudgets(t *testing.T) {
 	if got.Outbounds[0].Settings != p.Outbounds[0].Settings {
 		t.Fatalf("raw JSON changed: %q", got.Outbounds[0].Settings)
 	}
-	got.Outbounds[0].PluginOptions.(map[string]any)["mode"] = "changed"
-	if p.Outbounds[0].PluginOptions.(map[string]any)["mode"] != "ws" {
-		t.Fatal("plugin options aliased")
-	}
-	if got.Outbounds[0].PluginOptions.(map[string]any)["large"] != json.Number("9007199254740992") {
-		t.Fatal("plugin option integer lost precision")
-	}
-	p.Outbounds[0].PluginOptions = map[string]any{"large": json.Number("9007199254740993")}
+	// The node core forwards through no outbound plugin, so plugin options
+	// (structured or nested in raw settings) are rejected at save time.
+	p.Outbounds[0].PluginOptions = map[string]any{"mode": "ws"}
 	if _, err := NormalizeNodeRouting(p); err == nil {
-		t.Fatal("protobuf-lossy plugin option accepted")
+		t.Fatal("outbound plugin options accepted")
 	}
+	p.Outbounds[0].PluginOptions = nil
+	p.Outbounds[0].Settings = `{"plugin":"obfs","plugin_opts":{"mode":"http"}}`
+	if _, err := NormalizeNodeRouting(p); err == nil {
+		t.Fatal("raw outbound plugin accepted")
+	}
+	p.Outbounds[0].Settings = ""
 	p.Outbounds[0].PluginOptions = nil
 	p.Outbounds[0].Address = string([]byte{0xff})
 	if _, err := NormalizeNodeRouting(p); err == nil {
@@ -190,7 +193,7 @@ func TestNodeRoutingLegacyMaximumFixture(t *testing.T) {
 		add("ip", id, ips)
 		add("protocol", id, []string{"bittorrent"})
 	}
-	got, err := NormalizeNodeRouting(p)
+	got, err := NormalizeNodeRouting(asV3(p))
 	if err != nil {
 		t.Fatalf("maximum legacy fixture: %v", err)
 	}
@@ -208,11 +211,11 @@ func TestNodeRoutingInputAndSerializedBoundaries(t *testing.T) {
 		}
 		p.Rules = append(p.Rules, NodeRoute{ID: routingID("rr_", i+1), Enabled: routingBool(true), Kind: "domain", Values: values, OutboundID: RoutingDirect})
 	}
-	if _, err := NormalizeNodeRouting(p); err != nil {
+	if _, err := NormalizeNodeRouting(asV3(p)); err != nil {
 		t.Fatalf("8192 values rejected: %v", err)
 	}
 	p.Rules = append(p.Rules, NodeRoute{ID: routingID("rr_", 9), Enabled: routingBool(false), Kind: "protocol", Values: []string{"bittorrent"}, OutboundID: RoutingBlock})
-	if _, err := NormalizeNodeRouting(p); err == nil {
+	if _, err := NormalizeNodeRouting(asV3(p)); err == nil {
 		t.Fatal("8193 input values accepted")
 	}
 

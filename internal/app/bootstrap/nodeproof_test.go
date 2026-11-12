@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -105,20 +104,6 @@ func requireNodeProof(t *testing.T) {
 	t.Setenv("PPANEL_NODE_PROOF", binary)
 }
 
-func TestCutoverIntegrationRequiresProofBeforeDatabase(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestOrderedCutoverMySQL$")
-	for _, value := range os.Environ() {
-		if !strings.HasPrefix(value, "PPANEL_TEST_ORDERED_ROUTING_MYSQL_DSN=") && !strings.HasPrefix(value, "PPANEL_NODE_PROOF=") && !strings.HasPrefix(value, "PPANEL_TEST_XRAY=") {
-			cmd.Env = append(cmd.Env, value)
-		}
-	}
-	cmd.Env = append(cmd.Env, "PPANEL_TEST_ORDERED_ROUTING_MYSQL_DSN=ignored:ignored@tcp(127.0.0.1:1)/proof_test", "PPANEL_NODE_PROOF="+filepath.Join(t.TempDir(), "missing-proof"), "PPANEL_TEST_XRAY=/missing-xray")
-	output, err := cmd.CombinedOutput()
-	if err == nil || !bytes.Contains(output, []byte("node proof failed")) {
-		t.Fatalf("cutover did not require helper before database: %v %s", err, output)
-	}
-}
-
 func TestFinalNodeBuilderRejectsPreflightBlockers(t *testing.T) {
 	requireNodeProof(t)
 	key := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
@@ -132,9 +117,8 @@ func TestFinalNodeBuilderRejectsPreflightBlockers(t *testing.T) {
 		{"bad-spider", config.NodeOutbound{Name: "bad-spider", Protocol: "vless", Address: "example.com", Port: 443, UUID: "00000000-0000-0000-0000-000000000001", Security: "reality", Transport: "tcp", RealityPublicKey: key, SpiderX: "/%"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			preview, err := config.ConvertLegacyRouting(config.LegacyRoutingInput{Outbound: []config.NodeOutbound{tc.out}}, "global")
-			if err != nil || preview.Draft != nil {
-				t.Fatalf("preflight accepted %#v %v", preview, err)
+			if err := saveOutbound(tc.out); err == nil {
+				t.Fatalf("management validation accepted %s", tc.name)
 			}
 			proof := runNodeProof(t, map[string]any{"kind": "outbound", "outbound": tc.out})
 			if proof.OK {
@@ -170,11 +154,22 @@ func TestFinalNodeBuilderRejectsPreflightBlockers(t *testing.T) {
 		t.Fatalf("final node builder rejected REALITY: %s", proof.Error)
 	}
 	valid := config.NodeOutbound{Name: "socks", Protocol: "socks", Address: "127.0.0.1", Port: 1080}
-	preview, err := config.ConvertLegacyRouting(config.LegacyRoutingInput{Outbound: []config.NodeOutbound{valid}}, "global")
-	if err != nil || preview.Draft == nil {
-		t.Fatalf("valid SOCKS blocked: %#v %v", preview, err)
+	if err := saveOutbound(valid); err != nil {
+		t.Fatalf("valid SOCKS blocked: %v", err)
 	}
 	if proof := runNodeProof(t, map[string]any{"kind": "outbound", "outbound": valid}); !proof.OK {
 		t.Fatalf("final node builder rejected SOCKS: %s", proof.Error)
 	}
+}
+
+// saveOutbound runs the administrator's save validation for one outbound in an
+// otherwise default format 3 policy.
+func saveOutbound(o config.NodeOutbound) error {
+	p := config.DefaultNodeRouting("global")
+	if o.ID == "" {
+		o.ID = "ob_11111111-1111-4111-8111-111111111111"
+	}
+	p.Outbounds = []config.NodeOutbound{o}
+	_, err := config.NormalizeNodeRouting(p)
+	return err
 }

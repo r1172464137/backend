@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
@@ -22,6 +23,9 @@ func newPlatformModule(store repository.Store, srv *Application) platform.Servic
 		Store:   store,
 		Orders:  store.Order(),
 		Users:   store.User(),
+		MissingAccounts: func(ctx context.Context, ids []int64) ([]int64, error) {
+			return repository.MissingUserIDs(ctx, store.User(), ids)
+		},
 		Tickets: store.Ticket(),
 		Nodes:   store.Node(),
 		Cache:   srv.Redis,

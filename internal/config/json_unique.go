@@ -101,7 +101,7 @@ func validateRoutingJSONFields(data []byte) error {
 	for _, part := range []struct {
 		name string
 		typ  reflect.Type
-	}{{"outbounds", reflect.TypeOf(NodeOutbound{})}, {"rules", reflect.TypeOf(NodeRoute{})}} {
+	}{{"outbounds", reflect.TypeOf(NodeOutbound{})}, {"rules", reflect.TypeOf(NodeRoute{})}, {"user_defaults", reflect.TypeOf(NodeUserDefault{})}} {
 		raw, ok := fields[part.name]
 		if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			continue
@@ -113,6 +113,23 @@ func validateRoutingJSONFields(data []byte) error {
 		for i, item := range items {
 			if _, err := exactJSONFields(item, part.typ); err != nil {
 				return fmt.Errorf("%s[%d]: %w", part.name, i, err)
+			}
+		}
+	}
+	if raw, ok := fields["dns"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		dns, err := exactJSONFields(raw, reflect.TypeOf(NodeDNSPolicy{}))
+		if err != nil {
+			return fmt.Errorf("dns: %w", err)
+		}
+		if resolvers, ok := dns["resolvers"]; ok && !bytes.Equal(bytes.TrimSpace(resolvers), []byte("null")) {
+			var items []json.RawMessage
+			if err := json.Unmarshal(resolvers, &items); err != nil {
+				return fmt.Errorf("dns.resolvers must be an array")
+			}
+			for i, item := range items {
+				if _, err := exactJSONFields(item, reflect.TypeOf(NodeDNSResolver{})); err != nil {
+					return fmt.Errorf("dns.resolvers[%d]: %w", i, err)
+				}
 			}
 		}
 	}

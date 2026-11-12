@@ -11,7 +11,7 @@ import (
 
 func TestNodeConfigOrderedRoutingJSONAndYAMLRoundTrip(t *testing.T) {
 	enabled := false
-	original := NodeConfig{RoutingRevision: 7, Routing: &NodeRouting{Version: 1, Outbounds: []NodeOutbound{}, Rules: []NodeRoute{{ID: "rr_11111111-1111-4111-8111-111111111111", Enabled: &enabled, Kind: "domain", Values: []string{"geosite:cn"}, OutboundID: "block"}}, DefaultOutboundID: "direct"}}
+	original := NodeConfig{RoutingRevision: 7, Routing: asV3(&NodeRouting{Outbounds: []NodeOutbound{}, Rules: []NodeRoute{{ID: "rr_11111111-1111-4111-8111-111111111111", Enabled: &enabled, Kind: "domain", Values: []string{"geosite:cn"}, OutboundID: "block", UserIDs: []int64{7}}}, DefaultOutboundID: "direct"})}
 	body, err := json.Marshal(&original)
 	if err != nil {
 		t.Fatal(err)

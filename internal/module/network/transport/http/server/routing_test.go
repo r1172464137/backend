@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/route/param"
 	serverv1 "github.com/perfect-panel/server/api/server/v1"
+	appconfig "github.com/perfect-panel/server/internal/config"
 	"github.com/perfect-panel/server/internal/module/network"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/pkg/xerr"
@@ -26,19 +27,30 @@ func (s routingTestService) QueryServerProtocolConfig(context.Context, *dto.Quer
 	return s.response, nil
 }
 
+// testIdentity is an identity snapshot for the given delivered protocol
+// types (sorted), each with no users.
+func testIdentity(protocols ...string) *dto.IdentitySnapshot {
+	s := &dto.IdentitySnapshot{SnapshotID: testSnapshotID, Protocols: []dto.ProtocolIdentity{}}
+	for _, p := range protocols {
+		s.Protocols = append(s.Protocols, dto.ProtocolIdentity{Protocol: p, Users: []dto.IdentityUser{}})
+	}
+	return s
+}
+
 func routeTestPolicy() *dto.NodeRoutingPolicy {
 	flag := false
 	return &dto.NodeRoutingPolicy{
-		Version: 1, Mode: "ordered-v1-local", Source: "server", SourceServerID: 7,
+		Version: 3, Mode: "local", Source: "server", SourceServerID: 7,
+		UserDefaults: []appconfig.NodeUserDefault{}, DNS: appconfig.DefaultDNSPolicy("test"), TargetIPPreference: "none",
 		SourceRevision: 42, LocalTransitionRevision: 42, DefaultOutboundID: "direct",
-		Rules: []dto.NodeRoutingRule{{ID: "rr_00000001-0000-4000-8000-000000000001", Enabled: &flag, Kind: "domain", Values: []string{"full:example.com"}, OutboundID: "ob_00000001-0000-4000-8000-000000000001"}},
+		Rules: []dto.NodeRoutingRule{{ID: "rr_00000001-0000-4000-8000-000000000001", Enabled: &flag, Kind: "domain", Values: []string{"full:example.com"}, OutboundID: "ob_00000001-0000-4000-8000-000000000001", UserIDs: []int64{}}},
 		Outbounds: []dto.NodeOutbound{{
 			ID: "ob_00000001-0000-4000-8000-000000000001", Name: "Proxy", Protocol: "vless", Address: "example.com", Port: 443,
-			User: "user", Password: "password", UUID: "uuid", Cipher: "cipher", Plugin: "plugin", PluginOptions: map[string]any{"key": "value"},
+			User: "user", Password: "password", UUID: "uuid", Cipher: "cipher",
 			Security: "reality", SNI: "sni", ALPN: []string{"h2", "http/1.1"}, AllowInsecure: true, Fingerprint: "chrome",
 			Transport: "xhttp", Host: "host", Path: "/path", ServiceName: "service", XHTTPMode: "auto", XHTTPExtra: `{}`, Flow: "vision",
 			Encryption: "mlkem", EncryptionMode: "native", EncryptionRTT: "1rtt", EncryptionTicket: "ticket", EncryptionPadding: "padding", EncryptionPassword: "secret",
-			Multiplex: "medium", UoT: true, UoTVersion: 2, CongestionController: "bbr", UDPStream: true, ReduceRtt: true, Heartbeat: 30,
+			Multiplex: "medium", CongestionController: "bbr", UDPStream: true, ReduceRtt: true, Heartbeat: 30,
 			RealityPublicKey: "public", RealityShortId: "short", SpiderX: "/spider", Settings: ` {"raw":true} `, StreamSettings: `{"network":"tcp"}`,
 			Rules: []string{}, IPRules: []string{}, ProtocolRules: []string{},
 		}},
@@ -46,7 +58,7 @@ func routeTestPolicy() *dto.NodeRoutingPolicy {
 }
 
 func TestOrderedRoutingJSONProtoProjection(t *testing.T) {
-	response := &dto.QueryServerConfigResponse{Routing: routeTestPolicy(), DNS: []dto.NodeDNS{}, Protocols: []dto.Protocol{}}
+	response := &dto.QueryServerConfigResponse{Routing: routeTestPolicy(), Protocols: []dto.Protocol{}, IdentitySnapshot: testIdentity()}
 	if err := validateRoutingDelivery(response, 7); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +95,7 @@ func TestOrderedRoutingJSONProtoProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := round.Data.Routing
-	if p.Version != 1 || p.Mode != "ordered-v1-local" || p.Source != "server" || p.SourceServerId != 7 || p.SourceRevision != 42 || p.LocalTransitionRevision != 42 || p.DefaultOutboundId != "direct" {
+	if p.Version != 3 || p.Mode != "local" || p.Source != "server" || p.SourceServerId != 7 || p.SourceRevision != 42 || p.LocalTransitionRevision != 42 || p.DefaultOutboundId != "direct" {
 		t.Fatalf("identity = %v", p)
 	}
 	if len(p.Rules) != 1 || p.Rules[0].Enabled == nil || *p.Rules[0].Enabled || p.Rules[0].Kind != serverv1.RouteKind_ROUTE_KIND_DOMAIN || !reflect.DeepEqual(p.Rules[0].Values, []string{"full:example.com"}) {
@@ -130,8 +142,8 @@ func queryContext(accept, capability, etag string) *app.RequestContext {
 func TestRoutingCapabilityCheckedBefore304(t *testing.T) {
 	for _, accept := range []string{"application/json", "application/protobuf"} {
 		t.Run(accept, func(t *testing.T) {
-			handler := QueryServerProtocolConfigHandler(routingTestService{response: &dto.QueryServerConfigResponse{Routing: routeTestPolicy()}}, func() string { return "secret" })
-			first := queryContext(accept, "1", "")
+			handler := QueryServerProtocolConfigHandler(routingTestService{response: &dto.QueryServerConfigResponse{Routing: routeTestPolicy(), IdentitySnapshot: testIdentity()}}, func() string { return "secret" })
+			first := queryContext(accept, "3", "")
 			handler(context.Background(), first)
 			if first.Response.StatusCode() != 200 {
 				t.Fatalf("first status %d, body %s", first.Response.StatusCode(), first.Response.Body())
@@ -143,12 +155,12 @@ func TestRoutingCapabilityCheckedBefore304(t *testing.T) {
 			if vary := string(first.Response.Header.Peek("Vary")); !strings.Contains(vary, "Accept") || !strings.Contains(vary, routingVersionHeader) {
 				t.Fatalf("Vary = %q", vary)
 			}
-			cached := queryContext(accept, "1", etag)
+			cached := queryContext(accept, "3", etag)
 			handler(context.Background(), cached)
 			if cached.Response.StatusCode() != 304 {
 				t.Fatalf("supported status %d", cached.Response.StatusCode())
 			}
-			for _, capability := range []string{"", "2", "0"} {
+			for _, capability := range []string{"", "1", "2", "0"} {
 				old := queryContext(accept, capability, etag)
 				handler(context.Background(), old)
 				if old.Response.StatusCode() != 426 {
@@ -172,15 +184,18 @@ func TestRoutingCapabilityCheckedBefore304(t *testing.T) {
 	}
 }
 
-func TestRoutingPluginOptionsMustSurviveBothWires(t *testing.T) {
+// The node core forwards through no outbound plugin, so a delivered policy
+// carrying plugin options is a corrupt candidate on either wire.
+func TestRoutingRejectsOutboundPluginOptions(t *testing.T) {
 	for _, test := range []struct {
 		value any
 		ok    bool
 	}{
-		{map[string]any{"n": json.Number("0.1"), "nested": []any{true, "x"}}, true},
+		{map[string]any{"n": json.Number("0.1"), "nested": []any{true, "x"}}, false},
 		{map[string]any{"n": json.Number("9007199254740993")}, false},
+		{nil, true},
 	} {
-		response := &dto.QueryServerConfigResponse{Routing: routeTestPolicy()}
+		response := &dto.QueryServerConfigResponse{Routing: routeTestPolicy(), IdentitySnapshot: testIdentity()}
 		response.Routing.Outbounds[0].PluginOptions = test.value
 		err := validateRoutingDelivery(response, 7)
 		if (err == nil) != test.ok {
@@ -217,16 +232,17 @@ func TestProtobufETagDeterministicForMaps(t *testing.T) {
 }
 
 func TestRoutingHTTPProtocolOneToZeroIsArray(t *testing.T) {
-	response := &dto.QueryServerConfigResponse{Routing: routeTestPolicy(), Protocols: []dto.Protocol{{Type: "vless", Port: 443, Enable: true}}, Total: 1}
+	response := &dto.QueryServerConfigResponse{Routing: routeTestPolicy(), Protocols: []dto.Protocol{{Type: "vless", Port: 443, Enable: true}}, Total: 1, IdentitySnapshot: testIdentity("vless")}
 	handler := QueryServerProtocolConfigHandler(routingTestService{response: response}, func() string { return "secret" })
-	first := queryContext("application/json", "1", "")
+	first := queryContext("application/json", "3", "")
 	handler(context.Background(), first)
 	if first.Response.StatusCode() != 200 {
 		t.Fatalf("first status %d", first.Response.StatusCode())
 	}
 	response.Protocols = nil
 	response.Total = 0
-	second := queryContext("application/json", "1", "")
+	response.IdentitySnapshot = testIdentity()
+	second := queryContext("application/json", "3", "")
 	handler(context.Background(), second)
 	var envelope struct {
 		Data map[string]json.RawMessage `json:"data"`
@@ -249,13 +265,13 @@ func TestRoutingDeliveryFailsClosed(t *testing.T) {
 		"bad reference":   func(r *dto.QueryServerConfigResponse) { r.Routing.DefaultOutboundID = "missing" },
 	} {
 		t.Run(name, func(t *testing.T) {
-			response := &dto.QueryServerConfigResponse{Routing: routeTestPolicy()}
+			response := &dto.QueryServerConfigResponse{Routing: routeTestPolicy(), IdentitySnapshot: testIdentity()}
 			edit(response)
 			if err := validateRoutingDelivery(response, 7); err == nil {
 				t.Fatal("accepted invalid response")
 			}
 			for _, accept := range []string{"application/json", protobufContentType} {
-				ctx := queryContext(accept, "1", `"stale"`)
+				ctx := queryContext(accept, "3", `"stale"`)
 				QueryServerProtocolConfigHandler(routingTestService{response: response}, func() string { return "secret" })(context.Background(), ctx)
 				if ctx.Response.StatusCode() == 304 {
 					t.Fatal("invalid response produced 304")

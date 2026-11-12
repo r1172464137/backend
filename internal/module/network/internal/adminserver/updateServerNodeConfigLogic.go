@@ -8,7 +8,7 @@ import (
 
 	"github.com/perfect-panel/server/internal/config"
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
-	"github.com/perfect-panel/server/internal/module/network/internal/nodeconfig"
+	"github.com/perfect-panel/server/internal/module/network/entity/node"
 	"github.com/perfect-panel/server/internal/repository"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
@@ -32,7 +32,9 @@ func (l *UpdateServerNodeConfigLogic) UpdateServerNodeConfig(req *dto.UpdateServ
 	if req.RequestFields == nil {
 		return xerr.NewErrCodeMsg(xerr.InvalidParams, "explicit request field presence is required")
 	}
-	for _, field := range []string{"block", "block_ips", "block_protocols", "outbound", "inherit_block", "inherit_outbound"} {
+	// DNS and the IP preference live inside the routing package; partial
+	// legacy overrides are rejected, never read, cleared or converted.
+	for _, field := range []string{"dns", "ip_strategy", "inherit_dns", "inherit_ip_strategy", "block", "block_ips", "block_protocols", "outbound", "inherit_block", "inherit_outbound"} {
 		if _, ok := req.RequestFields[field]; ok {
 			return xerr.NewErrCode(xerr.NetworkLegacyRoutingRemoved)
 		}
@@ -49,29 +51,10 @@ func (l *UpdateServerNodeConfigLogic) UpdateServerNodeConfig(req *dto.UpdateServ
 			queryErr = err
 			return err
 		}
-		current, err := nodeconfig.OverrideResponse(old)
-		if err != nil {
-			queryErr = err
-			return err
-		}
-		if req.RequestFields != nil {
-			if _, ok := req.RequestFields["inherit_ip_strategy"]; !ok {
-				req.InheritIPStrategy = current.InheritIPStrategy
-			}
-			if _, ok := req.RequestFields["ip_strategy"]; !ok {
-				req.IPStrategy = current.IPStrategy
-			}
-			if _, ok := req.RequestFields["inherit_dns"]; !ok {
-				req.InheritDNS = current.InheritDNS
-			}
-			if _, ok := req.RequestFields["dns"]; !ok {
-				req.DNS = current.DNS
-			}
-		}
-		data, err := nodeconfig.OverrideModel(req.ServerID, req.ServerNodeConfigOverride)
-		if err != nil {
-			validationErr = err
-			return err
+		// The row's legacy DNS/IP columns are rollback material: kept as is.
+		data := &node.ServerConfigOverride{ServerId: req.ServerID}
+		if old != nil {
+			data.IPStrategy, data.DNS = old.IPStrategy, old.DNS
 		}
 		currentRevision := int64(0)
 		var oldRouting *string
@@ -123,12 +106,31 @@ func (l *UpdateServerNodeConfigLogic) UpdateServerNodeConfig(req *dto.UpdateServ
 				validationErr = err
 				return err
 			}
+			var previous *config.NodeRouting
+			if oldRouting != nil {
+				if previous, err = config.ParseNodeRouting([]byte(*oldRouting)); err != nil {
+					queryErr = err
+					return err
+				}
+			}
+			if missing, err := repository.MissingUserIDs(l.ctx, l.deps.Store.User(), config.NewAccountIDs(policy, previous)); err != nil {
+				queryErr = err
+				return err
+			} else if len(missing) > 0 {
+				validationErr = fmt.Errorf("unknown accounts referenced: %v", missing)
+				return validationErr
+			}
 			body, err := json.Marshal(policy)
 			if err != nil {
 				return err
 			}
 			raw := string(body)
 			data.Routing = &raw
+			// Identical canonical content is a successful no-op: the local
+			// revision and the nodes' candidate stay unchanged.
+			if oldRouting != nil && *oldRouting == raw {
+				transition = false
+			}
 		} else if hasInherit && req.InheritRouting {
 			data.Routing = nil
 		} else if hasInherit && !req.InheritRouting && oldRouting == nil {

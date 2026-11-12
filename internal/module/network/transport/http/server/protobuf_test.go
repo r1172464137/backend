@@ -131,22 +131,15 @@ func TestWriteServerReportResult_ProtobufError(t *testing.T) {
 }
 
 func TestResponseConversions(t *testing.T) {
-	users := serverUserListResponseToProtobuf(&dto.GetServerUserListResponse{Users: []dto.ServerUser{{
-		Id: 1, UUID: "uuid", SpeedLimit: 10, DeviceLimit: 2,
-	}}})
-	if users.Code != 200 || len(users.Data.Users) != 1 || users.Data.Users[0].Uuid != "uuid" {
-		t.Fatalf("users = %+v, want protobuf user-list envelope", users)
-	}
-
 	protocols, err := queryServerProtocolConfigResponseToProtobuf(&dto.QueryServerConfigResponse{
 		TrafficReportThreshold: 1024,
 		PushInterval:           60,
 		PullInterval:           30,
-		IPStrategy:             "prefer_ipv4",
-		DNS: []dto.NodeDNS{{
-			Proto: "https", Address: "https://dns.example/dns-query", Domains: []string{"example.com"},
+		Routing:                routeTestPolicy(),
+		IdentitySnapshot: &dto.IdentitySnapshot{SnapshotID: testSnapshotID, Protocols: []dto.ProtocolIdentity{
+			{Protocol: "nowhere", Users: []dto.IdentityUser{}},
+			{Protocol: "vless", Users: []dto.IdentityUser{{ID: 11, UUID: "00000000-0000-4000-8000-000000000011", SpeedLimit: 5, DeviceLimit: 2, AccountID: 3}}},
 		}},
-		Routing: routeTestPolicy(),
 		Protocols: []dto.Protocol{
 			{
 				Type: "vless", Port: 443, Enable: true, Transport: "xhttp", XhttpMode: "auto",
@@ -162,11 +155,15 @@ func TestResponseConversions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("queryServerProtocolConfigResponseToProtobuf() error = %v", err)
 	}
-	if protocols.Code != 200 || protocols.Data.Total != 2 || protocols.Data.IpStrategy != "prefer_ipv4" {
-		t.Fatalf("protocols = %+v, want protobuf protocol-config envelope", protocols)
+	if protocols.Code != 200 || protocols.Data.Total != 2 || protocols.Data.IpStrategy != "" || len(protocols.Data.Dns) != 0 {
+		t.Fatalf("protocols = %+v, want protobuf protocol-config envelope without legacy DNS/IP fields", protocols)
 	}
-	if len(protocols.Data.Dns) != 1 || protocols.Data.Dns[0].Address != "https://dns.example/dns-query" {
-		t.Fatalf("dns = %+v, want strongly typed DNS configuration", protocols.Data.Dns)
+	id := protocols.Data.IdentitySnapshot
+	if id == nil || id.SnapshotId != testSnapshotID || len(id.Protocols) != 2 || id.Protocols[1].Users[0].AccountId != 3 || id.Protocols[1].Users[0].Id != 11 {
+		t.Fatalf("identity snapshot = %+v", id)
+	}
+	if protocols.Data.Routing.Dns == nil || protocols.Data.Routing.TargetIpPreference != "none" || protocols.Data.Routing.Rules[0].UserIds == nil {
+		t.Fatalf("routing format 3 fields missing: %+v", protocols.Data.Routing)
 	}
 	if protocols.Data.Routing == nil || len(protocols.Data.Routing.Outbounds) != 1 || len(protocols.Data.Outbound) != 0 || len(protocols.Data.Block) != 0 {
 		t.Fatalf("ordered-only protobuf projection = %+v", protocols.Data)
@@ -211,11 +208,11 @@ func TestStructuredRouteCanonicalCrosswireProjection(t *testing.T) {
 	p := routeTestPolicy()
 	enabled := true
 	p.Rules = []dto.NodeRoutingRule{
-		{ID: "rr_00000001-0000-4000-8000-000000000001", Enabled: &enabled, Kind: "domain", Values: domains, OutboundID: "direct"},
-		{ID: "rr_00000002-0000-4000-8000-000000000002", Enabled: &enabled, Kind: "ip", Values: ips, OutboundID: "direct"},
-		{ID: "rr_00000003-0000-4000-8000-000000000003", Enabled: &enabled, Kind: "protocol", Values: protocolRules, OutboundID: "block"},
+		{ID: "rr_00000001-0000-4000-8000-000000000001", Enabled: &enabled, Kind: "domain", Values: domains, OutboundID: "direct", UserIDs: []int64{}},
+		{ID: "rr_00000002-0000-4000-8000-000000000002", Enabled: &enabled, Kind: "ip", Values: ips, OutboundID: "direct", UserIDs: []int64{}},
+		{ID: "rr_00000003-0000-4000-8000-000000000003", Enabled: &enabled, Kind: "protocol", Values: protocolRules, OutboundID: "block", UserIDs: []int64{}},
 	}
-	converted, err := queryServerProtocolConfigResponseToProtobuf(&dto.QueryServerConfigResponse{Routing: p})
+	converted, err := queryServerProtocolConfigResponseToProtobuf(&dto.QueryServerConfigResponse{Routing: p, IdentitySnapshot: testIdentity()})
 	if err != nil {
 		t.Fatal(err)
 	}

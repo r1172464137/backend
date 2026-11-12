@@ -66,31 +66,31 @@ func TestOrderedNodeConfigPresenceAndRemovedLegacy(t *testing.T) {
 	if err := update(`{"routing":null,"routing_revision":2}`); err == nil {
 		t.Fatal("null routing accepted")
 	}
-	if err := update(`{"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"block"}}`); err == nil {
+	if err := update(`{"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"block","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`); err == nil {
 		t.Fatal("missing revision accepted")
 	}
-	if err := update(`{"routing_revision":0,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"block"}}`); err == nil {
+	if err := update(`{"routing_revision":0,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"block","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`); err == nil {
 		t.Fatal("zero stale global revision accepted")
 	}
 	var nullRevision dto.NodeConfig
 	if err := json.Unmarshal([]byte(`{"routing_revision":null}`), &nullRevision); err == nil {
 		t.Fatal("null revision accepted")
 	}
-	if err := update(`{"routing_revision":1,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"block"}}`); err == nil {
+	if err := update(`{"routing_revision":1,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"block","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`); err == nil {
 		t.Fatal("stale revision accepted")
 	}
-	if err := update(`{"routing_revision":2,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"block"}}`); err != nil {
+	if err := update(`{"routing_revision":2,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"block","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`); err != nil {
 		t.Fatal(err)
 	}
 	if store.systems["RoutingRevision"].Value != "3" {
 		t.Fatal("ordered save did not advance revision")
 	}
 	var invalid dto.NodeConfig
-	if err := json.Unmarshal([]byte(`{"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct","unknown":true}}`), &invalid); err == nil {
+	if err := json.Unmarshal([]byte(`{"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none","unknown":true}}`), &invalid); err == nil {
 		t.Fatal("unknown routing field accepted")
 	}
 	got, err := newGetNodeConfigLogic(context.Background(), deps).GetNodeConfig()
-	if err != nil || got.Routing == nil || got.RoutingRevision != 3 || got.RoutingMode != "global-v1" {
+	if err != nil || got.Routing == nil || got.RoutingRevision != 3 || got.RoutingMode != "global" {
 		t.Fatalf("get %#v %v", got, err)
 	}
 	store.systems["Routing"].Value = ""

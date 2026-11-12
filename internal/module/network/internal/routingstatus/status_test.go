@@ -20,9 +20,9 @@ func TestSequenceOrderingIndependentOfWallClock(t *testing.T) {
 	t.Cleanup(func() { client.Close() })
 	ctx := context.Background()
 	id := func(rev int64) *dto.RoutingCandidateIdentity {
-		return &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: rev}
+		return &dto.RoutingCandidateIdentity{SnapshotID: testSnapshotID, Mode: "inherited", Source: "global", SourceRevision: rev}
 	}
-	a := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 1, UpdatedAt: 100, RoutingApplied: id(1)}
+	a := &dto.ServerPushStatusRequest{RoutingVersion: 3, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 1, UpdatedAt: 100, RoutingApplied: id(1)}
 	record := func(v *dto.ServerPushStatusRequest) {
 		t.Helper()
 		if err := Record(ctx, client, 7, v); err != nil {
@@ -100,15 +100,15 @@ func TestOldAndDuplicateSequenceCannotExtendContentFreshness(t *testing.T) {
 			client := redis.NewClient(&redis.Options{Addr: s.Addr()})
 			t.Cleanup(func() { _ = client.Close() })
 			ctx := context.Background()
-			applied := &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 3}
-			fresh := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 3, RoutingApplied: applied}
+			applied := &dto.RoutingCandidateIdentity{SnapshotID: testSnapshotID, Mode: "inherited", Source: "global", SourceRevision: 3}
+			fresh := &dto.ServerPushStatusRequest{RoutingVersion: 3, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 3, RoutingApplied: applied}
 			if err := Record(ctx, client, 7, fresh); err != nil {
 				t.Fatal(err)
 			}
 			replayed := *fresh
 			replayed.RoutingSequence = sequence
 			if sequence == 1 {
-				replayed.RoutingApplied = &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 1}
+				replayed.RoutingApplied = &dto.RoutingCandidateIdentity{SnapshotID: testSnapshotID, Mode: "inherited", Source: "global", SourceRevision: 1}
 			}
 			previous := start
 			for _, elapsed := range []time.Duration{100 * time.Second, TTL - time.Second, TTL, TTL + 100*time.Second} {
@@ -159,14 +159,14 @@ func TestPreviousRedisRecordsWithoutContentTimestampFailClosed(t *testing.T) {
 	instance := "11111111-1111-4111-8111-111111111111"
 	// Shape emitted by the previous backend: liveness cannot be treated as
 	// trusted content time retroactively.
-	old := fmt.Sprintf(`{"received_at":%d,"sequence":"3","verified":true,"fingerprint":"old","payload":"{\"routing_version\":1}"}`, start.Unix())
+	old := fmt.Sprintf(`{"received_at":%d,"sequence":"3","verified":true,"fingerprint":"old","payload":"{\"routing_version\":3}"}`, start.Unix())
 	if err := client.HSet(ctx, key(7), instance, old).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if view, err := Read(ctx, client, 7); err != nil || view.Known {
 		t.Fatalf("old record trusted: %#v %v", view, err)
 	}
-	newer := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: instance, RoutingSequence: 4}
+	newer := &dto.ServerPushStatusRequest{RoutingVersion: 3, InstanceID: instance, RoutingSequence: 4}
 	if err := Record(ctx, client, 7, newer); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestExpiredLivenessRetainsSequenceWatermark(t *testing.T) {
 				client := redis.NewClient(&redis.Options{Addr: s.Addr()})
 				t.Cleanup(func() { _ = client.Close() })
 				ctx := context.Background()
-				fresh := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 3, RoutingApplied: &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 3}}
+				fresh := &dto.ServerPushStatusRequest{RoutingVersion: 3, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 3, RoutingApplied: &dto.RoutingCandidateIdentity{SnapshotID: testSnapshotID, Mode: "inherited", Source: "global", SourceRevision: 3}}
 				if err := Record(ctx, client, 7, fresh); err != nil {
 					t.Fatal(err)
 				}
@@ -199,7 +199,7 @@ func TestExpiredLivenessRetainsSequenceWatermark(t *testing.T) {
 				replayed := *fresh
 				replayed.RoutingSequence = sequence
 				if sequence == 1 {
-					replayed.RoutingApplied = &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 1}
+					replayed.RoutingApplied = &dto.RoutingCandidateIdentity{SnapshotID: testSnapshotID, Mode: "inherited", Source: "global", SourceRevision: 1}
 				}
 				if err := Record(ctx, client, 7, &replayed); err != nil {
 					t.Fatal(err)
@@ -255,8 +255,8 @@ func TestStaleContentStillCountsAsLiveInstance(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 	ctx := context.Background()
-	a := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 3}
-	b := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "22222222-2222-4222-8222-222222222222", RoutingSequence: 1}
+	a := &dto.ServerPushStatusRequest{RoutingVersion: 3, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 3}
+	b := &dto.ServerPushStatusRequest{RoutingVersion: 3, InstanceID: "22222222-2222-4222-8222-222222222222", RoutingSequence: 1}
 	for _, r := range []*dto.ServerPushStatusRequest{a, b} {
 		if err := Record(ctx, client, 7, r); err != nil {
 			t.Fatal(err)
@@ -299,8 +299,8 @@ func TestIndependentInstancesFreshnessAndUnknown(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	t.Cleanup(func() { client.Close() })
 	ctx := context.Background()
-	a := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 1, UpdatedAt: 100}
-	b := &dto.ServerPushStatusRequest{RoutingVersion: 1, InstanceID: "22222222-2222-4222-8222-222222222222", RoutingSequence: 1, UpdatedAt: 100, RoutingError: &dto.RoutingReportError{Stage: "bind", Message: "token=secret"}}
+	a := &dto.ServerPushStatusRequest{RoutingVersion: 3, InstanceID: "11111111-1111-4111-8111-111111111111", RoutingSequence: 1, UpdatedAt: 100}
+	b := &dto.ServerPushStatusRequest{RoutingVersion: 3, InstanceID: "22222222-2222-4222-8222-222222222222", RoutingSequence: 1, UpdatedAt: 100, RoutingError: &dto.RoutingReportError{Stage: "bind", Message: "token=secret"}}
 	for _, r := range []*dto.ServerPushStatusRequest{a, b} {
 		if err := Record(ctx, client, 7, r); err != nil {
 			t.Fatal(err)

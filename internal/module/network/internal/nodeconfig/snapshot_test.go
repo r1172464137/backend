@@ -44,7 +44,7 @@ func TestSnapshotRetriesRevisionChangesAndFailsClosed(t *testing.T) {
 	}
 }
 func TestDeliveryPolicyOnlyGlobalAndLocalV1(t *testing.T) {
-	raw := `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`
+	raw := `{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`
 	parsed, err := config.ParseNodeRouting([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -52,12 +52,12 @@ func TestDeliveryPolicyOnlyGlobalAndLocalV1(t *testing.T) {
 	global := config.NodeConfig{Routing: parsed, RoutingRevision: 4}
 	local := &node.ServerConfigOverride{Id: 1, ServerId: 7, RoutingRevision: 3}
 	p, err := DeliveryPolicy(global, local, 7)
-	if err != nil || p.Mode != "ordered-v1-inherited" || p.SourceRevision != 4 || p.LocalTransitionRevision != 3 {
+	if err != nil || p.Mode != "inherited" || p.SourceRevision != 4 || p.LocalTransitionRevision != 3 {
 		t.Fatalf("global %#v %v", p, err)
 	}
 	local.Routing = &raw
 	p, err = DeliveryPolicy(global, local, 7)
-	if err != nil || p.Mode != "ordered-v1-local" || p.SourceRevision != 3 || p.SourceServerID != 7 {
+	if err != nil || p.Mode != "local" || p.SourceRevision != 3 || p.SourceServerID != 7 {
 		t.Fatalf("local %#v %v", p, err)
 	}
 	bad := `{`

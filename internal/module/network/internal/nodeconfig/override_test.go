@@ -1,37 +1,43 @@
 package nodeconfig
 
 import (
-	"strings"
+	"encoding/json"
 	"testing"
 
 	"github.com/perfect-panel/server/internal/config"
-	dto "github.com/perfect-panel/server/internal/module/network/contract"
+	"github.com/perfect-panel/server/internal/module/network/entity/node"
 )
 
-func TestOrderedNonRoutingOverrideAndInheritance(t *testing.T) {
-	global := GlobalValues(config.NodeConfig{IPStrategy: "prefer_ipv4", DNS: []config.NodeDNS{{Proto: "udp", Address: "8.8.8.8:53", Domains: []string{"geosite:cn"}}}, RoutingRevision: 3})
-	model, err := OverrideModel(7, dto.ServerNodeConfigOverride{InheritIPStrategy: false, IPStrategy: "prefer_ipv6", InheritDNS: false, DNS: []dto.NodeDNS{}})
-	if err != nil {
-		t.Fatal(err)
+// A server either inherits the global package or holds a complete local one.
+// Legacy DNS/IP columns left on the row are rollback material: they are not
+// shown and do not change the result.
+func TestOverrideResponseIgnoresLegacyColumns(t *testing.T) {
+	legacyDNS, legacyIP := `[{"proto":"udp","address":"8.8.8.8:53"}]`, "prefer_ipv6"
+	resp, err := OverrideResponse(&node.ServerConfigOverride{ServerId: 7, DNS: &legacyDNS, IPStrategy: &legacyIP, RoutingRevision: 2})
+	if err != nil || !resp.InheritRouting || resp.Routing != nil || resp.RoutingRevision != 2 {
+		t.Fatalf("inherit with legacy columns: %#v %v", resp, err)
 	}
-	values := CloneValues(global)
-	if err := ApplyOverride(&values, model); err != nil {
-		t.Fatal(err)
+	body, _ := json.Marshal(resp)
+	var fields map[string]any
+	_ = json.Unmarshal(body, &fields)
+	for _, legacy := range []string{"dns", "ip_strategy", "inherit_dns", "inherit_ip_strategy"} {
+		if _, ok := fields[legacy]; ok {
+			t.Fatalf("override response exposes %s: %s", legacy, body)
+		}
 	}
-	if values.IPStrategy != "prefer_ipv6" || values.DNS == nil || len(values.DNS) != 0 {
-		t.Fatalf("effective %#v", values)
+
+	local, _ := json.Marshal(config.DefaultNodeRouting("server-7"))
+	raw := string(local)
+	resp, err = OverrideResponse(&node.ServerConfigOverride{ServerId: 7, Routing: &raw, RoutingRevision: 3})
+	if err != nil || resp.InheritRouting || resp.Routing == nil || resp.Routing.Version != config.RoutingVersion {
+		t.Fatalf("local package: %#v %v", resp, err)
 	}
-	projection, err := OverrideResponse(model)
-	if err != nil {
-		t.Fatal(err)
+
+	v1 := `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`
+	if _, err := OverrideResponse(&node.ServerConfigOverride{ServerId: 7, Routing: &v1, RoutingRevision: 3}); err == nil {
+		t.Fatal("format 1 local routing accepted at runtime")
 	}
-	if projection.InheritIPStrategy || projection.InheritDNS || !projection.InheritRouting {
-		t.Fatalf("override %#v", projection)
-	}
-}
-func TestOrderedDNSLimits(t *testing.T) {
-	_, err := OverrideModel(1, dto.ServerNodeConfigOverride{InheritIPStrategy: true, DNS: []dto.NodeDNS{{Proto: "https", Address: strings.Repeat("x", config.MaxPersistedJSONBytes)}}})
-	if err == nil {
-		t.Fatal("oversize DNS accepted")
+	if resp, err := OverrideResponse(nil); err != nil || !resp.InheritRouting {
+		t.Fatalf("no row: %#v %v", resp, err)
 	}
 }

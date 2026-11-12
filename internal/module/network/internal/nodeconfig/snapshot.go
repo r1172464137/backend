@@ -82,12 +82,12 @@ func DeliveryPolicy(global config.NodeConfig, override *node.ServerConfigOverrid
 		if serverID <= 0 || localRevision <= 0 {
 			return nil, errors.New("invalid local routing identity")
 		}
-		result.Mode, result.Source, result.SourceServerID, result.SourceRevision = "ordered-v1-local", "server", serverID, localRevision
+		result.Mode, result.Source, result.SourceServerID, result.SourceRevision = ModeLocal, "server", serverID, localRevision
 	} else {
 		if global.RoutingRevision <= 0 {
 			return nil, errors.New("invalid global routing revision")
 		}
-		result.Mode, result.Source, result.SourceRevision = "ordered-v1-inherited", "global", global.RoutingRevision
+		result.Mode, result.Source, result.SourceRevision = ModeInherited, "global", global.RoutingRevision
 	}
 	return &result, nil
 }

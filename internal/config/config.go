@@ -159,14 +159,14 @@ type SiteConfig struct {
 }
 
 type NodeConfig struct {
-	NodeSecret             string       `yaml:"NodeSecret" default:""`
-	NodePullInterval       int64        `yaml:"NodePullInterval" default:"60"`
-	NodePushInterval       int64        `yaml:"NodePushInterval" default:"60"`
-	TrafficReportThreshold int64        `yaml:"TrafficReportThreshold" default:"0"`
-	IPStrategy             string       `yaml:"IPStrategy" default:""`
-	DNS                    []NodeDNS    `yaml:"DNS"`
-	Routing                *NodeRouting `yaml:"Routing,omitempty" json:"routing,omitempty"`
-	RoutingRevision        int64        `yaml:"RoutingRevision,omitempty" json:"routing_revision,omitempty"`
+	NodeSecret             string `yaml:"NodeSecret" default:""`
+	NodePullInterval       int64  `yaml:"NodePullInterval" default:"60"`
+	NodePushInterval       int64  `yaml:"NodePushInterval" default:"60"`
+	TrafficReportThreshold int64  `yaml:"TrafficReportThreshold" default:"0"`
+	// Routing (format 3) carries DNS and the target IP preference; the legacy
+	// DNS/IPStrategy settings are kept in the database as rollback material only.
+	Routing         *NodeRouting `yaml:"Routing,omitempty" json:"routing,omitempty"`
+	RoutingRevision int64        `yaml:"RoutingRevision,omitempty" json:"routing_revision,omitempty"`
 }
 
 func (n *NodeConfig) Marshal() ([]byte, error) {
@@ -256,9 +256,12 @@ type NodeOutbound struct {
 	SpiderX              string   `json:"spider_x,omitempty"`
 	Settings             string   `json:"settings,omitempty"`
 	StreamSettings       string   `json:"stream_settings,omitempty"`
-	Rules                []string `json:"rules" yaml:"rules"`
-	IPRules              []string `json:"ip_rules" yaml:"ip_rules"`
-	ProtocolRules        []string `json:"protocol_rules" yaml:"protocol_rules"`
+	// ViaOutboundID names the custom outbound this one dials through
+	// (node -> via -> this -> target). Empty means a direct connection.
+	ViaOutboundID string   `json:"via_outbound_id,omitempty"`
+	Rules         []string `json:"rules" yaml:"rules"`
+	IPRules       []string `json:"ip_rules" yaml:"ip_rules"`
+	ProtocolRules []string `json:"protocol_rules" yaml:"protocol_rules"`
 }
 
 func (n *NodeOutbound) Marshal() ([]byte, error) {

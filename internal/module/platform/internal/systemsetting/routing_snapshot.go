@@ -16,12 +16,8 @@ func (s *Service) ReadNodeConfigSnapshot(ctx context.Context) (config.NodeConfig
 	}
 	out := config.NodeConfig{
 		NodePullInterval: value.NodePullInterval, NodePushInterval: value.NodePushInterval,
-		TrafficReportThreshold: value.TrafficReportThreshold, IPStrategy: value.IPStrategy,
-		Routing: value.Routing, RoutingRevision: value.RoutingRevision,
-	}
-	out.DNS = make([]config.NodeDNS, 0, len(value.DNS))
-	for _, d := range value.DNS {
-		out.DNS = append(out.DNS, config.NodeDNS{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
+		TrafficReportThreshold: value.TrafficReportThreshold,
+		Routing:                value.Routing, RoutingRevision: value.RoutingRevision,
 	}
 	return out, nil
 }

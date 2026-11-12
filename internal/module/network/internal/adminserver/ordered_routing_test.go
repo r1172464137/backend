@@ -21,7 +21,7 @@ func TestMissingFieldPresenceRejectsWithoutMutation(t *testing.T) {
 	if err := logic.UpdateServerNodeConfig(&dto.UpdateServerNodeConfigRequest{ServerID: 1}); err == nil || store.override != nil {
 		t.Fatalf("nil presence created an override: %#v %v", store.override, err)
 	}
-	raw := `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`
+	raw := `{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`
 	store.override = &node.ServerConfigOverride{Id: 1, ServerId: 1, Routing: &raw, RoutingRevision: 2}
 	if err := logic.UpdateServerNodeConfig(&dto.UpdateServerNodeConfigRequest{ServerID: 1, ServerNodeConfigOverride: dto.ServerNodeConfigOverride{InheritRouting: true, RoutingRevision: 2}}); err == nil {
 		t.Fatal("nil presence accepted")
@@ -34,7 +34,7 @@ func TestMissingFieldPresenceRejectsWithoutMutation(t *testing.T) {
 func TestZeroLocalRevisionIsValidWhenExplicit(t *testing.T) {
 	store := newSerializedAdminNodeStore()
 	var req dto.UpdateServerNodeConfigRequest
-	if err := json.Unmarshal([]byte(`{"server_id":1,"routing_revision":0,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}}`), &req); err != nil {
+	if err := json.Unmarshal([]byte(`{"server_id":1,"routing_revision":0,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`), &req); err != nil {
 		t.Fatal(err)
 	}
 	if err := newUpdateServerNodeConfigLogic(context.Background(), Deps{Store: store}).UpdateServerNodeConfig(&req); err != nil {
@@ -53,7 +53,7 @@ func TestOfflineDesiredRoutingDoesNotInventNodeStatus(t *testing.T) {
 	for _, scenario := range []string{"no_redis", "no_report", "redis_unavailable", "pending_report", "applied_report"} {
 		t.Run(scenario, func(t *testing.T) {
 			store := newSerializedAdminNodeStore()
-			global := config.NodeConfig{RoutingRevision: 5, Routing: &config.NodeRouting{Version: 1, Outbounds: []config.NodeOutbound{}, Rules: []config.NodeRoute{}, DefaultOutboundID: "direct"}}
+			global := config.NodeConfig{RoutingRevision: 5, Routing: config.DefaultNodeRouting("global")}
 			deps := Deps{Store: store, ReadGlobalNodeConfig: func(context.Context) (config.NodeConfig, error) { return global, nil }}
 			if scenario != "no_redis" {
 				mini := miniredis.RunT(t)
@@ -63,8 +63,8 @@ func TestOfflineDesiredRoutingDoesNotInventNodeStatus(t *testing.T) {
 					_ = deps.Redis.Close()
 				}
 				if scenario == "pending_report" || scenario == "applied_report" {
-					identity := &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 5}
-					report := &dto.ServerPushStatusRequest{RoutingVersion: 1, RoutingSequence: 1, InstanceID: "11111111-1111-4111-8111-111111111111"}
+					identity := &dto.RoutingCandidateIdentity{SnapshotID: testSnapshotID, Mode: "inherited", Source: "global", SourceRevision: 5}
+					report := &dto.ServerPushStatusRequest{RoutingVersion: 3, RoutingSequence: 1, InstanceID: "11111111-1111-4111-8111-111111111111"}
 					if scenario == "pending_report" {
 						report.RoutingPending = identity
 					} else {
@@ -91,10 +91,10 @@ func TestOfflineDesiredRoutingDoesNotInventNodeStatus(t *testing.T) {
 				if got.Override.InheritRouting == wantLocal || got.Override.RoutingRevision != revision {
 					t.Fatalf("desired override %#v", got.Override)
 				}
-				if wantLocal && (got.Effective.RoutingMode != "local-v1" || got.Effective.Routing.SourceRevision != revision) {
+				if wantLocal && (got.Effective.RoutingMode != "local" || got.Effective.Routing.SourceRevision != revision) {
 					t.Fatalf("desired local %#v", got.Effective)
 				}
-				if !wantLocal && (got.Effective.RoutingMode != "global-v1" || got.Effective.Routing.LocalTransitionRevision != revision) {
+				if !wantLocal && (got.Effective.RoutingMode != "inherited" || got.Effective.Routing.LocalTransitionRevision != revision) {
 					t.Fatalf("desired inheritance %#v", got.Effective)
 				}
 				if scenario == "pending_report" {
@@ -111,7 +111,7 @@ func TestOfflineDesiredRoutingDoesNotInventNodeStatus(t *testing.T) {
 					t.Fatalf("invented status: %#v", got.RoutingStatus)
 				}
 			}
-			policy := `{"version":1,"outbounds":[],"rules":[{"id":"rr_11111111-1111-4111-8111-111111111111","enabled":true,"kind":"domain","values":["example.com"],"outbound_id":"block"}],"default_outbound_id":"direct"}`
+			policy := `{"version":3,"outbounds":[],"rules":[{"id":"rr_11111111-1111-4111-8111-111111111111","enabled":true,"kind":"domain","values":["example.com"],"outbound_id":"block","user_ids":[]}],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`
 			if err := update(`{"server_id":1,"routing_revision":0,"routing":` + policy + `}`); err != nil {
 				t.Fatalf("offline local save: %v", err)
 			}
@@ -139,9 +139,9 @@ func TestOfflineDesiredRoutingDoesNotInventNodeStatus(t *testing.T) {
 
 func TestServerOrderedInheritanceRevisionAndRemovedLegacy(t *testing.T) {
 	store := newSerializedAdminNodeStore()
-	global := config.NodeConfig{RoutingRevision: 4, Routing: &config.NodeRouting{Version: 1, Outbounds: []config.NodeOutbound{}, Rules: []config.NodeRoute{}, DefaultOutboundID: "direct"}}
+	global := config.NodeConfig{RoutingRevision: 4, Routing: config.DefaultNodeRouting("global")}
 	deps := Deps{Store: store, ReadGlobalNodeConfig: func(context.Context) (config.NodeConfig, error) { return global, nil }}
-	policy := `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`
+	policy := `{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`
 	legacy := `["geosite:cn"]`
 	store.override = &node.ServerConfigOverride{Id: 1, ServerId: 1, Routing: &policy, RoutingRevision: 2, Block: &legacy}
 	update := func(body string) error {
@@ -151,18 +151,22 @@ func TestServerOrderedInheritanceRevisionAndRemovedLegacy(t *testing.T) {
 		}
 		return newUpdateServerNodeConfigLogic(context.Background(), deps).UpdateServerNodeConfig(&req)
 	}
-	if err := update(`{"server_id":1,"inherit_dns":false,"dns":[]}`); err != nil {
-		t.Fatal(err)
-	}
-	if store.override.Routing == nil || store.override.RoutingRevision != 2 || *store.override.Block != legacy {
-		t.Fatal("non-routing update changed routing or backup")
-	}
-	if err := update(`{"server_id":1,"block":[]}`); err == nil {
-		t.Fatal("removed legacy field accepted")
-	} else {
+	// DNS and the IP preference are part of the routing package: the former
+	// partial override fields are rejected like the other removed fields,
+	// with no change to the row.
+	for _, body := range []string{
+		`{"server_id":1,"block":[]}`,
+		`{"server_id":1,"inherit_dns":false,"dns":[]}`,
+		`{"server_id":1,"ip_strategy":"prefer_ipv4"}`,
+		`{"server_id":1,"inherit_ip_strategy":true}`,
+	} {
+		err := update(body)
 		var c *xerr.CodeError
-		if !errors.As(errors.Cause(err), &c) || c.GetErrCode() != xerr.NetworkLegacyRoutingRemoved {
-			t.Fatalf("error %v", err)
+		if err == nil || !errors.As(errors.Cause(err), &c) || c.GetErrCode() != xerr.NetworkLegacyRoutingRemoved {
+			t.Fatalf("%s: error %v, want legacy-removed", body, err)
+		}
+		if store.override.Routing == nil || store.override.RoutingRevision != 2 || *store.override.Block != legacy {
+			t.Fatalf("%s changed the row", body)
 		}
 	}
 	if err := update(`{"server_id":1,"routing":null,"routing_revision":2}`); err == nil {

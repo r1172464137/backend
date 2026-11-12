@@ -38,7 +38,7 @@ func TestNativeRedisReplayFreshness(t *testing.T) {
 	instanceB := "22222222-2222-4222-8222-222222222222"
 	send := func(instance, sequence, fingerprint string) {
 		t.Helper()
-		payload := fmt.Sprintf(`{"routing_version":1,"instance_id":%q}`, instance)
+		payload := fmt.Sprintf(`{"routing_version":3,"instance_id":%q}`, instance)
 		if err := storeScript.Run(ctx, client, []string{key}, payload, instance, ttl, maxInstances, sequence, "1", fingerprint, retention, maxRetainedInstances).Err(); err != nil {
 			t.Fatal(err)
 		}

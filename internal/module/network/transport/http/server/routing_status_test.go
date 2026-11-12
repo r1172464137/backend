@@ -13,7 +13,11 @@ import (
 
 func TestNodeDeliveryProtocolTotalContract(t *testing.T) {
 	for _, protocols := range [][]dto.Protocol{nil, {}, {{Type: "vless", Enable: true}}} {
-		response := &dto.QueryServerConfigResponse{Protocols: protocols, Total: int64(len(protocols)), Routing: routeTestPolicy()}
+		identity := testIdentity()
+		if len(protocols) > 0 {
+			identity = testIdentity("vless")
+		}
+		response := &dto.QueryServerConfigResponse{Protocols: protocols, Total: int64(len(protocols)), Routing: routeTestPolicy(), IdentitySnapshot: identity}
 		body, err := json.Marshal(response)
 		if err != nil {
 			t.Fatal(err)
@@ -47,14 +51,14 @@ func TestRoutingStatusWireContract(t *testing.T) {
 			t.Fatalf("%s tag = %v", name, f)
 		}
 	}
-	id := &serverv1.RoutingIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 4, LocalTransitionRevision: 2}
-	msg := &serverv1.PushServerStatusRequest{UpdatedAt: 123, RoutingVersion: 1, RoutingSequence: 9007199254740993, InstanceId: "11111111-1111-4111-8111-111111111111", RoutingApplied: id, RoutingPending: id, RoutingError: &serverv1.RoutingError{Identity: id, Stage: "bind", Message: "candidate failed during bind"}}
+	id := &serverv1.RoutingIdentity{Mode: "inherited", Source: "global", SourceRevision: 4, LocalTransitionRevision: 2}
+	msg := &serverv1.PushServerStatusRequest{UpdatedAt: 123, RoutingVersion: 3, RoutingSequence: 9007199254740993, InstanceId: "11111111-1111-4111-8111-111111111111", RoutingApplied: id, RoutingPending: id, RoutingError: &serverv1.RoutingError{Identity: id, Stage: "bind", Message: "candidate failed during bind"}}
 	protoCtx := newProtobufContext(t, msg)
 	var p dto.ServerPushStatusRequest
 	if err := bindServerStatusRequest(protoCtx, &p); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"updated_at":123,"routing_version":1,"routing_sequence":9007199254740993,"instance_id":"11111111-1111-4111-8111-111111111111","routing_applied":{"mode":"ordered-v1-inherited","source":"global","source_server_id":0,"source_revision":4,"local_transition_revision":2},"routing_pending":{"mode":"ordered-v1-inherited","source":"global","source_server_id":0,"source_revision":4,"local_transition_revision":2},"routing_error":{"identity":{"mode":"ordered-v1-inherited","source":"global","source_server_id":0,"source_revision":4,"local_transition_revision":2},"stage":"bind","message":"candidate failed during bind"}}`
+	body := `{"updated_at":123,"routing_version":3,"routing_sequence":9007199254740993,"instance_id":"11111111-1111-4111-8111-111111111111","routing_applied":{"mode":"inherited","source":"global","source_server_id":0,"source_revision":4,"local_transition_revision":2},"routing_pending":{"mode":"inherited","source":"global","source_server_id":0,"source_revision":4,"local_transition_revision":2},"routing_error":{"identity":{"mode":"inherited","source":"global","source_server_id":0,"source_revision":4,"local_transition_revision":2},"stage":"bind","message":"candidate failed during bind"}}`
 	jsonCtx := app.NewContext(0)
 	jsonCtx.Request.SetBodyString(body)
 	jsonCtx.Request.Header.SetContentTypeBytes([]byte("application/json"))

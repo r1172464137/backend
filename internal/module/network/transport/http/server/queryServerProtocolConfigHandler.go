@@ -22,8 +22,7 @@ import (
 // @Produce json,application/protobuf
 // @Security NodeSecret
 // @Param server_id path int true "Server ID"
-// @Param protocols query []string false "Protocols to include" collectionFormat(multi)
-// @Param X-PPanel-Routing-Version header string true "Must be 1"
+// @Param X-PPanel-Routing-Version header string true "Must be 3"
 // @Success 200 {object} httpx.ResponseSuccessBean{data=dto.QueryServerConfigResponse}
 // @Failure 426 {object} httpx.ResponseErrorBean "Node routing upgrade required"
 // @Router /v2/server/{server_id} [get]
@@ -49,9 +48,9 @@ func QueryServerProtocolConfigHandler(service network.Service, nodeSecret func()
 			return
 		}
 
-		// Ordered-v1 is the only runtime mode. Reject old nodes before any
-		// conditional-response or configuration read can return a candidate.
-		if string(ctx.GetHeader(routingVersionHeader)) != "1" {
+		// Routing format 3 is the only runtime format. Reject other nodes
+		// before any conditional-response or configuration read.
+		if string(ctx.GetHeader(routingVersionHeader)) != "3" {
 			writeRoutingUpgrade(ctx)
 			return
 		}

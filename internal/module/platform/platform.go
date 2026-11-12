@@ -132,6 +132,8 @@ type Deps struct {
 	// Tool dependencies: the logger output path and the GeoIP reader.
 	LogPath string
 	GeoIP   func() *geoip2.Reader
+	// MissingAccounts returns the given account IDs that do not exist.
+	MissingAccounts func(ctx context.Context, ids []int64) ([]int64, error)
 }
 
 // NewRepoBuilder exports the module-owned repository implementations for
@@ -160,6 +162,7 @@ func New(deps Deps) Service {
 			SubscribePath:     deps.SubscribePath,
 			ApplyVerifyConfig: deps.ApplyVerifyConfig,
 			Multiplier:        deps.Multiplier,
+			MissingAccounts:   deps.MissingAccounts,
 		}),
 		dashboard: dashboard.NewService(dashboard.Deps{
 			Orders:  deps.Orders,

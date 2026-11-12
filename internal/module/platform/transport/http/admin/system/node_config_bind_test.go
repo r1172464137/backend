@@ -35,7 +35,7 @@ func TestGlobalRoutingRejectsUnsafeSpiderBeforeService(t *testing.T) {
 			svc := &noLegacyService{}
 			ctx := app.NewContext(0)
 			ctx.Request.Header.SetContentTypeBytes([]byte("application/json"))
-			ctx.Request.SetBodyString(fmt.Sprintf(`{"routing_revision":1,"routing":{"version":1,"outbounds":[{"id":"ob_11111111-1111-4111-8111-111111111111","name":"test","protocol":"direct",%s}],"rules":[],"default_outbound_id":"direct"}}`, tc.fields))
+			ctx.Request.SetBodyString(fmt.Sprintf(`{"routing_revision":1,"routing":{"version":3,"outbounds":[{"id":"ob_11111111-1111-4111-8111-111111111111","name":"test","protocol":"direct",%s}],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`, tc.fields))
 			UpdateNodeConfigHandler(svc)(context.Background(), ctx)
 			if svc.called != tc.valid {
 				t.Fatalf("service called=%v valid=%v response=%s", svc.called, tc.valid, ctx.Response.Body())

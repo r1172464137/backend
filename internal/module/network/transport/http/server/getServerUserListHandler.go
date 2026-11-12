@@ -4,57 +4,23 @@ import (
 	"context"
 
 	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/perfect-panel/server/internal/module/network"
-	dto "github.com/perfect-panel/server/internal/module/network/contract"
-	"github.com/perfect-panel/server/internal/transport/http/validation"
-	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
-// GetServerUserListHandler documents Get user list.
+// GetServerUserListHandler rejects the removed user list endpoint. Users,
+// limits and UUIDs reach nodes only through the identity snapshot of the
+// /v2/server/{server_id} candidate, so a node can never combine a separately
+// polled user list with a different routing candidate.
 //
-// @Summary Get user list
+// @Summary Removed: users are delivered in /v2/server/{server_id}
 // @Tags node
-// @Accept json
 // @Produce json,application/protobuf
 // @Security NodeSecret
-// @Param request query dto.GetServerUserListRequest false "Request parameters"
-// @Success 200 {object} dto.GetServerUserListResponse
+// @Failure 426 {object} httpx.ResponseErrorBean "Node routing upgrade required"
 // @Router /v1/server/user [get]
-func GetServerUserListHandler(service network.Service) app.HandlerFunc {
-	return func(c context.Context, ctx *app.RequestContext) {
-		acceptsProtobuf := acceptsProtobuf(ctx)
-		commonReq, err := serverCommonRequest(ctx)
-		if err != nil {
-			writeParamError(ctx, err)
-			return
-		}
-		req := dto.GetServerUserListRequest{ServerCommon: commonReq}
-		if validateErr := validation.Validate(&req); validateErr != nil {
-			writeParamError(ctx, validateErr)
-			return
-		}
-
-		ifNoneMatch := string(ctx.GetHeader("If-None-Match"))
-		resp, respMeta, err := service.GetServerUserList(c, &req, network.RequestMeta{
-			IfNoneMatch: ifNoneMatchForRepresentation(ifNoneMatch, acceptsProtobuf),
-		})
-		writeHeaders(ctx, respMeta.Headers)
-		if err != nil {
-			if errors.Is(err, xerr.StatusNotModified) {
-				ctx.String(consts.StatusNotModified, "Not Modified")
-				return
-			}
-			writeServerText(ctx, consts.StatusNotFound, "Not Found")
-			return
-		}
-		if acceptsProtobuf {
-			if err := writeServerProtobufWithETag(ctx, serverUserListResponseToProtobuf(resp), ifNoneMatch); err != nil {
-				writeServerReportResult(ctx, err)
-			}
-			return
-		}
-		ctx.JSON(consts.StatusOK, resp)
+func GetServerUserListHandler(_ network.Service) app.HandlerFunc {
+	return func(_ context.Context, ctx *app.RequestContext) {
+		ctx.Header("Vary", "Accept, "+routingVersionHeader)
+		writeRoutingUpgrade(ctx)
 	}
 }

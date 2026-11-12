@@ -96,17 +96,15 @@ type MobileAuthenticateConfig struct {
 }
 
 type NodeConfig struct {
-	NodeSecret             string                    `json:"node_secret"`
-	NodePullInterval       int64                     `json:"node_pull_interval"`
-	NodePushInterval       int64                     `json:"node_push_interval"`
-	TrafficReportThreshold int64                     `json:"traffic_report_threshold"`
-	IPStrategy             string                    `json:"ip_strategy"`
-	DNS                    []PlatformNodeDNSSnapshot `json:"dns"`
-	Routing                *config.NodeRouting       `json:"routing"`
-	RoutingRevision        int64                     `json:"routing_revision"`
-	RoutingMode            string                    `json:"routing_mode"`
-	RoutingCapabilities    []int                     `json:"routing_capabilities"`
-	RequestFields          map[string]struct{}       `json:"-" swaggerignore:"true"`
+	NodeSecret             string              `json:"node_secret"`
+	NodePullInterval       int64               `json:"node_pull_interval"`
+	NodePushInterval       int64               `json:"node_push_interval"`
+	TrafficReportThreshold int64               `json:"traffic_report_threshold"`
+	Routing                *config.NodeRouting `json:"routing"`
+	RoutingRevision        int64               `json:"routing_revision"`
+	RoutingMode            string              `json:"routing_mode"`
+	RoutingCapabilities    []int               `json:"routing_capabilities"`
+	RequestFields          map[string]struct{} `json:"-" swaggerignore:"true"`
 }
 
 // UnmarshalJSON records field presence so an old admin client that does not
@@ -139,16 +137,6 @@ func (n *NodeConfig) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("invalid JSON field %q", field)
 		}
 		n.RequestFields[field] = struct{}{}
-	}
-	if raw, ok := fields["dns"]; ok {
-		items, err := config.ParseNodeDNSJSON(raw)
-		if err != nil {
-			return err
-		}
-		n.DNS = make([]PlatformNodeDNSSnapshot, 0, len(items))
-		for _, d := range items {
-			n.DNS = append(n.DNS, PlatformNodeDNSSnapshot{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
-		}
 	}
 	if raw, ok := fields["routing"]; ok && string(bytes.TrimSpace(raw)) != "null" {
 		policy, err := config.ParseNodeRouting(raw)

@@ -45,12 +45,6 @@ func NewService(deps Deps) *Service {
 	return &Service{deps: deps}
 }
 
-func (s *Service) GetServerUserList(ctx context.Context, req *dto.GetServerUserListRequest, meta RequestMeta) (*dto.GetServerUserListResponse, ResponseMeta, error) {
-	l := newGetServerUserListLogic(ctx, s.deps, meta)
-	resp, err := l.GetServerUserList(req)
-	return resp, l.ResponseMeta(), err
-}
-
 func (s *Service) QueryServerProtocolConfig(ctx context.Context, req *dto.QueryServerConfigRequest) (*dto.QueryServerConfigResponse, error) {
 	return newQueryServerProtocolConfigLogic(ctx, s.deps).QueryServerProtocolConfig(req)
 }
@@ -83,6 +77,7 @@ func (s *Service) ServerPushUserTraffic(ctx context.Context, req *dto.ServerPush
 type Store interface {
 	Inbox() repository.InboxRepo
 	repository.NetworkTransactor
+	InTx(ctx context.Context, fn func(store repository.Store) error) error
 	Node() repository.NodeRepo
 	Subscribe() repository.SubscribeRepo
 	User() repository.UserRepo

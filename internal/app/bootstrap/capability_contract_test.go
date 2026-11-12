@@ -63,7 +63,6 @@ func TestNodeCapabilityContractFixtures(t *testing.T) {
 		Node     bool                `json:"node"`
 		Outbound config.NodeOutbound `json:"outbound"`
 		Protocol node.Protocol       `json:"protocol"`
-		DNS      config.NodeDNS      `json:"dns"`
 	}
 	if err := json.Unmarshal(data, &cases); err != nil {
 		t.Fatal(err)
@@ -74,22 +73,15 @@ func TestNodeCapabilityContractFixtures(t *testing.T) {
 			var result nodeProofResult
 			switch tc.Kind {
 			case "outbound":
-				preview, err := config.ConvertLegacyRouting(config.LegacyRoutingInput{Outbound: []config.NodeOutbound{tc.Outbound}}, "contract")
-				if err != nil {
-					t.Fatal(err)
+				policy := config.DefaultNodeRouting("contract")
+				ob := tc.Outbound
+				if ob.ID == "" {
+					ob.ID = "ob_11111111-1111-4111-8111-111111111111"
 				}
-				backend = preview.Draft != nil
-				result = runNodeProof(t, map[string]any{"kind": "outbound", "outbound": tc.Outbound})
-				if backend {
-					converted := runNodeProof(t, map[string]any{"kind": "policy", "policy": preview.Draft})
-					if !converted.OK {
-						t.Fatalf("converted policy rejected by node: %s", converted.Error)
-					}
-				}
-			case "dns":
-				_, err := config.NormalizeNodeDNS([]config.NodeDNS{tc.DNS})
+				policy.Outbounds = []config.NodeOutbound{ob}
+				_, err := config.NormalizeNodeRouting(policy)
 				backend = err == nil
-				result = runNodeProof(t, map[string]any{"kind": "dns", "dns": tc.DNS})
+				result = runNodeProof(t, map[string]any{"kind": "outbound", "outbound": tc.Outbound})
 			case "inbound":
 				b, err := json.Marshal([]node.Protocol{tc.Protocol})
 				if err != nil {
@@ -104,7 +96,7 @@ func TestNodeCapabilityContractFixtures(t *testing.T) {
 				t.Fatalf("backend=%v node=%v (%s); want %v/%v", backend, result.OK, result.Error, tc.Backend, tc.Node)
 			}
 			if backend && !result.OK {
-				t.Fatal("converter admitted a configuration the actual node rejects")
+				t.Fatal("backend admitted a configuration the actual node rejects")
 			}
 		})
 	}

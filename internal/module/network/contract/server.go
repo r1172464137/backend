@@ -55,20 +55,15 @@ type GetServerUserListResponse struct {
 }
 
 type ServerNodeConfigValues struct {
-	IPStrategy      string             `json:"ip_strategy"`
-	DNS             []NodeDNS          `json:"dns"`
 	Routing         *NodeRoutingPolicy `json:"routing"`
 	RoutingRevision int64              `json:"routing_revision"`
 	RoutingMode     string             `json:"routing_mode"`
 }
 
+// ServerNodeConfigOverride: a server either inherits the global routing
+// package or holds a complete local one. DNS and the IP preference are part
+// of the package; there are no partial overrides.
 type ServerNodeConfigOverride struct {
-	InheritIPStrategy bool   `json:"inherit_ip_strategy"`
-	IPStrategy        string `json:"ip_strategy"`
-
-	InheritDNS bool      `json:"inherit_dns"`
-	DNS        []NodeDNS `json:"dns"`
-
 	InheritRouting  bool                `json:"inherit_routing"`
 	Routing         *config.NodeRouting `json:"routing"`
 	RoutingRevision int64               `json:"routing_revision"`
@@ -229,25 +224,50 @@ type QueryServerConfigResponse struct {
 	TrafficReportThreshold int64              `json:"traffic_report_threshold"`
 	PushInterval           int64              `json:"push_interval"`
 	PullInterval           int64              `json:"pull_interval"`
-	IPStrategy             string             `json:"ip_strategy"`
-	DNS                    []NodeDNS          `json:"dns"`
 	Protocols              []Protocol         `json:"protocols"`
 	Total                  int64              `json:"total"`
 	Routing                *NodeRoutingPolicy `json:"routing"`
+	IdentitySnapshot       *IdentitySnapshot  `json:"identity_snapshot"`
+}
+
+// IdentitySnapshot is the only source of user identities for a candidate.
+// SnapshotID covers the whole candidate (routing, protocols, identities and
+// the plan/expiry/quota projection) and is computed by the backend.
+type IdentitySnapshot struct {
+	SnapshotID string             `json:"snapshot_id"`
+	Protocols  []ProtocolIdentity `json:"protocols"`
+}
+
+type ProtocolIdentity struct {
+	Protocol string         `json:"protocol"`
+	Users    []IdentityUser `json:"users"`
+}
+
+// IdentityUser: ID is user_subscribe.id (traffic/online reports), AccountID
+// is user.id (account-scoped rules). UUID authenticates.
+type IdentityUser struct {
+	ID          int64  `json:"id"`
+	UUID        string `json:"uuid"`
+	SpeedLimit  int64  `json:"speed_limit"`
+	DeviceLimit int64  `json:"device_limit"`
+	AccountID   int64  `json:"account_id"`
 }
 
 // NodeRoutingPolicy is the node-delivery projection. The identity fields are
 // not part of the persisted routing content and identify the exact candidate.
 type NodeRoutingPolicy struct {
-	Version                 int               `json:"version" binding:"required"`
-	Outbounds               []NodeOutbound    `json:"outbounds" binding:"required"`
-	Rules                   []NodeRoutingRule `json:"rules" binding:"required"`
-	DefaultOutboundID       string            `json:"default_outbound_id" binding:"required"`
-	Mode                    string            `json:"mode" binding:"required"`
-	Source                  string            `json:"source" binding:"required"`
-	SourceServerID          int64             `json:"source_server_id" binding:"required"`
-	SourceRevision          int64             `json:"source_revision" binding:"required"`
-	LocalTransitionRevision int64             `json:"local_transition_revision" binding:"required"`
+	Version                 int                      `json:"version" binding:"required"`
+	Outbounds               []NodeOutbound           `json:"outbounds" binding:"required"`
+	Rules                   []NodeRoutingRule        `json:"rules" binding:"required"`
+	DefaultOutboundID       string                   `json:"default_outbound_id" binding:"required"`
+	UserDefaults            []config.NodeUserDefault `json:"user_defaults" binding:"required"`
+	DNS                     *config.NodeDNSPolicy    `json:"dns" binding:"required"`
+	TargetIPPreference      string                   `json:"target_ip_preference" binding:"required"`
+	Mode                    string                   `json:"mode" binding:"required"`
+	Source                  string                   `json:"source" binding:"required"`
+	SourceServerID          int64                    `json:"source_server_id" binding:"required"`
+	SourceRevision          int64                    `json:"source_revision" binding:"required"`
+	LocalTransitionRevision int64                    `json:"local_transition_revision" binding:"required"`
 }
 
 type NodeRoutingRule struct {
@@ -257,6 +277,7 @@ type NodeRoutingRule struct {
 	Kind       string   `json:"kind" binding:"required"`
 	Values     []string `json:"values" binding:"required"`
 	OutboundID string   `json:"outbound_id" binding:"required"`
+	UserIDs    []int64  `json:"user_ids" binding:"required"`
 }
 
 // A node response is always ordered-v1; missing policy fails closed.
@@ -319,16 +340,6 @@ func (r *UpdateServerNodeConfigRequest) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("invalid JSON field %q", field)
 		}
 		r.RequestFields[field] = struct{}{}
-	}
-	if raw, ok := fields["dns"]; ok {
-		items, err := config.ParseNodeDNSJSON(raw)
-		if err != nil {
-			return err
-		}
-		r.DNS = make([]NodeDNS, 0, len(items))
-		for _, d := range items {
-			r.DNS = append(r.DNS, NodeDNS{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
-		}
 	}
 	if raw, ok := fields["routing"]; ok && string(bytes.TrimSpace(raw)) != "null" {
 		policy, err := config.ParseNodeRouting(raw)
@@ -397,6 +408,7 @@ type RoutingCandidateIdentity struct {
 	SourceServerID          int64  `json:"source_server_id"`
 	SourceRevision          int64  `json:"source_revision"`
 	LocalTransitionRevision int64  `json:"local_transition_revision"`
+	SnapshotID              string `json:"snapshot_id"`
 }
 type RoutingReportError struct {
 	Identity *RoutingCandidateIdentity `json:"identity,omitempty"`
@@ -421,6 +433,11 @@ type RoutingStatusView struct {
 	Known            bool                 `json:"known"`
 	ReporterVerified bool                 `json:"reporter_verified"`
 	Report           *RoutingStatusReport `json:"report,omitempty"`
+	// DesiredSnapshotID is the snapshot the node should be running, computed
+	// read-only from the database; null when it cannot be computed.
+	DesiredSnapshotID *string `json:"desired_snapshot_id"`
+	// Synced is true only when the verified applied identity equals desired.
+	Synced bool `json:"synced"`
 }
 
 type ServerStatus struct {

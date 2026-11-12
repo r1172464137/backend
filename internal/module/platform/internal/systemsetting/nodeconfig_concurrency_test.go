@@ -65,17 +65,19 @@ func testPlatformStore() *serializedPlatformConfigStore {
 	return &serializedPlatformConfigStore{systems: map[string]*system.System{
 		"NodeSecret":      {Category: "server", Key: "NodeSecret", Value: "secret", Type: "string"},
 		"Block":           {Category: "server", Key: "Block", Value: `["geosite:cn"]`, Type: "string"},
-		"Routing":         {Category: "server", Key: "Routing", Value: `{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct"}`, Type: "string"},
+		"Routing":         {Category: "server", Key: "Routing", Value: `{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`, Type: "string"},
 		"RoutingRevision": {Category: "server", Key: "RoutingRevision", Value: "2", Type: "int64"},
-		"RoutingCutover":  {Category: "server", Key: "RoutingCutover", Value: "complete", Type: "string"},
+		"RoutingCutover":  {Category: "server", Key: "RoutingCutover", Value: "complete-v3", Type: "string"},
 	}}
 }
 func TestConcurrentGlobalOrderedRevision(t *testing.T) {
 	store := testPlatformStore()
 	deps := Deps{Store: store}
-	bind := func(def string) *dto.NodeConfig {
+	// Both requests change the content (an identical save is a no-op and
+	// would not compete for the revision).
+	bind := func(def, preference string) *dto.NodeConfig {
 		var req dto.NodeConfig
-		body := `{"routing_revision":2,"routing":{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"` + def + `"}}`
+		body := `{"routing_revision":2,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"` + def + `","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"` + preference + `"}}`
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			t.Fatal(err)
 		}
@@ -84,7 +86,7 @@ func TestConcurrentGlobalOrderedRevision(t *testing.T) {
 	start := make(chan struct{})
 	errs := make(chan error, 2)
 	var wg sync.WaitGroup
-	for _, req := range []*dto.NodeConfig{bind("direct"), bind("block")} {
+	for _, req := range []*dto.NodeConfig{bind("direct", "prefer_ipv4"), bind("block", "none")} {
 		wg.Add(1)
 		go func(req *dto.NodeConfig) {
 			defer wg.Done()

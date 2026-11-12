@@ -43,13 +43,13 @@ func TestNodeFailureStagesJSONAndProtobuf(t *testing.T) {
 				engine := hertzserver.Default(hertzserver.WithDisablePrintRoute(true))
 				engine.Use(ServerMiddleware(func() string { return "test-secret" }))
 				engine.POST("/v1/server/status", ServerPushStatusHandler(svc))
-				msg := &serverv1.PushServerStatusRequest{RoutingVersion: 1, RoutingSequence: 1, InstanceId: "11111111-1111-4111-8111-111111111111", RoutingError: &serverv1.RoutingError{Stage: stage, Message: "password=do-not-store"}}
+				msg := &serverv1.PushServerStatusRequest{RoutingVersion: 3, RoutingSequence: 1, InstanceId: "11111111-1111-4111-8111-111111111111", RoutingError: &serverv1.RoutingError{Stage: stage, Message: "password=do-not-store"}}
 				var body []byte
 				var err error
 				if wire == "protobuf" {
 					body, err = proto.Marshal(msg)
 				} else {
-					body, err = json.Marshal(map[string]any{"routing_version": 1, "routing_sequence": 1, "instance_id": msg.InstanceId, "routing_error": map[string]any{"stage": stage, "message": "password=do-not-store"}})
+					body, err = json.Marshal(map[string]any{"routing_version": 3, "routing_sequence": 1, "instance_id": msg.InstanceId, "routing_error": map[string]any{"stage": stage, "message": "password=do-not-store"}})
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -71,7 +71,7 @@ func TestNodeFailureStagesJSONAndProtobuf(t *testing.T) {
 				if wire == "protobuf" {
 					var result serverv1.Result
 					if err := proto.Unmarshal(request.Response.Body(), &result); err != nil || result.Code != 200 {
-						t.Fatalf("protobuf result: %v %#v", err, result)
+						t.Fatalf("protobuf result: %v %v", err, &result)
 					}
 				} else {
 					var result struct {
@@ -91,7 +91,7 @@ func TestNodeFailureStagesJSONAndProtobuf(t *testing.T) {
 				if wire == "protobuf" {
 					body, err = proto.Marshal(msg)
 				} else {
-					body, err = json.Marshal(map[string]any{"routing_version": 1, "routing_sequence": 2, "instance_id": msg.InstanceId, "routing_error": map[string]any{"stage": "untrusted-stage", "message": "password=do-not-store"}})
+					body, err = json.Marshal(map[string]any{"routing_version": 3, "routing_sequence": 2, "instance_id": msg.InstanceId, "routing_error": map[string]any{"stage": "untrusted-stage", "message": "password=do-not-store"}})
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -146,7 +146,7 @@ func TestMalformedStatusInvalidatesAuthenticatedServerState(t *testing.T) {
 				ctx.Request.SetBody(body)
 				return ctx
 			}
-			good := makeCtx("application/json", []byte(`{"cpu":0.1,"updated_at":1,"routing_version":1,"routing_sequence":1,"instance_id":"11111111-1111-4111-8111-111111111111","routing_applied":{"mode":"ordered-v1-inherited","source":"global","source_server_id":0,"source_revision":2,"local_transition_revision":0}}`), "test-secret")
+			good := makeCtx("application/json", []byte(`{"cpu":0.1,"updated_at":1,"routing_version":3,"routing_sequence":1,"instance_id":"11111111-1111-4111-8111-111111111111","routing_applied":{"mode":"inherited","source":"global","source_server_id":0,"source_revision":2,"local_transition_revision":0,"snapshot_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`), "test-secret")
 			engine.ServeHTTP(context.Background(), good)
 			state, err := routingstatus.Read(context.Background(), client, 7)
 			if err != nil || !state.Known {

@@ -22,6 +22,9 @@ func (r *mutableProtocolRepo) FindOneServer(context.Context, int64) (*node.Serve
 func (*mutableProtocolRepo) FindServerRoutingOverride(context.Context, int64) (*node.ServerConfigOverride, error) {
 	return nil, nil
 }
+func (*mutableProtocolRepo) ListNodes(context.Context, *node.FilterNodeParams) ([]*node.Node, error) {
+	return nil, nil
+}
 
 func TestQueryFailsClosedForEnabledInvalidProtocols(t *testing.T) {
 	for _, raw := range []string{
@@ -32,7 +35,7 @@ func TestQueryFailsClosedForEnabledInvalidProtocols(t *testing.T) {
 	} {
 		repo := &mutableProtocolRepo{protocols: raw}
 		deps := Deps{Store: snapshotStore{node: repo}, ReadGlobalNodeConfig: func(context.Context) (config.NodeConfig, error) {
-			return config.NodeConfig{RoutingRevision: 1, Routing: &config.NodeRouting{Version: 1, Outbounds: []config.NodeOutbound{}, Rules: []config.NodeRoute{}, DefaultOutboundID: "direct"}}, nil
+			return config.NodeConfig{RoutingRevision: 1, Routing: config.DefaultNodeRouting("global")}, nil
 		}}
 		if got, err := newQueryServerProtocolConfigLogic(context.Background(), deps).QueryServerProtocolConfig(&dto.QueryServerConfigRequest{ServerID: 1}); err == nil {
 			t.Fatalf("enabled invalid sanitized: %#v", got)
@@ -43,7 +46,7 @@ func TestQueryFailsClosedForEnabledInvalidProtocols(t *testing.T) {
 func TestQueryOneListenerToZeroEmitsArray(t *testing.T) {
 	repo := &mutableProtocolRepo{protocols: `[{"type":"vless","port":443,"enable":true,"transport":"tcp"}]`}
 	deps := Deps{Store: snapshotStore{node: repo}, ReadGlobalNodeConfig: func(context.Context) (config.NodeConfig, error) {
-		return config.NodeConfig{RoutingRevision: 1, Routing: &config.NodeRouting{Version: 1, Outbounds: []config.NodeOutbound{}, Rules: []config.NodeRoute{}, DefaultOutboundID: "direct"}}, nil
+		return config.NodeConfig{RoutingRevision: 1, Routing: config.DefaultNodeRouting("global")}, nil
 	}}
 	query := func() map[string]json.RawMessage {
 		t.Helper()

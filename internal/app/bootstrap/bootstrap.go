@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	tgbot "github.com/go-telegram/bot"
@@ -101,33 +102,21 @@ func Migrate(ctx *Dependencies) {
 	if err != nil {
 		panic(err)
 	}
-	if exists && (version < orderedMigrationVersion-1 || version > orderedMigrationVersion) {
-		panic("ordered routing cutover requires schema 02179; restore backup or upgrade to 02179 first")
+	if exists && version != routingSchemaVersion {
+		panic(fmt.Sprintf("this build runs on schema %d but the database is at %d; restore the matching backup", routingSchemaVersion, version))
 	}
-	var plan *orderedCutoverPlan
-	if !exists || version == orderedMigrationVersion-1 {
-		plan, err = preflightOrderedCutover(context.Background(), ctx.Store, !exists)
-	} else {
+	marker := ""
+	if exists {
 		entries, readErr := ctx.Store.System().GetNodeConfigUncached(context.Background())
 		if readErr != nil {
 			panic(readErr)
 		}
-		marker := ""
-		for _, entry := range entries {
-			if entry.Key == "RoutingCutover" {
-				marker = entry.Value
-			}
-		}
+		marker = systemValues(entries)["RoutingCutover"]
 		switch marker {
-		case "pending":
-			plan, err = preflightOrderedCutover(context.Background(), ctx.Store, false)
-		case "complete":
+		case cutoverV3Complete, cutoverV3Migrating, cutoverV1Complete, cutoverLegacyPending:
 		default:
-			panic("missing or invalid ordered routing cutover marker; restore backup")
+			panic(fmt.Sprintf("unknown routing cutover marker %q; restore the matching backup", marker))
 		}
-	}
-	if err != nil {
-		panic(err)
 	}
 	// golang-migrate may have recorded a dirty first version before issuing
 	// its first DDL. Only the strictly empty case above can reset that marker.
@@ -145,9 +134,17 @@ func Migrate(ctx *Dependencies) {
 		logger.Errorf("[Migrate] Up error: %v", migrationErr.Error())
 		panic(migrationErr)
 	}
-	if plan != nil {
-		if err := applyOrderedCutover(context.Background(), ctx.Store, plan); err != nil {
+	switch {
+	case !exists || marker == cutoverLegacyPending:
+		// Fresh installation (or one interrupted before its first routing
+		// write): start directly in routing format 3.
+		if err := bootstrapFreshRoutingV3(context.Background(), ctx.Store); err != nil {
 			panic(err)
+		}
+	case marker == cutoverV1Complete || marker == cutoverV3Migrating:
+		logger.Info("[Migrate] migrating routing to format 3")
+		if err := migrateRoutingV3(context.Background(), ctx.Store, marker); err != nil {
+			panic(fmt.Errorf("routing format 3 migration stopped: %w", err))
 		}
 	}
 	if errors.Is(migrationErr, schema.NoChange) {

@@ -16,7 +16,6 @@ import (
 // Limits for an ordered-v1 policy are independent of the legacy TEXT-field
 // limits. Both the submitted and canonical forms are bounded before use.
 const (
-	RoutingVersion1         = 1
 	MaxRoutingOutbounds     = 128
 	MaxRoutingRules         = 512
 	MaxRoutingValuesPerRule = 1024
@@ -36,10 +35,13 @@ var routingUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89a
 // Limits: 128 outbounds, 512 rules, 1024 values per rule, 8192 aggregate
 // values, 256 KiB canonical match text and 1 MiB final JSON.
 type NodeRouting struct {
-	Version           int            `json:"version" binding:"required"`
-	Outbounds         []NodeOutbound `json:"outbounds" binding:"required"`
-	Rules             []NodeRoute    `json:"rules" binding:"required"`
-	DefaultOutboundID string         `json:"default_outbound_id" binding:"required"`
+	Version            int               `json:"version" binding:"required"`
+	Outbounds          []NodeOutbound    `json:"outbounds" binding:"required"`
+	Rules              []NodeRoute       `json:"rules" binding:"required"`
+	DefaultOutboundID  string            `json:"default_outbound_id" binding:"required"`
+	UserDefaults       []NodeUserDefault `json:"user_defaults" binding:"required"`
+	DNS                *NodeDNSPolicy    `json:"dns" binding:"required"`
+	TargetIPPreference string            `json:"target_ip_preference" binding:"required"`
 }
 
 type NodeRoute struct {
@@ -49,6 +51,8 @@ type NodeRoute struct {
 	Kind       string   `json:"kind" binding:"required"`
 	Values     []string `json:"values" binding:"required"`
 	OutboundID string   `json:"outbound_id" binding:"required"`
+	// UserIDs limits the rule to these accounts (user.id); empty means all.
+	UserIDs []int64 `json:"user_ids" binding:"required"`
 }
 
 // ParseNodeRouting rejects unknown fields and trailing data, including an
@@ -83,7 +87,7 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 	if input == nil {
 		return nil, errorsWithField("routing", "policy must not be null")
 	}
-	if input.Version != RoutingVersion1 {
+	if input.Version != RoutingVersion {
 		return nil, errorsWithField("routing.version", "unsupported routing version")
 	}
 	if input.Outbounds == nil || input.Rules == nil {
@@ -124,8 +128,12 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		return nil, errorsWithField("routing", err.Error())
 	}
 
+	if !validTargetIPPreference(input.TargetIPPreference) {
+		return nil, errorsWithField("routing.target_ip_preference", "must be none, prefer_ipv4 or prefer_ipv6")
+	}
 	result := &NodeRouting{Version: input.Version, DefaultOutboundID: input.DefaultOutboundID,
-		Outbounds: make([]NodeOutbound, len(input.Outbounds)), Rules: make([]NodeRoute, len(input.Rules))}
+		Outbounds: make([]NodeOutbound, len(input.Outbounds)), Rules: make([]NodeRoute, len(input.Rules)),
+		TargetIPPreference: input.TargetIPPreference}
 	ids := map[string]struct{}{RoutingDirect: {}, RoutingBlock: {}}
 	names := make(map[string]struct{}, len(input.Outbounds))
 	for i, source := range input.Outbounds {
@@ -170,6 +178,9 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		if len(source.Rules) != 0 || len(source.IPRules) != 0 || len(source.ProtocolRules) != 0 {
 			return nil, errorsWithField(field, "ordered outbound must not contain legacy matching rules")
 		}
+		if err := validateOutboundCapability(field, source); err != nil {
+			return nil, err
+		}
 		if err := ValidatePluginOptionsWire(source.PluginOptions); err != nil {
 			return nil, errorsWithField(field+".plugin_opts", err.Error())
 		}
@@ -204,6 +215,7 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		}
 		result.Outbounds[i].Name = name
 		result.Outbounds[i].Protocol = strings.TrimSpace(source.Protocol)
+		result.Outbounds[i].ViaOutboundID = strings.TrimSpace(source.ViaOutboundID)
 		result.Outbounds[i].Rules = []string{}
 		result.Outbounds[i].IPRules = []string{}
 		result.Outbounds[i].ProtocolRules = []string{}
@@ -215,8 +227,15 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 	if _, ok := ids[input.DefaultOutboundID]; !ok {
 		missing[input.DefaultOutboundID] = append(missing[input.DefaultOutboundID], "default")
 	}
+	if err := validateOutboundChains(result.Outbounds); err != nil {
+		return nil, err
+	}
+	customOutbounds := make(map[string]struct{}, len(result.Outbounds))
+	for _, o := range result.Outbounds {
+		customOutbounds[o.ID] = struct{}{}
+	}
 	ruleIDs := make(map[string]struct{}, len(input.Rules))
-	var matchValues, matchBytes int
+	var matchValues, matchBytes, userIDCount int
 	for i, source := range input.Rules {
 		field := fmt.Sprintf("routing.rules[%d]", i+1)
 		if !validRoutingID(source.ID, "rr_") {
@@ -262,9 +281,17 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		if matchValues > MaxRoutingValues || matchBytes > MaxRoutingMatchBytes {
 			return nil, errorsWithField("routing.rules", "aggregate match budget exceeded")
 		}
+		userIDs, err := normalizeUserIDs(field+".user_ids", source.UserIDs)
+		if err != nil {
+			return nil, err
+		}
+		userIDCount += len(userIDs)
+		if userIDCount > MaxRoutingUserIDs {
+			return nil, errorsWithField("routing.rules", "too many account references")
+		}
 		enabled := *source.Enabled
 		result.Rules[i] = NodeRoute{ID: source.ID, Enabled: &enabled, Remark: source.Remark,
-			Kind: source.Kind, Values: values, OutboundID: source.OutboundID}
+			Kind: source.Kind, Values: values, OutboundID: source.OutboundID, UserIDs: userIDs}
 	}
 	if len(missing) > 0 {
 		refs := make([]string, 0, len(missing))
@@ -273,6 +300,17 @@ func NormalizeNodeRouting(input *NodeRouting) (*NodeRouting, error) {
 		}
 		sort.Strings(refs)
 		return nil, errorsWithField("routing", "unknown outbound references: "+strings.Join(refs, "; "))
+	}
+	result.UserDefaults, err = normalizeUserDefaults(input.UserDefaults, ids)
+	if err != nil {
+		return nil, err
+	}
+	result.DNS, err = normalizeDNSPolicy(input.DNS, customOutbounds, &matchValues, &matchBytes)
+	if err != nil {
+		return nil, err
+	}
+	if matchValues > MaxRoutingValues || matchBytes > MaxRoutingMatchBytes {
+		return nil, errorsWithField("routing", "aggregate match budget exceeded (rules and DNS domains)")
 	}
 	canonical, err := json.Marshal(result)
 	if err != nil {

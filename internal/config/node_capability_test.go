@@ -17,7 +17,7 @@ func TestNodeSpiderURIAndNumericBounds(t *testing.T) {
 		}
 	}
 }
-func TestSpiderBoundsApplyToConversionAndManagementPolicies(t *testing.T) {
+func TestSpiderBoundsApplyToManagementPolicies(t *testing.T) {
 	cases := []struct {
 		value string
 		valid bool
@@ -29,13 +29,10 @@ func TestSpiderBoundsApplyToConversionAndManagementPolicies(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.value, func(t *testing.T) {
 			outbound := NodeOutbound{Name: "direct-custom", Protocol: "direct", SpiderX: tc.value}
-			preview, err := ConvertLegacyRouting(LegacyRoutingInput{Outbound: []NodeOutbound{outbound}}, "global")
-			if err != nil || (preview.Draft != nil) != tc.valid {
-				t.Fatalf("conversion valid=%v: %#v %v", tc.valid, preview, err)
-			}
 			outbound.ID = routingID("ob_", 1)
-			policy := &NodeRouting{Version: 1, Outbounds: []NodeOutbound{outbound}, Rules: []NodeRoute{}, DefaultOutboundID: "direct"}
-			_, err = NormalizeNodeRouting(policy)
+			policy := DefaultNodeRouting("test")
+			policy.Outbounds = []NodeOutbound{outbound}
+			_, err := NormalizeNodeRouting(policy)
 			if (err == nil) != tc.valid {
 				t.Fatalf("management valid=%v: %v", tc.valid, err)
 			}
@@ -74,26 +71,8 @@ func TestNestedRealitySpiderBoundsCannotBypassManagementValidation(t *testing.T)
 	}
 }
 
-func TestCutoverBlocksNodeUnsupportedOutboundCapabilities(t *testing.T) {
-	for _, ob := range []NodeOutbound{
-		{Name: "tuic", Protocol: "tuic", Address: "127.0.0.1", Port: 443, UUID: "00000000-0000-0000-0000-000000000001", Password: "secret"},
-		{Name: "tuic-transport", Protocol: "direct", Transport: "tuic"},
-		{Name: "plugin-opts", Protocol: "direct", PluginOptions: map[string]any{"mode": "ws"}},
-		{Name: "spider", Protocol: "direct", SpiderX: "/%"},
-		{Name: "hysteria-stream", Protocol: "hysteria2", Address: "127.0.0.1", Port: 443, Transport: "tcp"},
-		{Name: "bad-path", Protocol: "direct", Path: "/%"},
-	} {
-		p, err := ConvertLegacyRouting(LegacyRoutingInput{Outbound: []NodeOutbound{ob}}, "global")
-		if err != nil || p.Draft != nil || len(p.Blockers) == 0 {
-			t.Fatalf("unsupported %s accepted: %#v %v", ob.Name, p, err)
-		}
-	}
-	// The normal direct/SOCKS configuration used by migration remains valid.
-	p, err := ConvertLegacyRouting(LegacyRoutingInput{Outbound: []NodeOutbound{{Name: "proxy", Protocol: "socks", Address: "127.0.0.1", Port: 1080, Rules: []string{"example.com"}}}}, "global")
-	if err != nil || p.Draft == nil {
-		t.Fatalf("valid SOCKS rejected: %v %#v", err, p.Blockers)
-	}
-	if _, err := ParseNodeRouting([]byte(`{"version":1,"outbounds":[],"rules":[],"default_outbound_id":"direct","default_outbound_id":"block"}`)); err == nil || !strings.Contains(err.Error(), "duplicate") {
+func TestDuplicateJSONKeysAreRejected(t *testing.T) {
+	if _, err := ParseNodeRouting([]byte(`{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"direct","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none","default_outbound_id":"block","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}`)); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("ambiguous JSON error %v", err)
 	}
 }

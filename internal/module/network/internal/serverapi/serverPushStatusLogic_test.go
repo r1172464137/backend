@@ -61,7 +61,7 @@ func TestServerRoutingReportsShareStateAcrossProtocolsAndZeroProtocols(t *testin
 	nodes := &statusNodeRepo{server: &node.Server{Id: 7, Protocols: `[]`}}
 	logic := newServerPushStatusLogic(context.Background(), Deps{Store: &statusStore{nodes: nodes}, Redis: client})
 	id := "11111111-1111-4111-8111-111111111111"
-	first := &dto.ServerPushStatusRequest{ServerCommon: dto.ServerCommon{ServerId: 7}, UpdatedAt: 10, RoutingVersion: 1, RoutingSequence: 2, InstanceID: id, RoutingApplied: &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 2}}
+	first := &dto.ServerPushStatusRequest{ServerCommon: dto.ServerCommon{ServerId: 7}, UpdatedAt: 10, RoutingVersion: 3, RoutingSequence: 2, InstanceID: id, RoutingApplied: &dto.RoutingCandidateIdentity{SnapshotID: testSnapshotID, Mode: "inherited", Source: "global", SourceRevision: 2}}
 	if err := logic.ServerPushStatus(first); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestServerRoutingReportsShareStateAcrossProtocolsAndZeroProtocols(t *testin
 	older.Protocol = "vless"
 	older.UpdatedAt = 9
 	older.RoutingSequence = 1
-	older.RoutingApplied = &dto.RoutingCandidateIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 1}
+	older.RoutingApplied = &dto.RoutingCandidateIdentity{SnapshotID: testSnapshotID, Mode: "inherited", Source: "global", SourceRevision: 1}
 	if err := logic.ServerPushStatus(&older); err != nil {
 		t.Fatal(err)
 	}

@@ -31,7 +31,9 @@ func (l *UpdateNodeConfigLogic) UpdateNodeConfig(req *dto.NodeConfig) error {
 	if req == nil {
 		return xerr.NewErrCodeMsg(xerr.InvalidParams, "nil request")
 	}
-	for _, field := range []string{"block", "block_ips", "block_protocols", "outbound", "routing_action"} {
+	// DNS and the IP preference live inside routing format 3; the separate
+	// legacy fields are rejected, never read, cleared or converted.
+	for _, field := range []string{"dns", "ip_strategy", "block", "block_ips", "block_protocols", "outbound", "routing_action"} {
 		if _, ok := req.RequestFields[field]; ok {
 			return xerr.NewErrCode(xerr.PlatformLegacyRoutingRemoved)
 		}
@@ -50,7 +52,7 @@ func (l *UpdateNodeConfigLogic) UpdateNodeConfig(req *dto.NodeConfig) error {
 			return err
 		}
 		if current.Routing == nil || !cutoverComplete(entries) {
-			readErr = fmt.Errorf("ordered routing cutover is incomplete")
+			readErr = fmt.Errorf("routing format 3 migration is incomplete")
 			return readErr
 		}
 		hasRouting := req.Routing != nil
@@ -77,6 +79,21 @@ func (l *UpdateNodeConfigLogic) UpdateNodeConfig(req *dto.NodeConfig) error {
 				validationErr = err
 				return err
 			}
+			if added := appconfig.NewAccountIDs(policy, current.Routing); len(added) > 0 {
+				if l.deps.MissingAccounts == nil {
+					readErr = fmt.Errorf("account lookup unavailable")
+					return readErr
+				}
+				missing, err := l.deps.MissingAccounts(l.ctx, added)
+				if err != nil {
+					readErr = err
+					return err
+				}
+				if len(missing) > 0 {
+					validationErr = fmt.Errorf("unknown accounts referenced: %v", missing)
+					return validationErr
+				}
+			}
 			if current.RoutingRevision == math.MaxInt64 {
 				validationErr = fmt.Errorf("routing revision overflow")
 				return validationErr
@@ -85,11 +102,19 @@ func (l *UpdateNodeConfigLogic) UpdateNodeConfig(req *dto.NodeConfig) error {
 			if err != nil {
 				return err
 			}
-			if err := systems.UpdateValueByCategoryKey(l.ctx, "server", "Routing", string(body), "string"); err != nil {
+			currentBody, err := json.Marshal(current.Routing)
+			if err != nil {
 				return err
 			}
-			if err := systems.UpdateValueByCategoryKey(l.ctx, "server", "RoutingRevision", strconv.FormatInt(current.RoutingRevision+1, 10), "int64"); err != nil {
-				return err
+			// Saving identical canonical content is a successful no-op: the
+			// revision (and so every node's candidate) stays unchanged.
+			if string(body) != string(currentBody) {
+				if err := systems.UpdateValueByCategoryKey(l.ctx, "server", "Routing", string(body), "string"); err != nil {
+					return err
+				}
+				if err := systems.UpdateValueByCategoryKey(l.ctx, "server", "RoutingRevision", strconv.FormatInt(current.RoutingRevision+1, 10), "int64"); err != nil {
+					return err
+				}
 			}
 		}
 		fields, err := activeNodeConfigFields(req)
@@ -115,20 +140,6 @@ func (l *UpdateNodeConfigLogic) UpdateNodeConfig(req *dto.NodeConfig) error {
 	return nil
 }
 func activeNodeConfigFields(req *dto.NodeConfig) ([]configFieldValue, error) {
-	if req.RequestFields == nil || func() bool { _, ok := req.RequestFields["dns"]; return ok }() {
-		values := make([]appconfig.NodeDNS, 0, len(req.DNS))
-		for _, d := range req.DNS {
-			values = append(values, appconfig.NodeDNS{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
-		}
-		normal, err := appconfig.NormalizeNodeDNS(values)
-		if err != nil {
-			return nil, err
-		}
-		req.DNS = make([]dto.PlatformNodeDNSSnapshot, 0, len(normal))
-		for _, d := range normal {
-			req.DNS = append(req.DNS, dto.PlatformNodeDNSSnapshot{Proto: d.Proto, Address: d.Address, ServerName: d.ServerName, Domains: d.Domains})
-		}
-	}
 	for _, field := range []struct {
 		name  string
 		value int64
@@ -144,7 +155,7 @@ func activeNodeConfigFields(req *dto.NodeConfig) ([]configFieldValue, error) {
 	}
 	all := convertedConfigFields(*req)
 	fields := make([]configFieldValue, 0, len(all))
-	names := map[string]string{"NodeSecret": "node_secret", "NodePullInterval": "node_pull_interval", "NodePushInterval": "node_push_interval", "TrafficReportThreshold": "traffic_report_threshold", "IPStrategy": "ip_strategy", "DNS": "dns"}
+	names := map[string]string{"NodeSecret": "node_secret", "NodePullInterval": "node_pull_interval", "NodePushInterval": "node_push_interval", "TrafficReportThreshold": "traffic_report_threshold"}
 	for _, field := range all {
 		jsonName, ok := names[field.key]
 		if !ok {
@@ -154,12 +165,6 @@ func activeNodeConfigFields(req *dto.NodeConfig) ([]configFieldValue, error) {
 			if _, provided := req.RequestFields[jsonName]; !provided {
 				continue
 			}
-		}
-		if field.key == "DNS" {
-			if err := appconfig.ValidatePersistedJSON("dns", req.DNS); err != nil {
-				return nil, err
-			}
-			field.valueType = "string"
 		}
 		fields = append(fields, field)
 	}

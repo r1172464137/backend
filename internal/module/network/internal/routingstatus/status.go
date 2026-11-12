@@ -26,6 +26,7 @@ const watermarkRetention = 24 * time.Hour
 const maxInstances = 128
 const maxRetainedInstances = 4096
 
+var snapshotPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var instancePattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // Keep in sync with the same-batch node's candidate failure stages.
@@ -113,7 +114,11 @@ if count ~= 1 then return nil end
 return result
 `)
 
-func key(id int64) string { return fmt.Sprintf("server:routing-report:v1:%d", id) }
+// RoutingVersion is the only accepted report format.
+const RoutingVersion = 3
+
+// Reports use a new key; earlier-format reports are never read.
+func key(id int64) string { return fmt.Sprintf("server:routing-report:v3:%d", id) }
 
 func Record(ctx context.Context, client *redis.Client, id int64, request *dto.ServerPushStatusRequest) error {
 	if client == nil {
@@ -123,7 +128,7 @@ func Record(ctx context.Context, client *redis.Client, id int64, request *dto.Se
 		return fmt.Errorf("invalid server report")
 	}
 	field := request.InstanceID
-	verified := request.RoutingVersion == 1 && instancePattern.MatchString(field)
+	verified := request.RoutingVersion == RoutingVersion && instancePattern.MatchString(field)
 	if !verified {
 		return storeUnknown(ctx, client, id)
 	}
@@ -208,7 +213,7 @@ func Read(ctx context.Context, client *redis.Client, id int64) (dto.RoutingStatu
 		return dto.RoutingStatusView{Known: false}, nil
 	}
 	sequence, err := strconv.ParseUint(stored.Sequence, 10, 64)
-	if err != nil || sequence == 0 || report.Version != 1 || !instancePattern.MatchString(report.InstanceID) || stored.ReceivedAt <= 0 || stored.ContentReceivedAt <= 0 {
+	if err != nil || sequence == 0 || report.Version != RoutingVersion || !instancePattern.MatchString(report.InstanceID) || stored.ReceivedAt <= 0 || stored.ContentReceivedAt <= 0 {
 		return dto.RoutingStatusView{Known: false}, nil
 	}
 	// received_at is the last accepted content, not an old packet heartbeat.
@@ -219,13 +224,13 @@ func Read(ctx context.Context, client *redis.Client, id int64) (dto.RoutingStatu
 }
 
 func validCandidate(c *dto.RoutingCandidateIdentity, id int64) bool {
-	if c.SourceRevision < 0 || c.LocalTransitionRevision < 0 {
+	if c.SourceRevision < 0 || c.LocalTransitionRevision < 0 || !snapshotPattern.MatchString(c.SnapshotID) {
 		return false
 	}
 	switch c.Mode {
-	case "ordered-v1-local":
+	case "local":
 		return c.Source == "server" && c.SourceServerID == id && c.SourceRevision > 0 && c.SourceRevision == c.LocalTransitionRevision
-	case "ordered-v1-inherited":
+	case "inherited":
 		return c.Source == "global" && c.SourceServerID == 0 && c.SourceRevision > 0
 	default:
 		return false

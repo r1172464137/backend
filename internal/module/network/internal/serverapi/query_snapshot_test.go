@@ -18,13 +18,28 @@ func (snapshotNodeRepo) FindOneServer(context.Context, int64) (*node.Server, err
 func (snapshotNodeRepo) FindServerRoutingOverride(context.Context, int64) (*node.ServerConfigOverride, error) {
 	return nil, nil
 }
+func (snapshotNodeRepo) ListNodes(context.Context, *node.FilterNodeParams) ([]*node.Node, error) {
+	return nil, nil
+}
 
 type snapshotStore struct {
 	repository.NetworkTransactor
 	node repository.NodeRepo
 }
 
-func (s snapshotStore) Node() repository.NodeRepo                       { return s.node }
+func (s snapshotStore) Node() repository.NodeRepo { return s.node }
+
+// snapshotTx exposes the stub repositories through the repository.Store
+// interface used inside a transaction; unused repositories are nil.
+type snapshotTx struct {
+	repository.Store
+	node repository.NodeRepo
+}
+
+func (s snapshotTx) Node() repository.NodeRepo { return s.node }
+func (s snapshotStore) InTx(ctx context.Context, fn func(repository.Store) error) error {
+	return fn(snapshotTx{node: s.node})
+}
 func (snapshotStore) Inbox() repository.InboxRepo                       { return nil }
 func (snapshotStore) Subscribe() repository.SubscribeRepo               { return nil }
 func (snapshotStore) User() repository.UserRepo                         { return nil }
@@ -36,7 +51,7 @@ func TestQueryServerProtocolConfigUsesAuthoritativeDoubleRead(t *testing.T) {
 		Store: snapshotStore{node: snapshotNodeRepo{}},
 		ReadGlobalNodeConfig: func(context.Context) (config.NodeConfig, error) {
 			calls++
-			return config.NodeConfig{TrafficReportThreshold: 1, NodePushInterval: 1, NodePullInterval: 1, RoutingRevision: 1, Routing: &config.NodeRouting{Version: 1, Outbounds: []config.NodeOutbound{}, Rules: []config.NodeRoute{}, DefaultOutboundID: "direct"}}, nil
+			return config.NodeConfig{TrafficReportThreshold: 1, NodePushInterval: 1, NodePullInterval: 1, RoutingRevision: 1, Routing: config.DefaultNodeRouting("global")}, nil
 		},
 		Config: func() Snapshot { panic("routing must not use runtime config") },
 	}

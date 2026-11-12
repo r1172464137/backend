@@ -40,7 +40,6 @@ type Service interface {
 
 	// The node-facing server API. The ETag negotiation flows through
 	// RequestMeta/ResponseMeta; node authentication stays in the handlers.
-	GetServerUserList(ctx context.Context, req *dto.GetServerUserListRequest, meta RequestMeta) (*dto.GetServerUserListResponse, ResponseMeta, error)
 	QueryServerProtocolConfig(ctx context.Context, req *dto.QueryServerConfigRequest) (*dto.QueryServerConfigResponse, error)
 	PushOnlineUsers(ctx context.Context, req *dto.OnlineUsersRequest) error
 	ServerPushStatus(ctx context.Context, req *dto.ServerPushStatusRequest) error
@@ -198,10 +197,6 @@ func (s *service) ResetSortWithNode(ctx context.Context, req *dto.ResetSortReque
 
 func (s *service) QueryNodeTag(ctx context.Context) (*dto.QueryNodeTagResponse, error) {
 	return s.admin.QueryNodeTag(ctx)
-}
-
-func (s *service) GetServerUserList(ctx context.Context, req *dto.GetServerUserListRequest, meta RequestMeta) (*dto.GetServerUserListResponse, ResponseMeta, error) {
-	return s.api.GetServerUserList(ctx, req, meta)
 }
 
 func (s *service) QueryServerProtocolConfig(ctx context.Context, req *dto.QueryServerConfigRequest) (*dto.QueryServerConfigResponse, error) {
