@@ -52,14 +52,22 @@ var startCmd = &cobra.Command{
 }
 
 func run() {
-	services := getServers()
+	// Listen for stop signals before connecting dependencies, so SIGTERM while
+	// waiting for MySQL/Redis ends startup instead of being ignored.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer stop()
+	services, err := getServers(ctx)
+	if err != nil {
+		logger.Errorf("[startup] %v", err)
+		fmt.Fprintf(os.Stderr, "PPanel startup failed: %v\n", err)
+		stop()
+		os.Exit(1)
+	}
 	defer services.Stop()
 	go services.Start()
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	<-quit
+	<-ctx.Done()
 }
-func getServers() *lifecycle.Group {
+func getServers(startCtx context.Context) (*lifecycle.Group, error) {
 	var c config.Config
 
 	// check config file is exist
@@ -96,7 +104,10 @@ func getServers() *lifecycle.Group {
 	}
 
 	// init service context
-	ctx := app.NewApplication(c)
+	ctx, err := app.NewApplication(startCtx, c)
+	if err != nil {
+		return nil, err
+	}
 	runtimeConfig := ctx.Runtime.Config
 	bootstrapDeps := &bootstrap.Dependencies{
 		Config:                   runtimeConfig,
@@ -191,6 +202,7 @@ func getServers() *lifecycle.Group {
 				Notification:     ctx.Notification,
 				TelegramBotToken: func() string { return runtimeConfig().Telegram.BotToken },
 				RequestMetadata:  ctx.GeoIP.Enrich,
+				Readiness:        ctx.Ready,
 			}
 		},
 		SetRestart:             ctx.Runtime.SetRestart,
@@ -198,7 +210,7 @@ func getServers() *lifecycle.Group {
 	}))
 	services.Add(task.NewService(c.Redis, queueDeps))
 	services.Add(scheduler.NewService(c.Redis, c.AppLocation))
-	return services
+	return services, nil
 }
 
 func initConfig(c *config.Config) bool {

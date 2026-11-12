@@ -1,6 +1,8 @@
 package orm
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
@@ -173,31 +175,111 @@ func ConnectMysql(m Mysql) (*gorm.DB, error) {
 }
 
 func ConnectDatabase(m Mysql) (*gorm.DB, error) {
+	return OpenDatabase(context.Background(), m)
+}
+
+// OpenDatabase connects and verifies the database within ctx. Every network
+// step - TCP dial, authentication handshake and the MySQL version probe - is
+// bound to ctx; GORM itself is opened without any further I/O, so a server
+// that accepts the TCP connection and then stops answering cannot hold the
+// caller past its deadline. On error the pool is closed.
+func OpenDatabase(ctx context.Context, m Mysql) (*gorm.DB, error) {
 	if m.Config.Dbname == "" {
 		return nil, errors.New("database name is empty")
 	}
-	var dialector gorm.Dialector
-	switch m.Driver() {
-	case DriverMySQL:
-		dialector = mysql.New(mysql.Config{DSN: m.Dsn()})
-	case DriverPostgres:
-		dialector = postgres.Open(m.Dsn())
-	default:
-		return nil, fmt.Errorf("unsupported database driver: %s", m.Config.Driver)
-	}
-	db, err := gorm.Open(dialector, &gorm.Config{
+	gormConfig := &gorm.Config{
 		Logger: &logger.GormLogger{SlowThreshold: m.GetSlowThreshold()},
 		NamingStrategy: schema.NamingStrategy{
 			SingularTable: true,
 		},
-	})
+		DisableAutomaticPing: true,
+	}
+	switch m.Driver() {
+	case DriverMySQL:
+		return openMySQL(ctx, m, gormConfig)
+	case DriverPostgres:
+		db, err := gorm.Open(postgres.Open(m.Dsn()), gormConfig)
+		if err != nil {
+			return nil, err
+		}
+		sqldb, err := db.DB()
+		if err != nil {
+			return nil, err
+		}
+		applyPool(sqldb, m)
+		if err := sqldb.PingContext(ctx); err != nil {
+			_ = sqldb.Close()
+			return nil, err
+		}
+		return db, nil
+	default:
+		return nil, fmt.Errorf("unsupported database driver: %s", m.Config.Driver)
+	}
+}
+
+func openMySQL(ctx context.Context, m Mysql, gormConfig *gorm.Config) (*gorm.DB, error) {
+	dsn := m.Dsn()
+	sqldb, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
 	}
-	sqldb, err := db.DB()
-	if err != nil {
+	applyPool(sqldb, m)
+	fail := func(err error) (*gorm.DB, error) {
+		_ = sqldb.Close()
 		return nil, err
 	}
+	if err := sqldb.PingContext(ctx); err != nil {
+		return fail(err)
+	}
+	var version string
+	if err := sqldb.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+		return fail(err)
+	}
+	cfg := mysqlDialectorConfig(version)
+	cfg.Conn = sqldb
+	cfg.DSN = dsn
+	db, err := gorm.Open(mysql.New(cfg), gormConfig)
+	if err != nil {
+		return fail(err)
+	}
+	return db, nil
+}
+
+// mysqlDialectorConfig reproduces the feature flags gorm.io/driver/mysql
+// derives from SELECT VERSION(), so the dialector can skip its own probe
+// (which uses an unbounded context). RETURNING support for MariaDB 10.5+ is
+// not enabled; GORM then uses LastInsertId, which is equivalent for inserts.
+func mysqlDialectorConfig(version string) mysql.Config {
+	cfg := mysql.Config{ServerVersion: version, SkipInitializeWithVersion: true}
+	switch {
+	case strings.Contains(version, "MariaDB"):
+		cfg.DontSupportRenameIndex = true
+		cfg.DontSupportRenameColumn = true
+		cfg.DontSupportForShareClause = true
+		cfg.DontSupportNullAsDefaultValue = true
+	case strings.HasPrefix(version, "5.6."):
+		cfg.DontSupportRenameIndex = true
+		cfg.DontSupportRenameColumn = true
+		cfg.DontSupportForShareClause = true
+		cfg.DontSupportDropConstraint = true
+	case strings.HasPrefix(version, "5.7."):
+		cfg.DontSupportRenameColumn = true
+		cfg.DontSupportForShareClause = true
+		cfg.DontSupportDropConstraint = true
+	case strings.HasPrefix(version, "5."):
+		cfg.DisableDatetimePrecision = true
+		cfg.DontSupportRenameIndex = true
+		cfg.DontSupportRenameColumn = true
+		cfg.DontSupportForShareClause = true
+		cfg.DontSupportDropConstraint = true
+	}
+	if strings.Contains(version, "TiDB") {
+		cfg.DontSupportRenameColumnUnique = true
+	}
+	return cfg
+}
+
+func applyPool(sqldb *sql.DB, m Mysql) {
 	sqldb.SetMaxIdleConns(m.Config.MaxIdleConns)
 	sqldb.SetMaxOpenConns(m.Config.MaxOpenConns)
 	if m.Config.ConnMaxLifetime > 0 {
@@ -206,7 +288,6 @@ func ConnectDatabase(m Mysql) (*gorm.DB, error) {
 	if m.Config.ConnMaxIdleTime > 0 {
 		sqldb.SetConnMaxIdleTime(time.Duration(m.Config.ConnMaxIdleTime) * time.Second)
 	}
-	return db, nil
 }
 
 func Ping(dsn string) bool {

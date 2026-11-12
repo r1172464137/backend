@@ -24,6 +24,8 @@ type Dependencies struct {
 	Notification     notification.Service
 	TelegramBotToken func() string
 	RequestMetadata  requestmeta.Enricher
+	// Readiness backs GET /readyz; nil reports "not configured" (503).
+	Readiness func(context.Context) error
 }
 
 func New(deps Dependencies, addr string, tlsConfig *tls.Config) *Server {
@@ -43,6 +45,7 @@ func newServer(deps Dependencies, opts []config.Option) *Server {
 	engine := server.Default(opts...)
 	engine.Use(middleware.TraceMiddleware(), middleware.LoggerMiddleware(deps.RequestMetadata), middleware.CorsMiddleware)
 
+	registerHealth(engine, deps.Readiness)
 	routes.RegisterHandlers(engine, deps.Routes)
 	notificationHTTP.RegisterTelegramHandlers(engine, deps.Notification, deps.TelegramBotToken)
 	billingHTTP.RegisterNotifyHandlers(engine, deps.Routes.Store, deps.Routes.Billing)

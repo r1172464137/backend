@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/hibiken/asynq"
 	"github.com/perfect-panel/server/internal/app/state"
@@ -21,6 +23,7 @@ import (
 	"github.com/perfect-panel/server/internal/transport/devicesocket"
 	"github.com/perfect-panel/server/pkg/orm"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 type Application struct {
@@ -46,22 +49,37 @@ type Application struct {
 	//NodeCache   *cache.NodeCacheClient
 	AuthLimiter   *ratelimit.PeriodLimit
 	DeviceManager *devicesocket.DeviceManager
+
+	db *gorm.DB
 }
 
-func NewApplication(c config.Config) *Application {
-	// gorm initialize
-	db, err := orm.ConnectMysql(orm.Mysql{
-		Config: c.DatabaseConfig(),
-	})
+// NewApplication connects the database and Redis and assembles the modules.
+// Dependencies that are not ready yet are retried within DefaultStartupRetry;
+// cancelling ctx (SIGTERM during startup) aborts the wait. Errors name the
+// dependency and the last cause instead of panicking.
+func NewApplication(ctx context.Context, c config.Config) (*Application, error) {
+	return newApplication(ctx, c, DefaultStartupRetry)
+}
 
+func newApplication(ctx context.Context, c config.Config, retry RetryPolicy) (*Application, error) {
+	dbConfig := orm.Mysql{Config: c.DatabaseConfig()}
+	db, err := connectWithRetry(ctx, "database", retry, func(actx context.Context) (*gorm.DB, error) {
+		return orm.OpenDatabase(actx, dbConfig)
+	}, permanentDatabaseError)
 	if err != nil {
-		panic(err.Error())
+		return nil, err
+	}
+	closeDB := func() {
+		if sqlDB, e := db.DB(); e == nil {
+			_ = sqlDB.Close()
+		}
 	}
 
 	// IP location initialize
 	geoIP, err := geoip.NewIPLocation("./cache/GeoLite2-City.mmdb")
 	if err != nil {
-		panic(err.Error())
+		closeDB()
+		return nil, fmt.Errorf("geoip: %w", err)
 	}
 
 	rds := redis.NewClient(&redis.Options{
@@ -69,9 +87,12 @@ func NewApplication(c config.Config) *Application {
 		Password: c.Redis.Pass,
 		DB:       c.Redis.DB,
 	})
-	err = rds.Ping(context.Background()).Err()
-	if err != nil {
-		panic(err.Error())
+	if _, err = connectWithRetry(ctx, "redis", retry, func(actx context.Context) (struct{}, error) {
+		return struct{}{}, rds.Ping(actx).Err()
+	}, permanentRedisError); err != nil {
+		_ = rds.Close()
+		closeDB()
+		return nil, err
 	}
 	authLimiter := ratelimit.NewPeriodLimit(86400, 15, rds, config.SendCountLimitKeyPrefix, ratelimit.Align())
 	store := NewStore(db, rds)
@@ -87,6 +108,7 @@ func NewApplication(c config.Config) *Application {
 		Store:        store,
 		//NodeCache:   cache.NewNodeCacheClient(rds),
 		AuthLimiter: authLimiter,
+		db:          db,
 	}
 	// Support takes srv for the ticket→Telegram mirror; the adapter reads
 	// srv.Notification lazily, so constructing it before Notification is safe.
@@ -99,6 +121,23 @@ func NewApplication(c config.Config) *Application {
 	srv.Network = newNetworkModule(store, srv)
 	srv.Notification = newNotificationModule(store, srv)
 	srv.EventBus = newEventBus(store, srv)
-	return srv
+	return srv, nil
+}
 
+// Ready reports whether the backend can serve requests that need its
+// dependencies: the database answers a ping and Redis answers PING within ctx.
+// The returned error names the failing dependency only (no addresses or
+// credentials).
+func (a *Application) Ready(ctx context.Context) error {
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return errors.New("database unavailable")
+	}
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return errors.New("database unavailable")
+	}
+	if err := a.Redis.Ping(ctx).Err(); err != nil {
+		return errors.New("redis unavailable")
+	}
+	return nil
 }
