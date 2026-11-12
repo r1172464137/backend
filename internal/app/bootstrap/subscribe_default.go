@@ -32,6 +32,24 @@ func repairDefaultApplication(ctx context.Context, store repository.Store) error
 	if len(apps) == 0 || len(defaults) == 1 {
 		return nil
 	}
+	keep := chooseDefaultApplication(apps, defaults)
+	if keep != nil {
+		logger.Infof("[Migrate] subscribe default repair: keeping application %d %q (%s, ua %q) as the only default; %d defaults before",
+			keep.Id, keep.Name, keep.OutputFormat, keep.UserAgent, len(defaults))
+		repaired := *keep
+		repaired.IsDefault = true
+		return store.Client().Update(ctx, &repaired)
+	}
+	var summary []string
+	for _, a := range apps {
+		summary = append(summary, fmt.Sprintf("%d %q %s default=%t", a.Id, a.Name, a.OutputFormat, a.IsDefault))
+	}
+	return fmt.Errorf("cannot choose a unique default subscribe application; set one manually: %s", strings.Join(summary, "; "))
+}
+
+// chooseDefaultApplication applies the MIGRATION 5.2 preference order and
+// returns nil when no rule yields exactly one base64 application.
+func chooseDefaultApplication(apps, defaults []*client.SubscribeApplication) *client.SubscribeApplication {
 	has := func(a *client.SubscribeApplication, word string) bool {
 		return strings.Contains(strings.ToLower(a.Name), word) || strings.Contains(strings.ToLower(a.UserAgent), word)
 	}
@@ -52,16 +70,8 @@ func repairDefaultApplication(ctx context.Context, store repository.Store) error
 			}
 		}
 		if len(hit) == 1 {
-			keep := *hit[0]
-			logger.Infof("[Migrate] subscribe default repair: keeping application %d %q (%s, ua %q) as the only default; %d defaults before",
-				keep.Id, keep.Name, keep.OutputFormat, keep.UserAgent, len(defaults))
-			keep.IsDefault = true
-			return store.Client().Update(ctx, &keep)
+			return hit[0]
 		}
 	}
-	var summary []string
-	for _, a := range apps {
-		summary = append(summary, fmt.Sprintf("%d %q %s default=%t", a.Id, a.Name, a.OutputFormat, a.IsDefault))
-	}
-	return fmt.Errorf("cannot choose a unique default subscribe application; set one manually: %s", strings.Join(summary, "; "))
+	return nil
 }

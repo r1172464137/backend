@@ -4935,6 +4935,78 @@
                 }
             }
         },
+        "/v1/admin/system/interface_config": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Get admin interface config",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/result.ResponseSuccessBean"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/dto.InterfaceConfig"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Update admin interface config",
+                "parameters": [
+                    {
+                        "description": "Request parameters",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/dto.InterfaceConfig"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/result.ResponseSuccessBean"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/admin/system/invite_config": {
             "get": {
                 "security": [
@@ -11006,9 +11078,6 @@
                         "NodeSecret": []
                     }
                 ],
-                "consumes": [
-                    "application/json"
-                ],
                 "produces": [
                     "application/json",
                     "application/protobuf"
@@ -11016,29 +11085,12 @@
                 "tags": [
                     "node"
                 ],
-                "summary": "Get user list",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "name": "protocol",
-                        "in": "query"
-                    },
-                    {
-                        "type": "string",
-                        "name": "secret_key",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "name": "server_id",
-                        "in": "query"
-                    }
-                ],
+                "summary": "Removed: users are delivered in /v2/server/{server_id}",
                 "responses": {
-                    "200": {
-                        "description": "OK",
+                    "426": {
+                        "description": "Node routing upgrade required",
                         "schema": {
-                            "$ref": "#/definitions/dto.GetServerUserListResponse"
+                            "$ref": "#/definitions/result.ResponseErrorBean"
                         }
                     }
                 }
@@ -11464,18 +11516,8 @@
                         "required": true
                     },
                     {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "collectionFormat": "multi",
-                        "description": "Protocols to include",
-                        "name": "protocols",
-                        "in": "query"
-                    },
-                    {
                         "type": "string",
-                        "description": "Must be 1",
+                        "description": "Must be 3",
                         "name": "X-PPanel-Routing-Version",
                         "in": "header",
                         "required": true
@@ -11511,6 +11553,46 @@
         }
     },
     "definitions": {
+        "config.NodeDNSPolicy": {
+            "type": "object",
+            "properties": {
+                "query_strategy": {
+                    "type": "string"
+                },
+                "resolvers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.NodeDNSResolver"
+                    }
+                }
+            }
+        },
+        "config.NodeDNSResolver": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "bootstrap_ip": {
+                    "type": "string"
+                },
+                "domains": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "id": {
+                    "type": "string"
+                },
+                "outbound_id": {
+                    "type": "string"
+                },
+                "protocol": {
+                    "type": "string"
+                }
+            }
+        },
         "config.NodeOutbound": {
             "type": "object",
             "properties": {
@@ -11650,6 +11732,10 @@
                 "uuid": {
                     "type": "string"
                 },
+                "via_outbound_id": {
+                    "description": "ViaOutboundID names the custom outbound this one dials through\n(node -\u003e via -\u003e this -\u003e target). Empty means a direct connection.",
+                    "type": "string"
+                },
                 "xhttp_extra": {
                     "type": "string"
                 },
@@ -11665,6 +11751,7 @@
                 "id",
                 "kind",
                 "outbound_id",
+                "user_ids",
                 "values"
             ],
             "properties": {
@@ -11683,6 +11770,13 @@
                 "remark": {
                     "type": "string"
                 },
+                "user_ids": {
+                    "description": "UserIDs limits the rule to these accounts (user.id); empty means all.",
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
                 "values": {
                     "type": "array",
                     "items": {
@@ -11695,13 +11789,19 @@
             "type": "object",
             "required": [
                 "default_outbound_id",
+                "dns",
                 "outbounds",
                 "rules",
+                "target_ip_preference",
+                "user_defaults",
                 "version"
             ],
             "properties": {
                 "default_outbound_id": {
                     "type": "string"
+                },
+                "dns": {
+                    "$ref": "#/definitions/config.NodeDNSPolicy"
                 },
                 "outbounds": {
                     "type": "array",
@@ -11715,7 +11815,27 @@
                         "$ref": "#/definitions/config.NodeRoute"
                     }
                 },
+                "target_ip_preference": {
+                    "type": "string"
+                },
+                "user_defaults": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.NodeUserDefault"
+                    }
+                },
                 "version": {
+                    "type": "integer"
+                }
+            }
+        },
+        "config.NodeUserDefault": {
+            "type": "object",
+            "properties": {
+                "outbound_id": {
+                    "type": "string"
+                },
+                "user_id": {
                     "type": "integer"
                 }
             }
@@ -13864,17 +13984,6 @@
                 }
             }
         },
-        "dto.GetServerUserListResponse": {
-            "type": "object",
-            "properties": {
-                "users": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.ServerUser"
-                    }
-                }
-            }
-        },
         "dto.GetStatResponse": {
             "type": "object",
             "properties": {
@@ -14205,6 +14314,51 @@
                 }
             }
         },
+        "dto.IdentitySnapshot": {
+            "type": "object",
+            "properties": {
+                "protocols": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/dto.ProtocolIdentity"
+                    }
+                },
+                "snapshot_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "dto.IdentityUser": {
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "integer"
+                },
+                "device_limit": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "speed_limit": {
+                    "type": "integer"
+                },
+                "uuid": {
+                    "type": "string"
+                }
+            }
+        },
+        "dto.InterfaceConfig": {
+            "type": "object",
+            "properties": {
+                "hiddenMenuIds": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "dto.InviteConfig": {
             "type": "object",
             "properties": {
@@ -14420,15 +14574,6 @@
         "dto.NodeConfig": {
             "type": "object",
             "properties": {
-                "dns": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeDNS"
-                    }
-                },
-                "ip_strategy": {
-                    "type": "string"
-                },
                 "node_pull_interval": {
                     "type": "integer"
                 },
@@ -14455,26 +14600,6 @@
                 },
                 "traffic_report_threshold": {
                     "type": "integer"
-                }
-            }
-        },
-        "dto.NodeDNS": {
-            "type": "object",
-            "properties": {
-                "address": {
-                    "type": "string"
-                },
-                "domains": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "proto": {
-                    "type": "string"
-                },
-                "server_name": {
-                    "type": "string"
                 }
             }
         },
@@ -14533,7 +14658,7 @@
                     "type": "string"
                 },
                 "ip_rules": {
-                    "description": "Must be empty in v1.",
+                    "description": "Must be empty.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -14562,7 +14687,7 @@
                     "type": "string"
                 },
                 "protocol_rules": {
-                    "description": "Must be empty in v1.",
+                    "description": "Must be empty.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -14578,7 +14703,7 @@
                     "type": "boolean"
                 },
                 "rules": {
-                    "description": "Legacy match arrays are retained for protobuf compatibility and must be empty in v1.",
+                    "description": "Legacy match arrays are retained for protobuf compatibility and must be empty.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -14620,6 +14745,10 @@
                 "uuid": {
                     "type": "string"
                 },
+                "via_outbound_id": {
+                    "description": "ViaOutboundID names the custom outbound this one dials through.",
+                    "type": "string"
+                },
                 "xhttp_extra": {
                     "type": "string"
                 },
@@ -14632,6 +14761,7 @@
             "type": "object",
             "required": [
                 "default_outbound_id",
+                "dns",
                 "local_transition_revision",
                 "mode",
                 "outbounds",
@@ -14639,11 +14769,16 @@
                 "source",
                 "source_revision",
                 "source_server_id",
+                "target_ip_preference",
+                "user_defaults",
                 "version"
             ],
             "properties": {
                 "default_outbound_id": {
                     "type": "string"
+                },
+                "dns": {
+                    "$ref": "#/definitions/config.NodeDNSPolicy"
                 },
                 "local_transition_revision": {
                     "type": "integer"
@@ -14672,6 +14807,15 @@
                 "source_server_id": {
                     "type": "integer"
                 },
+                "target_ip_preference": {
+                    "type": "string"
+                },
+                "user_defaults": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.NodeUserDefault"
+                    }
+                },
                 "version": {
                     "type": "integer"
                 }
@@ -14684,6 +14828,7 @@
                 "id",
                 "kind",
                 "outbound_id",
+                "user_ids",
                 "values"
             ],
             "properties": {
@@ -14701,6 +14846,12 @@
                 },
                 "remark": {
                     "type": "string"
+                },
+                "user_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
                 },
                 "values": {
                     "type": "array",
@@ -15605,6 +15756,20 @@
                 }
             }
         },
+        "dto.ProtocolIdentity": {
+            "type": "object",
+            "properties": {
+                "protocol": {
+                    "type": "string"
+                },
+                "users": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/dto.IdentityUser"
+                    }
+                }
+            }
+        },
         "dto.PubilcRegisterConfig": {
             "type": "object",
             "properties": {
@@ -15820,14 +15985,8 @@
         "dto.QueryServerConfigResponse": {
             "type": "object",
             "properties": {
-                "dns": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeDNS"
-                    }
-                },
-                "ip_strategy": {
-                    "type": "string"
+                "identity_snapshot": {
+                    "$ref": "#/definitions/dto.IdentitySnapshot"
                 },
                 "protocols": {
                     "type": "array",
@@ -16359,6 +16518,9 @@
                 "mode": {
                     "type": "string"
                 },
+                "snapshot_id": {
+                    "type": "string"
+                },
                 "source": {
                     "type": "string"
                 },
@@ -16424,6 +16586,10 @@
         "dto.RoutingStatusView": {
             "type": "object",
             "properties": {
+                "desired_snapshot_id": {
+                    "description": "DesiredSnapshotID is the snapshot the node should be running, computed\nread-only from the database; null when it cannot be computed.",
+                    "type": "string"
+                },
                 "known": {
                     "type": "boolean"
                 },
@@ -16431,6 +16597,10 @@
                     "$ref": "#/definitions/dto.RoutingStatusReport"
                 },
                 "reporter_verified": {
+                    "type": "boolean"
+                },
+                "synced": {
+                    "description": "Synced is true only when the verified applied identity equals desired.",
                     "type": "boolean"
                 }
             }
@@ -16532,23 +16702,8 @@
         "dto.ServerNodeConfigOverride": {
             "type": "object",
             "properties": {
-                "dns": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeDNS"
-                    }
-                },
-                "inherit_dns": {
-                    "type": "boolean"
-                },
-                "inherit_ip_strategy": {
-                    "type": "boolean"
-                },
                 "inherit_routing": {
                     "type": "boolean"
-                },
-                "ip_strategy": {
-                    "type": "string"
                 },
                 "routing": {
                     "$ref": "#/definitions/config.NodeRouting"
@@ -16561,15 +16716,6 @@
         "dto.ServerNodeConfigValues": {
             "type": "object",
             "properties": {
-                "dns": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeDNS"
-                    }
-                },
-                "ip_strategy": {
-                    "type": "string"
-                },
                 "routing": {
                     "$ref": "#/definitions/dto.NodeRoutingPolicy"
                 },
@@ -16807,23 +16953,6 @@
                 "upload": {
                     "description": "Upload traffic in bytes",
                     "type": "integer"
-                }
-            }
-        },
-        "dto.ServerUser": {
-            "type": "object",
-            "properties": {
-                "device_limit": {
-                    "type": "integer"
-                },
-                "id": {
-                    "type": "integer"
-                },
-                "speed_limit": {
-                    "type": "integer"
-                },
-                "uuid": {
-                    "type": "string"
                 }
             }
         },
@@ -17845,23 +17974,8 @@
                 "server_id"
             ],
             "properties": {
-                "dns": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/dto.NodeDNS"
-                    }
-                },
-                "inherit_dns": {
-                    "type": "boolean"
-                },
-                "inherit_ip_strategy": {
-                    "type": "boolean"
-                },
                 "inherit_routing": {
                     "type": "boolean"
-                },
-                "ip_strategy": {
-                    "type": "string"
                 },
                 "routing": {
                     "$ref": "#/definitions/config.NodeRouting"

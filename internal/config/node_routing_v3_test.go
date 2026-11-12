@@ -128,7 +128,13 @@ func TestDNSPolicyValidation(t *testing.T) {
 		DefaultDNSPolicy("t"),
 		custom(udp, sys),
 		custom(udp, doh, sys),
-		custom(udp, NodeDNSResolver{ID: routingID("dns_", 3), Protocol: "tcp", Address: "dns.example", Domains: []string{}, OutboundID: RoutingDirect}),
+		custom(udp, NodeDNSResolver{ID: routingID("dns_", 3), Protocol: "tcp", Address: "dns.example", Domains: []string{}, OutboundID: RoutingDirect, BootstrapIP: "192.0.2.55"}),
+	}
+	// A direct resolver named by host would need system DNS to find itself.
+	noBootstrap := asV3(basicRouting())
+	noBootstrap.DNS = custom(udp, NodeDNSResolver{ID: routingID("dns_", 3), Protocol: "tcp", Address: "dns.example", Domains: []string{}, OutboundID: RoutingDirect})
+	if _, err := NormalizeNodeRouting(noBootstrap); err == nil {
+		t.Error("direct host-name resolver without bootstrap_ip accepted")
 	}
 	for i, d := range valid {
 		p := asV3(basicRouting())

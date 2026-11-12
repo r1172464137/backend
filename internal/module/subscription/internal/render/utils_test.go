@@ -1,6 +1,8 @@
 package render
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
@@ -220,7 +222,7 @@ func TestAdapterPreservesNowhereContractAndUserSharedKey(t *testing.T) {
 	proxy := client.Proxies[0]
 	if proxy.Type != "nowhere" || proxy.Version != 1 || proxy.Network != "mix" || proxy.Security != "tls" ||
 		proxy.SNI != "nowhere.example" || len(proxy.ALPN) != 1 || proxy.ALPN[0] != "now/1" ||
-		proxy.CertMode != "self" || proxy.CertPinSHA256 != pin {
+		proxy.CertPinSHA256 != pin {
 		t.Fatalf("Nowhere proxy fields were not preserved: %#v", proxy)
 	}
 	built, err := client.Build()
@@ -229,5 +231,45 @@ func TestAdapterPreservesNowhereContractAndUserSharedKey(t *testing.T) {
 	}
 	if got, want := string(built), "nowhere|mix|"+sharedKey; got != want {
 		t.Fatalf("Build() = %q, want %q", got, want)
+	}
+}
+
+// CONTRACT 5.5: server-only settings never reach the template view, so
+// neither field access nor toJson can leak them.
+func TestProxyCarriesNoServerOnlyFields(t *testing.T) {
+	typ := reflect.TypeOf(Proxy{})
+	for _, name := range []string{"RealityServerAddr", "RealityServerPort", "RealityPrivateKey", "AcceptProxyProtocol",
+		"CertMode", "CertDNSProvider", "CertDNSEnv", "EncryptionTicket", "EncryptionPrivateKey", "EncryptionServerPadding"} {
+		if _, ok := typ.FieldByName(name); ok {
+			t.Errorf("render.Proxy exposes server-only field %s", name)
+		}
+	}
+	srv := &node.Server{Id: 1, Name: "S", Address: "example.com"}
+	if err := srv.MarshalProtocols([]node.Protocol{{
+		Type: "vless", Port: 443, Enable: true, Security: "reality", SNI: "www.example.com",
+		RealityServerAddr: "secret-target.example", RealityServerPort: 8443, RealityPrivateKey: "PRIVATE-KEY-VALUE",
+		RealityPublicKey: "PUBLIC", RealityShortId: "ab", CertDNSEnv: "CF_TOKEN=SECRET-ENV",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	client, err := NewAdapter(`{{ range .Proxies }}{{ toJson . }}{{ end }}`,
+		WithServers([]*node.Node{{Id: 1, Name: "N", Port: 443, Address: "example.com", ServerId: 1, Server: srv, Protocol: "vless", Enabled: &enabled}}),
+		WithOutputFormat("conf"),
+	).Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := client.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"secret-target.example", "8443", "PRIVATE-KEY-VALUE", "SECRET-ENV"} {
+		if strings.Contains(string(out), secret) {
+			t.Errorf("rendered template leaks %q: %s", secret, out)
+		}
+	}
+	if !strings.Contains(string(out), "PUBLIC") {
+		t.Errorf("client field missing from template: %s", out)
 	}
 }

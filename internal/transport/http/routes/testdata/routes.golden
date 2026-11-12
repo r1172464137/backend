@@ -50,6 +50,7 @@ GET /v1/admin/subscribe/list github.com/perfect-panel/server/internal/module/sub
 GET /v1/admin/system/currency_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.GetCurrencyConfigHandler
 GET /v1/admin/system/get_node_multiplier github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.GetNodeMultiplierHandler
 GET /v1/admin/system/invite_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.GetInviteConfigHandler
+GET /v1/admin/system/interface_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.GetInterfaceConfigHandler
 GET /v1/admin/system/node_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.GetNodeConfigHandler
 GET /v1/admin/system/node_multiplier/preview github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.PreViewNodeMultiplierHandler
 GET /v1/admin/system/privacy github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.GetPrivacyPolicyConfigHandler
@@ -204,6 +205,7 @@ PUT /v1/admin/subscribe/ github.com/perfect-panel/server/internal/module/subscri
 PUT /v1/admin/subscribe/group github.com/perfect-panel/server/internal/module/subscription/transport/http/admin/subscribe.UpdateSubscribeGroupHandler
 PUT /v1/admin/system/currency_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.UpdateCurrencyConfigHandler
 PUT /v1/admin/system/invite_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.UpdateInviteConfigHandler
+PUT /v1/admin/system/interface_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.UpdateInterfaceConfigHandler
 PUT /v1/admin/system/node_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.UpdateNodeConfigHandler
 PUT /v1/admin/system/privacy github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.UpdatePrivacyPolicyConfigHandler
 PUT /v1/admin/system/register_config github.com/perfect-panel/server/internal/module/platform/transport/http/admin/system.UpdateRegisterConfigHandler
