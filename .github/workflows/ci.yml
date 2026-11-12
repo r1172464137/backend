@@ -93,6 +93,13 @@ jobs:
           PPANEL_TEST_MYSQL_DSN: "root:mariadb@tcp(127.0.0.1:3307)/ppanel?charset=utf8mb4&parseTime=true&loc=UTC&interpolateParams=true"
         run: go test -count=1 ./pkg/orm ./internal/app/migration/schema
 
+      - name: Release gates (same as release.yml prepare)
+        if: startsWith(github.ref, 'refs/heads/rebuild/')
+        run: |
+          bash script/test-release.sh
+          go test -race -timeout 5m ./internal/module/network/entity/node ./internal/module/network/internal/adminserver ./internal/module/network/internal/serverapi ./internal/module/network/transport/http/server -run 'TestRealityXver|TestNormalizeProtocol|TestSanitizeProtocols|TestMergeMissingProtocol|TestCompatible' -count=1
+          go test -race -timeout 5m -count=1 ./internal/config ./internal/app/bootstrap ./internal/app/migration/schema ./internal/module/network/internal/adminserver ./internal/module/network/internal/nodeconfig ./internal/module/network/internal/repo ./internal/module/network/internal/serverapi ./internal/module/network/transport/http/admin/server ./internal/module/network/transport/http/server ./internal/module/platform/internal/repo ./internal/module/platform/internal/systemsetting ./internal/module/platform/transport/http/admin/system ./internal/transport/http/routes
+
       - name: Build linux-amd64 candidate
         if: startsWith(github.ref, 'refs/heads/rebuild/')
         run: CGO_ENABLED=0 go build -trimpath -o dist/ppanel-backend .

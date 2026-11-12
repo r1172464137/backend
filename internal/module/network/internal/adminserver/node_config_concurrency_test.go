@@ -95,15 +95,17 @@ func TestConcurrentOrderedOverrideRejectsStaleRevision(t *testing.T) {
 	legacy := `["geosite:cn"]`
 	store.override = &node.ServerConfigOverride{Id: 1, ServerId: 1, Routing: &old, RoutingRevision: 2, Block: &legacy}
 	deps := Deps{Store: store}
-	bind := func(def string) *dto.UpdateServerNodeConfigRequest {
+	// Both requests change the content: an identical save is a revision-free
+	// no-op, which would succeed or conflict depending on scheduling.
+	bind := func(def, preference string) *dto.UpdateServerNodeConfigRequest {
 		var req dto.UpdateServerNodeConfigRequest
-		body := `{"server_id":1,"routing_revision":2,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"` + def + `","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"none"}}`
+		body := `{"server_id":1,"routing_revision":2,"routing":{"version":3,"outbounds":[],"rules":[],"default_outbound_id":"` + def + `","user_defaults":[],"dns":{"query_strategy":"UseIP","resolvers":[{"id":"dns_00000000-0000-4000-8000-000000000001","protocol":"system","address":"","domains":[],"outbound_id":"direct"}]},"target_ip_preference":"` + preference + `"}}`
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			t.Fatal(err)
 		}
 		return &req
 	}
-	requests := []*dto.UpdateServerNodeConfigRequest{bind("direct"), bind("block")}
+	requests := []*dto.UpdateServerNodeConfigRequest{bind("direct", "prefer_ipv4"), bind("block", "none")}
 	start := make(chan struct{})
 	errs := make(chan error, 2)
 	var wg sync.WaitGroup
