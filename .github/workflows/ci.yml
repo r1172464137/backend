@@ -109,6 +109,9 @@ jobs:
       # gain migrations. This keeps their numbering compatible; see the script for
       # what an incompatible pair does to an upgrading database.
       - name: Check migration lines
+        # The rebuild line stays on schema 2180 and never merges with master
+        # (a separate line with 3000+); the LTS/feature pairing does not apply.
+        if: ${{ !startsWith(github.ref, 'refs/heads/rebuild/') }}
         run: |
           git fetch --quiet origin master
           ./script/check-migration-lines.sh
