@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
-	"github.com/perfect-panel/server/internal/module/platform/entity/client"
 	"github.com/perfect-panel/server/internal/module/platform/entity/log"
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/internal/module/subscription/entity/subscribe"
@@ -22,6 +21,7 @@ import (
 	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
 	"github.com/pkg/errors"
+	"gorm.io/gorm"
 )
 
 type SubscribeLogic struct {
@@ -58,31 +58,12 @@ func (l *SubscribeLogic) Handler(req *dto.SubscribeRequest) (resp *dto.Subscribe
 		return nil, err
 	}
 
-	userAgent := strings.ToLower(l.request.UserAgent)
-
-	var targetApp, defaultApp *client.SubscribeApplication
-
-	for _, item := range clients {
-		u := strings.ToLower(item.UserAgent)
-		if item.IsDefault {
-			defaultApp = item
-		}
-
-		if strings.Contains(userAgent, u) {
-			// Special handling for Stash
-			if strings.Contains(userAgent, "stash") && !strings.Contains(u, "stash") {
-				continue
-			}
-			targetApp = item
-			break
-		}
+	if _, ok := req.Params["format"]; ok {
+		return nil, errors.Wrap(xerr.NewErrCodeMsg(xerr.InvalidParams, "format parameter is not supported; use app=<application id>"), "format requested")
 	}
-	if targetApp == nil {
-		l.Debugw("[SubscribeLogic] No matching client found", logger.Field("userAgent", userAgent))
-		if defaultApp == nil {
-			return nil, errors.Wrapf(xerr.NewErrCode(xerr.ERROR), "No matching client found for user agent: %s", userAgent)
-		}
-		targetApp = defaultApp
+	targetApp, err := selectApplication(clients, req.Params["app"], l.request.UserAgent)
+	if err != nil {
+		return nil, err
 	}
 	// Find user subscribe by token
 	userSubscribe, err := l.getUserSubscribe(req.Token)
@@ -148,19 +129,23 @@ func (l *SubscribeLogic) Handler(req *dto.SubscribeRequest) (resp *dto.Subscribe
 		return nil, errors.Wrapf(xerr.NewErrCode(500), "Build client config failed: %v", err.Error())
 	}
 
-	var formats = []string{"json", "yaml", "conf"}
+	if err := validateOutput(targetApp.OutputFormat, bytes); err != nil {
+		l.Errorw("[SubscribeLogic] Rendered config failed validation", logger.Field("application", targetApp.Name), logger.Field("error", err.Error()))
+		return nil, errors.Wrapf(xerr.NewErrCode(500), "rendered %s config invalid: %v", targetApp.OutputFormat, err)
+	}
 
-	headers := make(map[string]string)
-	for _, format := range formats {
-		if format == strings.ToLower(targetApp.OutputFormat) {
-			headers["Content-Disposition"] = fmt.Sprintf("attachment;filename*=UTF-8''%s", url.PathEscape(l.cfg.SiteName))
-			headers["Content-Type"] = "application/octet-stream; charset=UTF-8"
-			if l.cfg.ProfileUpdateInterval > 0 {
-				headers["profile-update-interval"] = fmt.Sprintf("%d", l.cfg.ProfileUpdateInterval)
-			}
-			if profileURL := strings.TrimSpace(l.cfg.ProfileWebPageURL); profileURL != "" {
-				headers["profile-web-page-url"] = profileURL
-			}
+	headers := map[string]string{
+		"Content-Type":  contentTypes[targetApp.OutputFormat],
+		"Cache-Control": "private, no-store",
+		"Vary":          "User-Agent",
+	}
+	if targetApp.OutputFormat != "base64" {
+		headers["Content-Disposition"] = fmt.Sprintf("attachment;filename*=UTF-8''%s", url.PathEscape(l.cfg.SiteName))
+		if l.cfg.ProfileUpdateInterval > 0 {
+			headers["profile-update-interval"] = fmt.Sprintf("%d", l.cfg.ProfileUpdateInterval)
+		}
+		if profileURL := strings.TrimSpace(l.cfg.ProfileWebPageURL); profileURL != "" {
+			headers["profile-web-page-url"] = profileURL
 		}
 	}
 
@@ -191,7 +176,13 @@ func (l *SubscribeLogic) getSubscribeV2URL() string {
 
 // getUserSubscribe 是本次修改的核心部分
 func (l *SubscribeLogic) getUserSubscribe(token string) (*usersub.Subscribe, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, errors.Wrap(xerr.NewErrCode(xerr.ErrorTokenInvalid), "empty subscribe token")
+	}
 	userSub, err := l.deps.UserSubs.FindOneSubscribeByToken(l.ctx, token)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errors.Wrap(xerr.NewErrCode(xerr.ErrorTokenInvalid), "subscribe token not found")
+	}
 	if err != nil {
 		l.Infow("[Generate Subscribe]find subscribe error: %v", logger.Field("error", err.Error()))
 		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find subscribe error: %v", err.Error())
@@ -202,7 +193,7 @@ func (l *SubscribeLogic) getUserSubscribe(token string) (*usersub.Subscribe, err
 	// =========================================================
 	if userSub == nil {
 		l.Infow("[Generate Subscribe] token invalid or user not found")
-		return nil, errors.New("subscribe token invalid")
+		return nil, errors.Wrap(xerr.NewErrCode(xerr.ErrorTokenInvalid), "subscribe token invalid")
 	}
 	// =========================================================
 	// Check if user is enabled

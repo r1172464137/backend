@@ -27,6 +27,9 @@ func newUpdateSubscribeApplicationLogic(ctx context.Context, deps Deps) *UpdateS
 }
 
 func (l *UpdateSubscribeApplicationLogic) UpdateSubscribeApplication(req *dto.UpdateSubscribeApplicationRequest) (resp *dto.SubscribeApplication, err error) {
+	if err := validateOutputFormat(req.OutputFormat); err != nil {
+		return nil, err
+	}
 	data, err := l.deps.Clients.FindOne(l.ctx, req.Id)
 	if err != nil {
 		l.Errorf("Failed to find subscribe application with ID %d: %v", req.Id, err)
@@ -53,7 +56,7 @@ func (l *UpdateSubscribeApplicationLogic) UpdateSubscribeApplication(req *dto.Up
 	err = l.deps.Clients.Update(l.ctx, data)
 	if err != nil {
 		l.Errorf("Failed to update subscribe application with ID %d: %v", req.Id, err)
-		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "Failed to update subscribe application with ID %d", req.Id)
+		return nil, saveError(err, xerr.DatabaseUpdateError, "Failed to update subscribe application")
 	}
 	resp = &dto.SubscribeApplication{}
 	mapping.DeepCopy(&resp, data)

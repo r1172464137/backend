@@ -490,3 +490,8 @@ type UserTrafficData struct {
 type VersionResponse struct {
 	Version string `json:"version"`
 }
+
+// InterfaceConfig controls admin navigation visibility only, never authorization.
+type InterfaceConfig struct {
+	HiddenMenuIds []string `json:"hiddenMenuIds"`
+}

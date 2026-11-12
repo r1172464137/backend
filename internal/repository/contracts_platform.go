@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/perfect-panel/server/internal/module/platform/entity/client"
@@ -34,6 +35,7 @@ type SystemRepo interface {
 	GetCurrencyConfig(ctx context.Context) ([]*system.System, error)
 	GetVerifyCodeConfig(ctx context.Context) ([]*system.System, error)
 	GetLogConfig(ctx context.Context) ([]*system.System, error)
+	GetInterfaceConfig(ctx context.Context) ([]*system.System, error)
 	UpdateValueByCategoryKey(ctx context.Context, category, key, value string, valueType ...string) error
 	UpdateNodeMultiplierConfig(ctx context.Context, config string) error
 	FindNodeMultiplierConfig(ctx context.Context) (*system.System, error)
@@ -71,7 +73,12 @@ type TaskRepo interface {
 	FindErrors(ctx context.Context, taskIDs []int64) ([]*task.TaskError, error)
 }
 
-// ClientRepo subscribe application 数据访问接口
+// ErrDefaultApplicationRequired rejects a subscribe-application change that
+// would leave existing applications without exactly one default.
+var ErrDefaultApplicationRequired = errors.New("exactly one default subscribe application is required")
+
+// ClientRepo subscribe application 数据访问接口. Insert, Update and Delete keep
+// exactly one default atomically: saving a default clears the others.
 type ClientRepo interface {
 	Insert(ctx context.Context, data *client.SubscribeApplication) error
 	FindOne(ctx context.Context, id int64) (*client.SubscribeApplication, error)

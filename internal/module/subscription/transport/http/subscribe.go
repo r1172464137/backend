@@ -11,6 +11,8 @@ import (
 	"github.com/perfect-panel/server/internal/module/subscription"
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/pkg/logger"
+	"github.com/perfect-panel/server/pkg/xerr"
+	"github.com/pkg/errors"
 )
 
 type SubscribeDeps struct {
@@ -111,14 +113,41 @@ func writeSubscribeResponse(c context.Context, ctx *app.RequestContext, service 
 		ClientIP:   ctx.ClientIP(),
 	}, &req)
 	if err != nil {
-		ctx.String(consts.StatusInternalServerError, "Internal Server")
+		status, msg := subscribeErrorStatus(err)
+		ctx.Header("Cache-Control", "private, no-store")
+		ctx.String(status, msg)
 		return
 	}
+	contentType := resp.Headers["Content-Type"]
+	if contentType == "" {
+		contentType = "text/plain; charset=utf-8"
+	}
 	for key, value := range resp.Headers {
-		ctx.Header(key, value)
+		if key != "Content-Type" {
+			ctx.Header(key, value)
+		}
 	}
 	ctx.Header("subscription-userinfo", resp.Header)
-	ctx.Data(consts.StatusOK, "text/plain; charset=utf-8", resp.Config)
+	ctx.Data(consts.StatusOK, contentType, resp.Config)
+}
+
+// subscribeErrorStatus maps delivery errors to plain-text statuses (CONTRACT 5.3);
+// a non-200 body is never shaped like a configuration.
+func subscribeErrorStatus(err error) (int, string) {
+	var code *xerr.CodeError
+	if !errors.As(errors.Cause(err), &code) {
+		return consts.StatusInternalServerError, "Internal Server Error"
+	}
+	switch code.GetErrCode() {
+	case xerr.ErrorTokenInvalid:
+		return consts.StatusNotFound, "Subscription not found"
+	case xerr.UserDisabled, xerr.UserNotExist:
+		return consts.StatusForbidden, "Access denied"
+	case xerr.InvalidParams:
+		return consts.StatusBadRequest, code.GetErrMsg()
+	default:
+		return consts.StatusInternalServerError, "Internal Server Error"
+	}
 }
 
 func getQueryMap(ctx *app.RequestContext) map[string]string {

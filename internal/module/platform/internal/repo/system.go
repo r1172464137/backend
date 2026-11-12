@@ -312,6 +312,15 @@ func (m *systemRepo) GetVerifyCodeConfig(ctx context.Context) ([]*system.System,
 }
 
 // GetLogConfig returns the log config.
+// GetInterfaceConfig reads the shared admin menu configuration uncached.
+func (m *systemRepo) GetInterfaceConfig(ctx context.Context) ([]*system.System, error) {
+	var configs []*system.System
+	err := m.QueryNoCacheCtx(ctx, &configs, func(conn *gorm.DB, v interface{}) error {
+		return conn.Scopes(systemWhereCategoryKey("interface", "AdminHiddenMenuIds")).Find(v).Error
+	})
+	return configs, err
+}
+
 func (m *systemRepo) GetLogConfig(ctx context.Context) ([]*system.System, error) {
 	var configs []*system.System
 	err := m.QueryNoCacheCtx(ctx, &configs, func(conn *gorm.DB, v interface{}) error {

@@ -27,6 +27,9 @@ func newCreateSubscribeApplicationLogic(ctx context.Context, deps Deps) *CreateS
 }
 
 func (l *CreateSubscribeApplicationLogic) CreateSubscribeApplication(req *dto.CreateSubscribeApplicationRequest) (resp *dto.SubscribeApplication, err error) {
+	if err := validateOutputFormat(req.OutputFormat); err != nil {
+		return nil, err
+	}
 	var link client.DownloadLink
 	mapping.DeepCopy(&link, req.DownloadLink)
 	linkData, err := link.Marshal()
@@ -50,7 +53,7 @@ func (l *CreateSubscribeApplicationLogic) CreateSubscribeApplication(req *dto.Cr
 	err = l.deps.Clients.Insert(l.ctx, data)
 	if err != nil {
 		l.Errorf("Failed to create subscribe application: %v", err)
-		return nil, errors.Wrap(xerr.NewErrCode(xerr.DatabaseInsertError), "Failed to create subscribe application")
+		return nil, saveError(err, xerr.DatabaseInsertError, "Failed to create subscribe application")
 	}
 
 	resp = &dto.SubscribeApplication{}

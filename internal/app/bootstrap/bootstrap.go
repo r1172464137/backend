@@ -147,6 +147,9 @@ func Migrate(ctx *Dependencies) {
 			panic(fmt.Errorf("routing format 3 migration stopped: %w", err))
 		}
 	}
+	if err := repairDefaultApplication(context.Background(), ctx.Store); err != nil {
+		panic(fmt.Errorf("subscribe application default repair stopped: %w", err))
+	}
 	if errors.Is(migrationErr, schema.NoChange) {
 		logger.Info("[Migrate] database not change")
 	} else {

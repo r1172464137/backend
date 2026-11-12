@@ -10,6 +10,9 @@ import (
 	"github.com/Masterminds/sprig/v3"
 )
 
+// Proxy is the template-visible client view of a node. Fields are mapped one
+// by one from node.Protocol; server-only settings (REALITY target, private
+// keys, PROXY protocol, ACME) must never be added here (CONTRACT 5.5).
 type Proxy struct {
 	Sort    int
 	Name    string
@@ -22,28 +25,25 @@ type Proxy struct {
 	Network string
 
 	// Security Options
-	Security          string
-	SNI               string // Server Name Indication for TLS
-	ALPN              []string
-	AllowInsecure     bool   // Allow insecure connections (skip certificate verification)
-	Fingerprint       string // Client fingerprint for TLS connections
-	RealityServerAddr string // Reality server address
-	RealityServerPort int    // Reality server port
-	RealityPublicKey  string // Reality public key for authentication
-	RealityShortId    string // Reality short ID for authentication
+	Security         string
+	SNI              string // Server Name Indication for TLS
+	ALPN             []string
+	AllowInsecure    bool   // Allow insecure connections (skip certificate verification)
+	Fingerprint      string // Client fingerprint for TLS connections
+	RealityPublicKey string // Reality public key for authentication
+	RealityShortId   string // Reality short ID for authentication
 	// Transport Options
 	Transport   string // Transport protocol (e.g., ws, http, grpc)
 	Host        string // For WebSocket/HTTP/HTTPS
 	Path        string // For HTTP/HTTPS
 	ServiceName string // For gRPC
 	// Shadowsocks Options
-	Method              string
-	ServerKey           string // For Shadowsocks 2022
-	Plugin              string
-	PluginOptions       any
-	UoT                 bool // UDP over TCP
-	UoTVersion          int  // UoT version (1 or 2)
-	AcceptProxyProtocol bool
+	Method        string
+	ServerKey     string // For Shadowsocks 2022
+	Plugin        string
+	PluginOptions any
+	UoT           bool // UDP over TCP
+	UoTVersion    int  // UoT version (1 or 2)
 
 	// Vmess/Vless/Trojan Options
 	Flow string // Flow for Vmess/Vless/Trojan
@@ -93,11 +93,8 @@ type Proxy struct {
 	EchEnable     bool   // ECH enable
 	EchServerName string // ECH SNI
 
-	Ratio           float64 // Traffic ratio, default is 1
-	CertMode        string  // Certificate mode, `none`｜`http`｜`dns`｜`self`
-	CertDNSProvider string  // DNS provider for certificate
-	CertDNSEnv      string  // Environment for DNS provider
-	CertPinSHA256   string  // SHA256 fingerprint of the self-signed certificate (lowercase hex)
+	Ratio         float64 // Traffic ratio, default is 1
+	CertPinSHA256 string  // SHA256 fingerprint of the self-signed certificate (lowercase hex)
 }
 
 type User struct {

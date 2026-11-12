@@ -83,6 +83,8 @@ func registerAdminSystemRoutes(router *server.Hertz, deps Dependencies) {
 	group.PUT("/invite_config", adminSystem.UpdateInviteConfigHandler(deps.Platform))
 	group.GET("/node_config", adminSystem.GetNodeConfigHandler(deps.Platform))
 	group.PUT("/node_config", adminSystem.UpdateNodeConfigHandler(deps.Platform))
+	group.GET("/interface_config", adminSystem.GetInterfaceConfigHandler(deps.Platform))
+	group.PUT("/interface_config", adminSystem.UpdateInterfaceConfigHandler(deps.Platform))
 	group.GET("/node_multiplier/preview", adminSystem.PreViewNodeMultiplierHandler(deps.Platform))
 	group.GET("/privacy", adminSystem.GetPrivacyPolicyConfigHandler(deps.Platform))
 	group.PUT("/privacy", adminSystem.UpdatePrivacyPolicyConfigHandler(deps.Platform))

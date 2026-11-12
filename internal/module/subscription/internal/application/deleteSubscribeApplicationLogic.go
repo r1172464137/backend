@@ -6,7 +6,6 @@ import (
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
-	"github.com/pkg/errors"
 )
 
 type DeleteSubscribeApplicationLogic struct {
@@ -28,7 +27,7 @@ func (l *DeleteSubscribeApplicationLogic) DeleteSubscribeApplication(req *dto.De
 	err := l.deps.Clients.Delete(l.ctx, req.Id)
 	if err != nil {
 		l.Errorf("Failed to delete subscribe application with ID %d: %v", req.Id, err)
-		return errors.Wrap(xerr.NewErrCode(xerr.DatabaseDeletedError), err.Error())
+		return saveError(err, xerr.DatabaseDeletedError, err.Error())
 	}
 	return nil
 }

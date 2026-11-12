@@ -54,6 +54,8 @@ type Service interface {
 	GetSiteConfig(ctx context.Context) (*dto.SiteConfig, error)
 	GetSubscribeConfig(ctx context.Context) (*dto.SubscribeConfig, error)
 	GetTosConfig(ctx context.Context) (*dto.TosConfig, error)
+	GetInterfaceConfig(ctx context.Context) (*dto.InterfaceConfig, error)
+	UpdateInterfaceConfig(ctx context.Context, req *dto.InterfaceConfig) error
 	GetVerifyCodeConfig(ctx context.Context) (*dto.VerifyCodeConfig, error)
 	GetVerifyConfig(ctx context.Context) (*dto.VerifyConfig, error)
 	PreViewNodeMultiplier(ctx context.Context) (*dto.PreViewNodeMultiplierResponse, error)
@@ -302,6 +304,12 @@ func (s *service) GetSubscribeConfig(ctx context.Context) (*dto.SubscribeConfig,
 	return s.settings.GetSubscribeConfig(ctx)
 }
 
+func (s *service) GetInterfaceConfig(ctx context.Context) (*dto.InterfaceConfig, error) {
+	return s.settings.GetInterfaceConfig(ctx)
+}
+func (s *service) UpdateInterfaceConfig(ctx context.Context, req *dto.InterfaceConfig) error {
+	return s.settings.UpdateInterfaceConfig(ctx, req)
+}
 func (s *service) GetTosConfig(ctx context.Context) (*dto.TosConfig, error) {
 	return s.settings.GetTosConfig(ctx)
 }
