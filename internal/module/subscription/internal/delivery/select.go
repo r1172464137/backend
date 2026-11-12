@@ -88,12 +88,12 @@ func validateOutput(format string, body []byte) error {
 	}
 	switch format {
 	case "base64":
-		// Share URIs plus optional client header lines such as REMARKS= or
-		// STATUS= (used by the production Default template).
+		// Share URIs plus client header lines (REMARKS=, STATUS=) and #
+		// comments, as the production Default/Shadowrocket templates emit.
 		links := 0
 		for _, line := range strings.Split(string(text), "\n") {
 			switch line = strings.TrimSpace(line); {
-			case line == "" || headerLine.MatchString(line):
+			case line == "" || strings.HasPrefix(line, "#") || headerLine.MatchString(line):
 			case strings.Contains(line, "://"):
 				links++
 			default:

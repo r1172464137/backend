@@ -64,7 +64,7 @@ func isCode(err error, code uint32) bool {
 func TestValidateOutput(t *testing.T) {
 	b64 := func(s string) []byte { return []byte(base64.StdEncoding.EncodeToString([]byte(s))) }
 	good := map[string][]byte{
-		"base64": b64("REMARKS=自用面板\nSTATUS=ok\nvless://u@h:443?security=reality#a\ntrojan://p@h:443#b\n"),
+		"base64": b64("REMARKS=自用面板\nSTATUS=ok\n# Generated at: 2026-11-12 18:58:35\nvless://u@h:443?security=reality#a\ntrojan://p@h:443#b\n"),
 		"yaml":   []byte("proxies:\n  - name: a\n"),
 		"json":   []byte(`{"outbounds":[]}`),
 		"conf":   []byte("[Proxy]\na = trojan, h, 443\n"),
