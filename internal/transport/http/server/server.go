@@ -3,6 +3,8 @@ package httpserver
 import (
 	"context"
 	"crypto/tls"
+	"os"
+	"sync/atomic"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/common/config"
@@ -16,7 +18,8 @@ import (
 )
 
 type Server struct {
-	h *server.Hertz
+	h        *server.Hertz
+	stopping atomic.Bool
 }
 
 type Dependencies struct {
@@ -53,13 +56,24 @@ func newServer(deps Dependencies, opts []config.Option) *Server {
 	return &Server{h: engine}
 }
 
+// Start serves until Shutdown. A listener that fails (bind error, or the
+// netpoll transport's panic) outside Shutdown ends the process so the
+// supervisor sees it instead of a panel without an API (90156b8d).
 func (s *Server) Start() {
-	if err := s.h.Run(); err != nil {
-		logger.Errorf("server start error: %s", err.Error())
+	defer func() {
+		if r := recover(); r != nil && !s.stopping.Load() {
+			logger.Errorf("server listener failed: %v", r)
+			os.Exit(1)
+		}
+	}()
+	if err := s.h.Run(); err != nil && !s.stopping.Load() {
+		logger.Errorf("server listener failed: %s", err.Error())
+		os.Exit(1)
 	}
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.stopping.Store(true)
 	return s.h.Shutdown(ctx)
 }
 

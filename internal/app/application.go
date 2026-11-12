@@ -3,7 +3,7 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
+	"github.com/perfect-panel/server/pkg/logger"
 
 	"github.com/hibiken/asynq"
 	"github.com/perfect-panel/server/internal/app/state"
@@ -76,10 +76,11 @@ func newApplication(ctx context.Context, c config.Config, retry RetryPolicy) (*A
 	}
 
 	// IP location initialize
+	// GeoIP only enriches logs and lookups; without it the panel still runs (90156b8d).
 	geoIP, err := geoip.NewIPLocation("./cache/GeoLite2-City.mmdb")
 	if err != nil {
-		closeDB()
-		return nil, fmt.Errorf("geoip: %w", err)
+		logger.Errorf("[GeoIP] unavailable, continuing without geolocation: %v", err)
+		geoIP = nil
 	}
 
 	rds := redis.NewClient(&redis.Options{
