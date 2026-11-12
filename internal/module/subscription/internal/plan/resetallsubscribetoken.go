@@ -41,7 +41,7 @@ func (l *ResetAllSubscribeTokenLogic) ResetAllSubscribeToken() (resp *dto.ResetA
 		}
 		for _, sub := range list {
 			sub.Token = usersub.TokenFromOrder(strconv.FormatInt(timeutil.Now().UnixMilli(), 10) + strconv.FormatInt(sub.Id, 10))
-			sub.UUID = uuid.NewV7().String()
+			sub.UUID = uuid.NewV4().String()
 			if updateErr := store.UserSubscription().UpdateSubscribe(l.ctx, sub); updateErr != nil {
 				logger.Errorf("[ResetAllSubscribeToken] Failed to update subscribe token for ID %d: %v", sub.Id, updateErr.Error())
 				return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseUpdateError), "Failed to update subscribe token for ID %d: %v", sub.Id, updateErr.Error())

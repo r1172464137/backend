@@ -73,8 +73,16 @@ func (m Mysql) Dsn() string {
 	}
 }
 
+// MigrationDsn URL-escapes MySQL credentials: golang-migrate's mysql driver
+// unescapes them, so a password with %, + or @ would change (9ce3bf78).
 func (m Mysql) MigrationDsn() string {
-	return m.Dsn()
+	if m.Driver() != DriverMySQL {
+		return m.Dsn()
+	}
+	escaped := m
+	escaped.Config.Username = url.QueryEscape(m.Config.Username)
+	escaped.Config.Password = url.QueryEscape(m.Config.Password)
+	return escaped.mysqlDsn()
 }
 
 func (m Mysql) mysqlDsn() string {

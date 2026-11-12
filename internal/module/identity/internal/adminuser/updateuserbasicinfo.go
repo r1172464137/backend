@@ -54,6 +54,12 @@ func (l *UpdateUserBasicInfoLogic) UpdateUserBasicInfo(req *dto.UpdateUserBasice
 		userInfo.RefererId = req.RefererId
 		userInfo.OnlyFirstPurchase = &req.OnlyFirstPurchase
 		userInfo.ReferralPercentage = req.ReferralPercentage
+		// Checked on the locked row so two edits cannot each count the other.
+		if isEnabledAdministrator(userInfo) && (!req.IsAdmin || !req.Enable) {
+			if err := ensureAnotherAdministrator(l.ctx, store.User(), userInfo.Id); err != nil {
+				return err
+			}
+		}
 		accessStateChanged = userInfo.Enable == nil || *userInfo.Enable != req.Enable
 		userInfo.Enable = &req.Enable
 		userInfo.IsAdmin = &req.IsAdmin

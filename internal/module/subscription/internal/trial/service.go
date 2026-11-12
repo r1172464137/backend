@@ -78,7 +78,7 @@ func (s *Service) GrantTrial(ctx context.Context, userID int64) error {
 				ExpireTime:  timeutil.AddTime(policy.TimeUnit, policy.Duration, now),
 				Traffic:     plan.Traffic,
 				Token:       usersub.TokenFromOrder(fmt.Sprintf("Trial-%v-%s", userID, uuid.NewV7().String())),
-				UUID:        uuid.NewV7().String(),
+				UUID:        uuid.NewV4().String(),
 				Status:      usersub.SubscribeStatusActive,
 			}
 			if err := store.UserSubscription().InsertSubscribe(ctx, granted); err != nil {

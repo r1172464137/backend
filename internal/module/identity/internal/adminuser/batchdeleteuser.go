@@ -33,6 +33,9 @@ func (l *BatchDeleteUserLogic) BatchDeleteUser(req *dto.BatchDeleteUserRequest) 
 		return errors.Wrapf(xerr.NewErrCodeMsg(503, "Demo mode does not allow deletion of the admin user"), "BatchDeleteUser failed: cannot delete admin user in demo mode")
 	}
 
+	if err := ensureAnotherAdministrator(l.ctx, l.deps.Users, req.Ids...); err != nil {
+		return err
+	}
 	err := l.deps.Users.BatchDeleteUser(l.ctx, req.Ids)
 	if err != nil {
 		l.Logger.Error("[BatchDeleteUserLogic] BatchDeleteUser failed: ", logger.Field("error", err.Error()))

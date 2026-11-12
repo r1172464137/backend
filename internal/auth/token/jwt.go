@@ -37,7 +37,7 @@ func NewJwtToken(secretKey string, iat, seconds int64, opt ...Option) (string, e
 func ParseJwtToken(tokenString, secretKey string) (jwt.MapClaims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return []byte(secretKey), nil
-	})
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired())
 	if err != nil {
 		return nil, err
 	}

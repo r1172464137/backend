@@ -31,6 +31,9 @@ func (l *DeleteUserLogic) DeleteUser(req *dto.GetDetailRequest) error {
 	if req.Id == 2 && isDemo {
 		return errors.Wrapf(xerr.NewErrCodeMsg(503, "Demo mode does not allow deletion of the admin user"), "delete user failed: cannot delete admin user in demo mode")
 	}
+	if err := ensureAnotherAdministrator(l.ctx, l.deps.Users, req.Id); err != nil {
+		return err
+	}
 	err := l.deps.Users.Delete(l.ctx, req.Id)
 	if err != nil {
 		return errors.Wrapf(xerr.NewErrCode(xerr.DatabaseDeletedError), "delete user error: %v", err.Error())
