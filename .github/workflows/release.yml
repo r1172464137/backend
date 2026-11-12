@@ -129,12 +129,15 @@ jobs:
           set -euo pipefail
           cp script/install.sh build/release/install.sh
           cd build/release
-          sha256sum -- *.tar.gz *.zip install.sh > SHA256SUMS
+          # .zip archives come only from the windows builds, which may be off.
+          shopt -s nullglob
+          archives=(*.tar.gz *.zip)
+          sha256sum -- "${archives[@]}" install.sh > SHA256SUMS
           sha256sum -c SHA256SUMS
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" --generate-notes
           fi
-          gh release upload "$TAG" ./*.tar.gz ./*.zip install.sh SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" "${archives[@]}" install.sh SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
           prerelease=false
           [[ $CHANNEL != beta ]] || prerelease=true
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease="$prerelease"
