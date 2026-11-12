@@ -195,6 +195,10 @@ func (m *nodeRepo) DeleteServer(ctx context.Context, id int64, tx ...*gorm.DB) e
 	if len(tx) > 0 {
 		db = tx[0]
 	}
+	// Nodes have no foreign key; left behind they break every render (886be78b).
+	if err := db.WithContext(ctx).Where("server_id = ?", id).Delete(&node.Node{}).Error; err != nil {
+		return err
+	}
 	return db.WithContext(ctx).Where("id = ?", id).Delete(&node.Server{}).Error
 }
 

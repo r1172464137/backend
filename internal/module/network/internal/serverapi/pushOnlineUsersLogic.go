@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	dto "github.com/perfect-panel/server/internal/module/network/contract"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
@@ -32,10 +33,16 @@ func (l *PushOnlineUsersLogic) PushOnlineUsers(req *dto.OnlineUsersRequest) erro
 	}
 
 	// 验证用户数据
-	for _, user := range req.Users {
-		if user.SID <= 0 || user.IP == "" {
-			return fmt.Errorf("invalid user data: uid=%d, ip=%s", user.SID, user.IP)
+	// Bounds from upstream 886be78b: entries per report, IP syntax, IPs per SID.
+	if len(req.Users) > 10000 {
+		return fmt.Errorf("too many online users in one report: %d", len(req.Users))
+	}
+	for i, user := range req.Users {
+		ip := net.ParseIP(user.IP)
+		if user.SID <= 0 || ip == nil {
+			return fmt.Errorf("invalid user data: uid=%d, ip=%.45q", user.SID, user.IP)
 		}
+		req.Users[i].IP = ip.String()
 	}
 
 	// Find server info
@@ -48,6 +55,9 @@ func (l *PushOnlineUsersLogic) PushOnlineUsers(req *dto.OnlineUsersRequest) erro
 	onlineUsers := make(node.OnlineUserSubscribe)
 	for _, user := range req.Users {
 		if online, ok := onlineUsers[user.SID]; ok {
+			if len(online) >= 64 {
+				continue
+			}
 			// If user already exists, update IP if different
 			online = append(online, user.IP)
 			onlineUsers[user.SID] = online

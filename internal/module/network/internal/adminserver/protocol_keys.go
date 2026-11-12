@@ -1,9 +1,9 @@
 package adminserver
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"strings"
-	"uuid"
 
 	"github.com/perfect-panel/server/internal/infra/protocolkey"
 	"github.com/perfect-panel/server/internal/module/network/entity/node"
@@ -109,7 +109,7 @@ func ensureGeneratedProtocolKey(protocol *node.Protocol, existing map[string]str
 		protocol.ServerKey = key
 		return
 	}
-	protocol.ServerKey = protocolkey.GenerateCipher(uuid.NewV7().String(), generatedServerKeyLength)
+	protocol.ServerKey = protocolkey.GenerateCipher(rand.Text(), generatedServerKeyLength) // random, not time-ordered (886be78b)
 }
 
 func ensureShadowsocks2022ServerKey(protocol *node.Protocol, existing map[string]string) {
