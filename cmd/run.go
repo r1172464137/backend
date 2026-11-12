@@ -58,14 +58,24 @@ func run() {
 	defer stop()
 	services, err := getServers(ctx)
 	if err != nil {
+		stop()
+		if ctx.Err() != nil {
+			// A stop signal arrived while waiting for dependencies: this is
+			// a requested shutdown, not a startup failure.
+			logger.Infof("[startup] stopped before startup completed: %v", err)
+			fmt.Fprintf(os.Stderr, "PPanel stopped before startup completed: %v\n", err)
+			os.Exit(0)
+		}
 		logger.Errorf("[startup] %v", err)
 		fmt.Fprintf(os.Stderr, "PPanel startup failed: %v\n", err)
-		stop()
 		os.Exit(1)
 	}
-	defer services.Stop()
 	go services.Start()
 	<-ctx.Done()
+	// Restore default signal handling so a second signal force-quits while
+	// the graceful shutdown below is in progress.
+	stop()
+	services.Stop()
 }
 func getServers(startCtx context.Context) (*lifecycle.Group, error) {
 	var c config.Config
