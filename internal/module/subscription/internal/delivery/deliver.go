@@ -51,6 +51,12 @@ func newSubscribeLogic(ctx context.Context, deps Deps, request RequestMeta) *Sub
 }
 
 func (l *SubscribeLogic) Handler(req *dto.SubscribeRequest) (resp *dto.SubscribeResponse, err error) {
+	if !acceptableToken(req.Token) {
+		return nil, errors.Wrap(xerr.NewErrCode(xerr.ErrorTokenInvalid), "subscribe token invalid")
+	}
+	if err := l.admitFetch(); err != nil {
+		return nil, err
+	}
 	// query client list
 	clients, err := l.deps.Clients.List(l.ctx)
 	if err != nil {
@@ -74,6 +80,10 @@ func (l *SubscribeLogic) Handler(req *dto.SubscribeRequest) (resp *dto.Subscribe
 
 	// find subscribe info
 	subscribeInfo, err := l.deps.Plans.FindOne(l.ctx, userSubscribe.SubscribeId)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Ended subscriptions may point at a deleted plan: notice, not 500.
+		subscribeInfo, err = nil, nil
+	}
 	if err != nil {
 		l.Errorw("[SubscribeLogic] Find subscribe info failed", logger.Field("error", err.Error()), logger.Field("subscribeId", userSubscribe.SubscribeId))
 		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Find subscribe info failed: %v", err.Error())
@@ -98,7 +108,7 @@ func (l *SubscribeLogic) Handler(req *dto.SubscribeRequest) (resp *dto.Subscribe
 		targetApp.SubscribeTemplate,
 		render.WithServers(servers),
 		render.WithSiteName(l.cfg.SiteName),
-		render.WithSubscribeName(subscribeInfo.Name),
+		render.WithSubscribeName(planName(subscribeInfo)),
 		render.WithOutputFormat(targetApp.OutputFormat),
 		render.WithUserInfo(render.User{
 			ID:           userSubscribe.Id,
@@ -248,7 +258,17 @@ func (l *SubscribeLogic) logSubscribeActivity(userSub *usersub.Subscribe) error 
 	return nil
 }
 
+func planName(plan *subscribe.Subscribe) string {
+	if plan == nil {
+		return ""
+	}
+	return plan.Name
+}
+
 func (l *SubscribeLogic) getServers(userSub *usersub.Subscribe, subDetails *subscribe.Subscribe) ([]*node.Node, error) {
+	if subDetails == nil {
+		return l.createNoticeServers("套餐已删除 / Plan Removed"), nil
+	}
 	if l.isSubscriptionExpired(userSub) {
 		return l.createNoticeServers("订阅已过期 / Subscribe Expired"), nil
 	}

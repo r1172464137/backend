@@ -26,6 +26,8 @@ type Deps struct {
 	Users repository.UserRepo
 	Nodes repository.NodeRepo
 	Logs  repository.LogRepo
+	// Limiter bounds fetches per client address; nil admits every fetch.
+	Limiter FetchLimiter
 	// ConfigSnapshot reads the current delivery configuration.
 	ConfigSnapshot func() Config
 }

@@ -143,6 +143,8 @@ func subscribeErrorStatus(err error) (int, string) {
 		return consts.StatusNotFound, "Subscription not found"
 	case xerr.UserDisabled, xerr.UserNotExist:
 		return consts.StatusForbidden, "Access denied"
+	case xerr.TooManyRequests:
+		return consts.StatusTooManyRequests, "Too Many Requests"
 	case xerr.InvalidParams:
 		return consts.StatusBadRequest, code.GetErrMsg()
 	default:

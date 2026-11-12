@@ -15,6 +15,7 @@ import (
 	"github.com/perfect-panel/server/pkg/timeutil"
 	"github.com/perfect-panel/server/pkg/xerr"
 	"github.com/pkg/errors"
+	"gorm.io/gorm"
 )
 
 type QueryUserSubscribeNodeListLogic struct {
@@ -108,6 +109,9 @@ func (l *QueryUserSubscribeNodeListLogic) getServers(userSub *usersub.Subscribe,
 
 	if subDetails == nil {
 		subDetails, err = l.deps.Plans.FindOne(l.ctx, userSub.SubscribeId)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return userSubscribeNodes, nil // plan deleted: no nodes left
+		}
 		if err != nil {
 			l.Errorw("[Generate Subscribe]find subscribe details error: %v", logger.Field("error", err.Error()))
 			return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "find subscribe details error: %v", err.Error())

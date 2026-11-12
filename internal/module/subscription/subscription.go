@@ -5,6 +5,8 @@ package subscription
 
 import (
 	"context"
+	"github.com/perfect-panel/server/internal/auth/ratelimit"
+	"github.com/redis/go-redis/v9"
 
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
 	"github.com/perfect-panel/server/internal/module/subscription/internal/application"
@@ -112,6 +114,11 @@ type SubscriptionTransactor = plan.SubscriptionTransactor
 
 // Deps declares everything the module needs; the composition root
 // (internal/app) provides them.
+// NewDeliveryLimiter is the per-client-address subscription fetch limiter.
+func NewDeliveryLimiter(rds *redis.Client) delivery.FetchLimiter {
+	return ratelimit.NewPeriodLimit(delivery.FetchRateWindowSec, delivery.FetchRateQuota, rds, delivery.FetchRateKeyPrefix)
+}
+
 type Deps struct {
 	Plans    repository.SubscribeRepo
 	UserSubs repository.UserSubscriptionRepo
@@ -128,6 +135,8 @@ type Deps struct {
 	Clients repository.ClientRepo
 	Users   repository.UserRepo
 	Logs    repository.LogRepo
+	// DeliveryLimiter bounds subscription fetches per client address.
+	DeliveryLimiter delivery.FetchLimiter
 	// DeliveryConfig reads the runtime-mutable delivery configuration.
 	DeliveryConfig func() DeliveryConfig
 
@@ -213,6 +222,7 @@ func New(deps Deps) Service {
 			Users:          deps.Users,
 			Nodes:          deps.Nodes,
 			Logs:           deps.Logs,
+			Limiter:        deps.DeliveryLimiter,
 			ConfigSnapshot: deps.DeliveryConfig,
 		}),
 		selfSubs: selfsub.NewService(selfsub.Deps{

@@ -25,11 +25,15 @@ func newDeleteSubscribeLogic(ctx context.Context, deps Deps) *DeleteSubscribeLog
 	}
 }
 
+// currentStatuses (pending, active, exhausted in term) may still be renewed,
+// reset or delivered from the plan, so they block its deletion (98365fb3).
+var currentStatuses = []int64{0, 1, 2}
+
 func (l *DeleteSubscribeLogic) DeleteSubscribe(req *dto.DeleteSubscribeRequest) error {
 	// Check if the subscribe exists
 	phase := "check"
 	err := l.deps.Store.InSubscriptionTx(l.ctx, func(store repository.SubscriptionStore) error {
-		total, err := store.UserSubscription().CountUserSubscribesBySubscribeIdAndStatus(l.ctx, req.Id, 1)
+		total, err := store.UserSubscription().CountUserSubscribesBySubscribeIdAndStatus(l.ctx, req.Id, currentStatuses...)
 		if err != nil {
 			return err
 		}

@@ -35,16 +35,17 @@ func newSubscriptionModule(store repository.Store, srv *Application) subscriptio
 			current := srv.Runtime.Config().Register
 			return current.EnableTrial && current.TrialSubscribe == planID
 		},
-		Clients:     store.Client(),
-		Users:       store.User(),
-		Logs:        store.Log(),
-		Devices:     store.UserDevice(),
-		Cache:       store.UserCache(),
-		Traffic:     store.TrafficLog(),
-		Orders:      store.Order(),
-		Inbox:       store.Inbox(),
-		Operations:  store,
-		SingleModel: func() bool { return srv.Runtime.Config().Subscribe.SingleModel },
+		Clients:         store.Client(),
+		DeliveryLimiter: subscription.NewDeliveryLimiter(srv.Redis),
+		Users:           store.User(),
+		Logs:            store.Log(),
+		Devices:         store.UserDevice(),
+		Cache:           store.UserCache(),
+		Traffic:         store.TrafficLog(),
+		Orders:          store.Order(),
+		Inbox:           store.Inbox(),
+		Operations:      store,
+		SingleModel:     func() bool { return srv.Runtime.Config().Subscribe.SingleModel },
 		TrialPolicy: func() subscription.TrialPolicy {
 			c := srv.Runtime.Config().Register
 			return subscription.TrialPolicy{
