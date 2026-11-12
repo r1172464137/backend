@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -14,6 +15,8 @@ import (
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v3"
 )
+
+var headerLine = regexp.MustCompile(`^[A-Z][A-Z_]*=`)
 
 var contentTypes = map[string]string{
 	"base64": "text/plain; charset=utf-8",
@@ -85,10 +88,20 @@ func validateOutput(format string, body []byte) error {
 	}
 	switch format {
 	case "base64":
+		// Share URIs plus optional client header lines such as REMARKS= or
+		// STATUS= (used by the production Default template).
+		links := 0
 		for _, line := range strings.Split(string(text), "\n") {
-			if line = strings.TrimSpace(line); line != "" && !strings.Contains(line, "://") {
+			switch line = strings.TrimSpace(line); {
+			case line == "" || headerLine.MatchString(line):
+			case strings.Contains(line, "://"):
+				links++
+			default:
 				return fmt.Errorf("line is not a share URI: %.40q", line)
 			}
+		}
+		if links == 0 {
+			return errors.New("no share URI")
 		}
 	case "yaml":
 		var doc map[string]any

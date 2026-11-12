@@ -64,7 +64,7 @@ func isCode(err error, code uint32) bool {
 func TestValidateOutput(t *testing.T) {
 	b64 := func(s string) []byte { return []byte(base64.StdEncoding.EncodeToString([]byte(s))) }
 	good := map[string][]byte{
-		"base64": b64("vless://u@h:443?security=reality#a\ntrojan://p@h:443#b\n"),
+		"base64": b64("REMARKS=自用面板\nSTATUS=ok\nvless://u@h:443?security=reality#a\ntrojan://p@h:443#b\n"),
 		"yaml":   []byte("proxies:\n  - name: a\n"),
 		"json":   []byte(`{"outbounds":[]}`),
 		"conf":   []byte("[Proxy]\na = trojan, h, 443\n"),
@@ -81,6 +81,8 @@ func TestValidateOutput(t *testing.T) {
 		{"not base64", "base64", []byte("vless://plain")},
 		{"not a share URI", "base64", b64("[Proxy]\na = trojan\n")},
 		{"empty", "base64", b64("\n")},
+		{"header only", "base64", b64("REMARKS=x\n")},
+		{"lowercase key", "base64", b64("remarks=x\nvless://u@h:1#a\n")},
 		{"list", "yaml", []byte("- a\n- b\n")},
 		{"template marker", "yaml", []byte("proxies: {{ .Proxies }}\n")},
 		{"array", "json", []byte(`[1]`)},
