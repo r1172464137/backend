@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/perfect-panel/ppanel-node/api/panel"
 	"github.com/perfect-panel/ppanel-node/core"
@@ -18,7 +19,6 @@ type request struct {
 	Kind     string          `json:"kind"`
 	Outbound panel.Outbound  `json:"outbound"`
 	Protocol panel.Protocol  `json:"protocol"`
-	DNS      *panel.DNSItem  `json:"dns"`
 	Policy   json.RawMessage `json:"policy"`
 	URI      string          `json:"uri"`
 }
@@ -53,12 +53,15 @@ func run(q request) (response result) {
 		}
 		return result{OK: true}
 	}
-	p := &panel.RoutingPolicy{Version: 1, Outbounds: []panel.Outbound{}, Rules: []panel.RouteRule{}, DefaultOutboundID: "direct", RoutingIdentity: panel.RoutingIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 1}}
+	identity := panel.RoutingIdentity{Mode: "inherited", Source: "global", SourceRevision: 1}
+	p := &panel.RoutingPolicy{Version: panel.RoutingVersion, Outbounds: []panel.Outbound{}, Rules: []panel.RouteRule{}, DefaultOutboundID: "direct",
+		UserDefaults: []panel.UserDefault{}, TargetIPPreference: "none", RoutingIdentity: identity,
+		DNS: &panel.DNSPolicy{QueryStrategy: "UseIP", Resolvers: []panel.DNSResolverPolicy{{ID: "dns_00000000-0000-4000-8000-000000000001", Protocol: "system", Domains: []string{}, OutboundID: "direct"}}}}
 	if q.Kind == "policy" {
 		if err := json.Unmarshal(q.Policy, p); err != nil {
 			return result{Error: err.Error()}
 		}
-		p.RoutingIdentity = panel.RoutingIdentity{Mode: "ordered-v1-inherited", Source: "global", SourceRevision: 1}
+		p.RoutingIdentity = identity
 	}
 	if q.Kind == "outbound" {
 		if q.Outbound.ID == "" {
@@ -70,11 +73,15 @@ func run(q request) (response result) {
 	if q.Kind == "inbound" {
 		protocols = append(protocols, q.Protocol)
 	}
-	server := &panel.ServerConfigResponse{Data: &panel.Data{Routing: p, Protocols: &protocols, Total: len(protocols)}}
-	if q.Kind == "dns" && q.DNS != nil {
-		dns := []panel.DNSItem{*q.DNS}
-		server.Data.DNS = &dns
+	snapshot := &panel.IdentitySnapshot{SnapshotID: strings.Repeat("a", 64), Protocols: []panel.ProtocolIdentity{}}
+	seen := map[string]bool{}
+	for _, proto := range protocols {
+		if !seen[proto.Type] {
+			seen[proto.Type] = true
+			snapshot.Protocols = append(snapshot.Protocols, panel.ProtocolIdentity{Protocol: proto.Type, Users: []panel.IdentityUser{}})
+		}
 	}
+	server := &panel.ServerConfigResponse{Data: &panel.Data{Routing: p, Protocols: &protocols, Total: len(protocols), IdentitySnapshot: snapshot}}
 	if err := core.ValidateServerConfig(server); err != nil {
 		return result{Error: err.Error()}
 	}
@@ -88,7 +95,7 @@ func run(q request) (response result) {
 		}
 		return result{OK: true}
 	}
-	built, err := outbound.Build(server, false)
+	built, err := outbound.Build(server, false, func(protocol string) string { return "proof-" + protocol })
 	if err != nil {
 		return result{Error: err.Error()}
 	}

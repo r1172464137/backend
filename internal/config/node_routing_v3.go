@@ -287,6 +287,11 @@ func normalizeDNSPolicy(input *NodeDNSPolicy, customOutbounds map[string]struct{
 				}
 				res.BootstrapIP = net.ParseIP(res.BootstrapIP).String()
 			}
+			if !isIP && res.BootstrapIP == "" && res.OutboundID == RoutingDirect {
+				// The node would need this policy (possibly this resolver) to
+				// resolve the resolver's own name; it never uses system DNS.
+				return nil, errorsWithField(field+".bootstrap_ip", "a direct resolver given by host name needs bootstrap_ip")
+			}
 			if !isIP {
 				h := strings.ToLower(host)
 				hosts = append(hosts, hostRef{h, res.BootstrapIP, field})
