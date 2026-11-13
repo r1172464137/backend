@@ -28,6 +28,7 @@ func newGetUserListLogic(ctx context.Context, deps Deps) *GetUserListLogic {
 func (l *GetUserListLogic) GetUserList(req *dto.GetUserListRequest) (*dto.GetUserListResponse, error) {
 	list, total, err := l.deps.Users.QueryPageList(l.ctx, req.Page, req.Size, &user.UserFilterParams{
 		UserId:             req.UserId,
+		Ids:                req.Ids,
 		Search:             req.Search,
 		Unscoped:           req.Unscoped,
 		SubscribeId:        req.SubscribeId,

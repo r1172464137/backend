@@ -87,6 +87,7 @@ type UserSubscriptionRepo interface {
 	QueryActiveSubscriptions(ctx context.Context, subscribeId ...int64) (map[int64]int64, error)
 	QueryUserSubscribe(ctx context.Context, userId int64, status ...int64) ([]*usersub.SubscribeDetails, error)
 	FindOneSubscribeDetailsById(ctx context.Context, id int64) (*usersub.SubscribeDetails, error)
+	FindSubscribeDetailsByIds(ctx context.Context, ids []int64) ([]*usersub.SubscribeDetails, error)
 	FindOneUserSubscribe(ctx context.Context, id int64) (*usersub.SubscribeDetails, error)
 	FindTrafficExceededSubscribes(ctx context.Context) ([]*usersub.Subscribe, error)
 	FindExpiredSubscribes(ctx context.Context, now time.Time) ([]*usersub.Subscribe, error)

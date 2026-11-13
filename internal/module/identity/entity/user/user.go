@@ -100,6 +100,7 @@ type LoginLogFilterParams struct {
 type UserFilterParams struct {
 	Search             string
 	UserId             *int64
+	Ids                []int64
 	SubscribeId        *int64
 	UserSubscribeId    *int64
 	UserSubscribeToken string

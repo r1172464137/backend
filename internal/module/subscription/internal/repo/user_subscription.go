@@ -770,6 +770,19 @@ func (m *UserSubscriptionRepo) FindSubscribesByIds(ctx context.Context, ids []in
 	return subscribes, err
 }
 
+// FindSubscribeDetailsByIds batch-loads subscriptions with their plan for
+// admin list cells.
+func (m *UserSubscriptionRepo) FindSubscribeDetailsByIds(ctx context.Context, ids []int64) ([]*usersub.SubscribeDetails, error) {
+	var list []*usersub.SubscribeDetails
+	if len(ids) == 0 {
+		return list, nil
+	}
+	err := m.QueryNoCacheCtx(ctx, &list, func(conn *gorm.DB, v interface{}) error {
+		return conn.Model(&usersub.Subscribe{}).Preload("Subscribe").Where("id IN ?", ids).Find(&list).Error
+	})
+	return list, err
+}
+
 func (m *UserSubscriptionRepo) FindOneSubscribeDetailsById(ctx context.Context, id int64) (*usersub.SubscribeDetails, error) {
 	var data usersub.SubscribeDetails
 	err := m.QueryNoCacheCtx(ctx, &data, func(conn *gorm.DB, v interface{}) error {

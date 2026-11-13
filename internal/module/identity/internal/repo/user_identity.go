@@ -204,6 +204,9 @@ func applyUserPageFilters(conn *gorm.DB, filter *user.UserFilterParams, subIDs [
 	if filter.UserId != nil {
 		conn = conn.Where(userIdColumn+" = ?", *filter.UserId)
 	}
+	if len(filter.Ids) > 0 {
+		conn = conn.Where(userIdColumn+" IN ?", filter.Ids)
+	}
 	if filter.Search != "" {
 		search := orm.LikePrefixPattern(filter.Search)
 		if search != "" {

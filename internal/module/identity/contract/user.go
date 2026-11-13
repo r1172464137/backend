@@ -45,14 +45,15 @@ type GetUserAuthMethodResponse struct {
 }
 
 type GetUserListRequest struct {
-	Page               int    `form:"page" validate:"required,gt=0"`
-	Size               int    `form:"size" validate:"required,gt=0,lte=100"`
-	Search             string `form:"search,omitempty"`
-	UserId             *int64 `form:"user_id,omitempty"`
-	Unscoped           bool   `form:"unscoped,omitempty"`
-	SubscribeId        *int64 `form:"subscribe_id,omitempty"`
-	UserSubscribeId    *int64 `form:"user_subscribe_id,omitempty"`
-	UserSubscribeToken string `form:"user_subscribe_token,omitempty"`
+	Page               int     `form:"page" validate:"required,gt=0"`
+	Size               int     `form:"size" validate:"required,gt=0,lte=100"`
+	Search             string  `form:"search,omitempty"`
+	UserId             *int64  `form:"user_id,omitempty"`
+	Ids                []int64 `form:"ids,omitempty" validate:"omitempty,max=100" collectionFormat:"multi"`
+	Unscoped           bool    `form:"unscoped,omitempty"`
+	SubscribeId        *int64  `form:"subscribe_id,omitempty"`
+	UserSubscribeId    *int64  `form:"user_subscribe_id,omitempty"`
+	UserSubscribeToken string  `form:"user_subscribe_token,omitempty"`
 }
 
 type GetUserListResponse struct {

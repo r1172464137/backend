@@ -6618,6 +6618,16 @@
                 "summary": "Get user list",
                 "parameters": [
                     {
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                            "type": "integer"
+                        },
+                        "collectionFormat": "multi",
+                        "name": "ids",
+                        "in": "query"
+                    },
+                    {
                         "type": "integer",
                         "name": "page",
                         "in": "query",
@@ -6798,6 +6808,17 @@
                 ],
                 "summary": "Get user subcribe",
                 "parameters": [
+                    {
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                            "type": "integer"
+                        },
+                        "collectionFormat": "multi",
+                        "description": "Ids looks subscriptions up directly, in any status, instead of by user.",
+                        "name": "ids",
+                        "in": "query"
+                    },
                     {
                         "type": "integer",
                         "name": "page",

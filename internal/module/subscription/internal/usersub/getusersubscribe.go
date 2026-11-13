@@ -6,6 +6,7 @@ import (
 	"github.com/perfect-panel/server/internal/infra/mapping"
 	"github.com/perfect-panel/server/internal/infra/protocolkey"
 	dto "github.com/perfect-panel/server/internal/module/subscription/contract"
+	subEntity "github.com/perfect-panel/server/internal/module/subscription/entity/usersub"
 	"github.com/perfect-panel/server/pkg/logger"
 	"github.com/perfect-panel/server/pkg/xerr"
 	"github.com/pkg/errors"
@@ -27,7 +28,12 @@ func newGetUserSubscribeLogic(ctx context.Context, deps Deps) *GetUserSubscribeL
 }
 
 func (l *GetUserSubscribeLogic) GetUserSubscribe(req *dto.GetUserSubscribeListRequest) (resp *dto.GetUserSubscribeListResponse, err error) {
-	data, err := l.deps.UserSubs.QueryUserSubscribe(l.ctx, req.UserId, 0, 1, 2, 3, 4, 5)
+	var data []*subEntity.SubscribeDetails
+	if len(req.Ids) > 0 {
+		data, err = l.deps.UserSubs.FindSubscribeDetailsByIds(l.ctx, req.Ids)
+	} else {
+		data, err = l.deps.UserSubs.QueryUserSubscribe(l.ctx, req.UserId, 0, 1, 2, 3, 4, 5)
+	}
 	if err != nil {
 		l.Errorw("[GetUserSubscribeLogs] Get User Subscribe Error:", logger.Field("err", err.Error()))
 		return nil, errors.Wrapf(xerr.NewErrCode(xerr.DatabaseQueryError), "Get User Subscribe Error")

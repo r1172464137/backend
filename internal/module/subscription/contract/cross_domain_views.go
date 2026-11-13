@@ -33,6 +33,8 @@ type GetUserSubscribeListRequest struct {
 	Page   int   `form:"page" validate:"required,gt=0"`
 	Size   int   `form:"size" validate:"required,gt=0,lte=100"`
 	UserId int64 `form:"user_id"`
+	// Ids looks subscriptions up directly, in any status, instead of by user.
+	Ids []int64 `form:"ids,omitempty" validate:"omitempty,max=100" collectionFormat:"multi"`
 }
 
 type GetUserSubscribeListResponse struct {

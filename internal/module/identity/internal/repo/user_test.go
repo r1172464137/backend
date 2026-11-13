@@ -270,6 +270,29 @@ func TestApplyUserPageFiltersEmptySubscriptionMatchExcludesAll(t *testing.T) {
 	}
 }
 
+// TestApplyUserPageFiltersIds pins the batch lookup used by the admin user
+// cells: ids become one IN condition on the user id.
+func TestApplyUserPageFiltersIds(t *testing.T) {
+	db, err := gorm.Open(mysql.New(mysql.Config{
+		DSN:                       "gorm:gorm@tcp(localhost:9910)/gorm?charset=utf8&parseTime=True&loc=Local",
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{
+		DryRun:               true,
+		DisableAutomaticPing: true,
+	})
+	if err != nil {
+		t.Fatalf("open gorm db: %v", err)
+	}
+
+	var result []user.User
+	stmt := applyUserPageFilters(db.Model(&user.User{}), &user.UserFilterParams{
+		Ids: []int64{3, 7},
+	}, nil, false).Find(&result).Statement
+	if sql := stmt.SQL.String(); !strings.Contains(sql, "IN (?,?)") {
+		t.Fatalf("ids must filter by id IN:\n%s", sql)
+	}
+}
+
 func TestNormalizePage(t *testing.T) {
 	tests := []struct {
 		name     string
